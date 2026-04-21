@@ -60,7 +60,7 @@ export function NavUser() {
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuGroup>
-          <DropdownMenuItem variant="destructive" className="cursor-pointer">
+          <DropdownMenuItem className="cursor-pointer text-destructive focus:bg-destructive/10 focus:text-destructive">
             <LogOut /> Log out
           </DropdownMenuItem>
         </DropdownMenuGroup>
