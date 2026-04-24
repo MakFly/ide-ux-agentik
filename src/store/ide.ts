@@ -1,8 +1,11 @@
 import { useMemo } from "react";
 import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
 import { toast } from "sonner";
 import { providerFor, FsError, type FsEntry } from "@/lib/fs";
 import { computeStatus, type GitStatusMap } from "@/lib/git/status";
+import { persistence } from "@/lib/persistence/client";
+import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 
 export type BranchStatus = "active" | "warn" | "loading" | "dot" | "none";
 
@@ -304,6 +307,7 @@ type State = {
   updateFileContent: (tabId: `file:${string}`, content: string) => void;
 
   getWorkspaceIdForBranch: (branchId: string) => string | undefined;
+  hydrateSessionsFromDb: () => Promise<void>;
 };
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -711,7 +715,9 @@ function buildInitialTasksByWorktreeId(): Record<string, WorkTask[]> {
   return result;
 }
 
-export const useIDE = create<State>((set, get) => ({
+export const useIDE = create<State>()(
+  persist<State>(
+    (set, get) => ({
   workspaces: initialWorkspaces,
   activeWorkspaceId: "ws-sc",
   activeBranchId: "b1",
@@ -1018,6 +1024,61 @@ export const useIDE = create<State>((set, get) => ({
       if (branches.some((b) => b.id === branchId)) return wsId;
     }
     return undefined;
+  },
+
+  hydrateSessionsFromDb: async () => {
+    const MAX_ATTEMPTS = 10;
+    const RETRY_MS = 2000;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const { workspaces } = get();
+      const remoteWorkspaces = workspaces.filter((w) => w.source.kind === "remote-agent");
+      if (remoteWorkspaces.length === 0) return;
+
+      let anySuccess = false;
+      for (const ws of remoteWorkspaces) {
+        if (ws.source.kind !== "remote-agent") continue;
+        try {
+          const provider = new RemoteAgentProvider(
+            ws.source.label,
+            ws.source.url,
+            ws.source.token,
+          );
+          await provider.connect();
+          const sessions = await persistence.sessions.list(provider, ws.id);
+          if (sessions.length === 0) {
+            anySuccess = true;
+            continue;
+          }
+          const workspaceTerminals = sessions.map((s) => ({
+            id: s.id,
+            kind: (s.cli as import("@/store/ide").TerminalKind) ?? "codex",
+            title: s.title ?? s.cli,
+            status: (s.status === "busy" ? "busy" : "idle") as "ready" | "busy" | "idle",
+            workspaceId: ws.id,
+            lastCommand: s.cli,
+          }));
+          set((cur) => ({
+            sessionsByWorkspaceId: {
+              ...cur.sessionsByWorkspaceId,
+              [ws.id]: workspaceTerminals,
+            },
+          }));
+          anySuccess = true;
+        } catch (e) {
+          if (attempt === MAX_ATTEMPTS) {
+            console.warn(`[store] hydrateSessionsFromDb: failed for workspace ${ws.id} after ${MAX_ATTEMPTS} attempts`, e);
+          } else {
+            console.log(`[store] hydrateSessionsFromDb: attempt ${attempt}/${MAX_ATTEMPTS} failed for ${ws.id}, retrying in ${RETRY_MS}ms`);
+          }
+        }
+      }
+
+      if (anySuccess) return;
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise<void>((resolve) => setTimeout(resolve, RETRY_MS));
+      }
+    }
   },
 
   setActiveWorkspace: (id) => {
@@ -1790,7 +1851,31 @@ export const useIDE = create<State>((set, get) => ({
         activeTabByScope: { ...s.activeTabByScope, [key]: next },
       };
     }),
-}));
+    }),
+    {
+      name: "ide-ux-agentik",
+      storage: createJSONStorage(() => localStorage),
+      version: 1,
+      migrate: (_persistedState, _version) => _persistedState as State,
+      partialize: (state) => ({
+        workspaces: state.workspaces,
+        activeWorkspaceId: state.activeWorkspaceId,
+        activeBranchIdByWorkspaceId: state.activeBranchIdByWorkspaceId,
+        activeSessionIdByWorkspaceId: state.activeSessionIdByWorkspaceId,
+        pinnedSessionIdsByWorkspaceId: state.pinnedSessionIdsByWorkspaceId,
+        selectedModelByCli: state.selectedModelByCli,
+        approvalModeByCli: state.approvalModeByCli,
+      }) as State,
+      onRehydrateStorage: () => (_state, error) => {
+        if (error) {
+          console.warn("[store] rehydration error:", error);
+          return;
+        }
+        void useIDE.getState().hydrateSessionsFromDb();
+      },
+    },
+  ),
+);
 
 // ─── Derived-scope hooks ──────────────────────────────────────────────────────
 

@@ -25,6 +25,8 @@ import fs from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
+import { openDb, closeDb, sessionsRepo, messagesRepo, snapshotsRepo, summariesRepo, blobsRepo } from "./persistence/db.js";
+import { importCodexRollouts } from "./persistence/import-codex.js";
 
 // node-pty provides a real PTY. Required for interactive CLIs (codex, claude, vim).
 // The agent runs under Node because Bun's spawn path breaks PTY IO for some CLIs.
@@ -102,6 +104,10 @@ function parseArgs(): ServerOpts {
 }
 
 const { root, port, token, host } = parseArgs();
+
+// Init SQLite persistence layer eagerly so DDL runs before first connection.
+openDb();
+importCodexRollouts().catch((e) => console.warn("[persistence] importCodexRollouts error:", e));
 
 function safeResolve(p: string): string {
   const clean = p.replace(/^\/+/, "").replace(/\.\./g, "");
@@ -542,6 +548,121 @@ const methods: Record<string, Handler> = {
     return { patch: stdout };
   },
 
+  // ─── Persistence RPC ──────────────────────────────────────────────────────
+
+  async "sessions.list"({ workspaceId }) {
+    const id = String(workspaceId ?? "").trim();
+    if (!id) throw new Error("sessions.list: workspaceId is required");
+    return sessionsRepo.list(id);
+  },
+
+  async "sessions.create"({ workspaceId, cli, title, model, approvalMode }) {
+    const wid = String(workspaceId ?? "").trim();
+    const c = String(cli ?? "").trim();
+    if (!wid) throw new Error("sessions.create: workspaceId is required");
+    if (!c) throw new Error("sessions.create: cli is required");
+    return sessionsRepo.create({
+      workspaceId: wid,
+      cli: c,
+      title: title !== undefined ? String(title) : undefined,
+      model: model !== undefined ? String(model) : undefined,
+      approvalMode: approvalMode !== undefined ? String(approvalMode) : undefined,
+    });
+  },
+
+  async "sessions.update"({ id, patch }) {
+    const sid = String(id ?? "").trim();
+    if (!sid) throw new Error("sessions.update: id is required");
+    if (!patch || typeof patch !== "object") throw new Error("sessions.update: patch is required");
+    const p = patch as Record<string, unknown>;
+    const result = sessionsRepo.update(sid, {
+      title: p.title !== undefined ? String(p.title) : undefined,
+      model: p.model !== undefined ? String(p.model) : undefined,
+      approval_mode: p.approval_mode !== undefined ? String(p.approval_mode) : undefined,
+      status: p.status !== undefined ? String(p.status) : undefined,
+    });
+    if (!result) throw new Error(`sessions.update: session not found: ${sid}`);
+    return result;
+  },
+
+  async "sessions.delete"({ id }) {
+    const sid = String(id ?? "").trim();
+    if (!sid) throw new Error("sessions.delete: id is required");
+    sessionsRepo.delete(sid);
+    return { ok: true };
+  },
+
+  async "messages.list"({ sessionId, limit, beforeTs }) {
+    const sid = String(sessionId ?? "").trim();
+    if (!sid) throw new Error("messages.list: sessionId is required");
+    return messagesRepo.list({
+      sessionId: sid,
+      limit: limit !== undefined ? Number(limit) : undefined,
+      beforeTs: beforeTs !== undefined ? Number(beforeTs) : undefined,
+    });
+  },
+
+  async "messages.append"({
+    sessionId, role, parts, parentId, logicalParentId, isSidechain,
+    cwd, gitBranch, slug, version,
+  }) {
+    const sid = String(sessionId ?? "").trim();
+    const r = String(role ?? "").trim();
+    if (!sid) throw new Error("messages.append: sessionId is required");
+    if (!r) throw new Error("messages.append: role is required");
+    if (!Array.isArray(parts)) throw new Error("messages.append: parts must be an array");
+    return messagesRepo.appendSync({
+      sessionId: sid,
+      role: r,
+      parts: parts as unknown[],
+      parentId: parentId !== undefined ? String(parentId) : undefined,
+      logicalParentId: logicalParentId !== undefined ? String(logicalParentId) : undefined,
+      isSidechain: Boolean(isSidechain),
+      cwd: cwd !== undefined ? String(cwd) : undefined,
+      gitBranch: gitBranch !== undefined ? String(gitBranch) : undefined,
+      slug: slug !== undefined ? String(slug) : undefined,
+      version: version !== undefined ? String(version) : undefined,
+    });
+  },
+
+  async "snapshots.add"({ sessionId, messageId, path: snapshotPath, contentBefore, contentAfter }) {
+    const sid = String(sessionId ?? "").trim();
+    const p = String(snapshotPath ?? "").trim();
+    if (!sid) throw new Error("snapshots.add: sessionId is required");
+    if (!p) throw new Error("snapshots.add: path is required");
+    return snapshotsRepo.add({
+      sessionId: sid,
+      messageId: messageId !== undefined ? String(messageId) : undefined,
+      path: p,
+      contentBefore: contentBefore !== undefined ? String(contentBefore) : undefined,
+      contentAfter: contentAfter !== undefined ? String(contentAfter) : undefined,
+    });
+  },
+
+  async "snapshots.readBlob"({ hash }) {
+    const h = String(hash ?? "").trim();
+    if (!h) throw new Error("snapshots.readBlob: hash is required");
+    const buf = blobsRepo.read(h);
+    if (!buf) throw new Error(`snapshots.readBlob: blob not found: ${h}`);
+    return { hash: h, size: buf.byteLength, content: buf.toString("utf8") };
+  },
+
+  async "summaries.add"({ sessionId, leafUuid, text }) {
+    const sid = String(sessionId ?? "").trim();
+    const leaf = String(leafUuid ?? "").trim();
+    const t = String(text ?? "").trim();
+    if (!sid) throw new Error("summaries.add: sessionId is required");
+    if (!leaf) throw new Error("summaries.add: leafUuid is required");
+    if (!t) throw new Error("summaries.add: text is required");
+    return summariesRepo.add({ sessionId: sid, leafUuid: leaf, text: t });
+  },
+
+  async "summaries.list"({ sessionId }) {
+    const sid = String(sessionId ?? "").trim();
+    if (!sid) throw new Error("summaries.list: sessionId is required");
+    return summariesRepo.listBySession(sid);
+  },
+
   /**
    * One-shot non-interactive command. Captures stdout+stderr up to `timeoutMs`
    * (default 10s), then returns { exitCode, stdout, stderr }. Useful for
@@ -707,3 +828,10 @@ console.log(`[agent] connect from the webapp: wss://<public-host>:${port}  + tok
 if (process.env.AGENT_GENERATE_TOKEN) {
   console.log(`suggested token: ${randomUUID()}`);
 }
+
+function shutdown() {
+  closeDb();
+  process.exit(0);
+}
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);

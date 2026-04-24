@@ -211,7 +211,7 @@ export class RemoteAgentProvider implements FsProvider {
     }
   }
 
-  private call<T>(method: string, params?: unknown): Promise<T> {
+  call<T>(method: string, params?: unknown): Promise<T> {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new FsError("Agent not connected", "io"));
