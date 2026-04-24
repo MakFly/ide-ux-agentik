@@ -25,8 +25,16 @@ import fs from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import { openDb, closeDb, sessionsRepo, messagesRepo, snapshotsRepo, summariesRepo, blobsRepo } from "./persistence/db.js";
-import { importCodexRollouts } from "./persistence/import-codex.js";
+import {
+  openDb,
+  closeDb,
+  sessionsRepo,
+  messagesRepo,
+  snapshotsRepo,
+  summariesRepo,
+  blobsRepo,
+} from "./persistence/db.ts";
+import { importCodexRollouts } from "./persistence/import-codex.ts";
 
 // node-pty provides a real PTY. Required for interactive CLIs (codex, claude, vim).
 // The agent runs under Node because Bun's spawn path breaks PTY IO for some CLIs.
@@ -42,8 +50,17 @@ try {
  * OPENAI_API_KEY, etc.) are intentionally NOT in this list — clients must pass
  * them explicitly via the `env` param. */
 const SAFE_ENV_KEYS = [
-  "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
-  "LOGNAME", "PWD", "HOSTNAME",
+  "PATH",
+  "HOME",
+  "USER",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "SHELL",
+  "TMPDIR",
+  "LOGNAME",
+  "PWD",
+  "HOSTNAME",
 ] as const;
 
 function safeEnv(extra: Record<string, string> = {}): Record<string, string> {
@@ -217,7 +234,9 @@ const methods: Record<string, Handler> = {
         path: path.posix.join(String(p ?? "").replace(/^\/+/, ""), d.name),
         type: d.isDirectory() ? ("directory" as const) : ("file" as const),
       }))
-      .sort((a, b) => (a.type !== b.type ? (a.type === "directory" ? -1 : 1) : a.name.localeCompare(b.name)));
+      .sort((a, b) =>
+        a.type !== b.type ? (a.type === "directory" ? -1 : 1) : a.name.localeCompare(b.name),
+      );
   },
   async stat({ path: p }) {
     const abs = safeResolve(String(p ?? ""));
@@ -285,7 +304,7 @@ const methods: Record<string, Handler> = {
   async "pty.spawn"({ cmd, args, cwd, env, cols, rows }, ctx) {
     const shell = process.env.SHELL ?? "/bin/bash";
     const spawnCmd = cmd ? String(cmd) : shell;
-    const spawnArgs: string[] = Array.isArray(args) ? (args as string[]) : (cmd ? [] : ["-il"]);
+    const spawnArgs: string[] = Array.isArray(args) ? (args as string[]) : cmd ? [] : ["-il"];
     const termCols = typeof cols === "number" ? cols : 80;
     const termRows = typeof rows === "number" ? rows : 24;
 
@@ -297,7 +316,10 @@ const methods: Record<string, Handler> = {
     }
 
     const id = randomUUID();
-    const mergedEnv = safeEnv({ TERM: "xterm-256color", ...(env as Record<string, string> | undefined ?? {}) });
+    const mergedEnv = safeEnv({
+      TERM: "xterm-256color",
+      ...((env as Record<string, string> | undefined) ?? {}),
+    });
 
     if (nodePty) {
       const ptyProc = nodePty.spawn(spawnCmd, spawnArgs, {
@@ -308,7 +330,13 @@ const methods: Record<string, Handler> = {
         env: mergedEnv,
       });
 
-      const session: PtySession = { id, cmd: spawnCmd, cwd: resolvedCwd, alive: true, pty: ptyProc };
+      const session: PtySession = {
+        id,
+        cmd: spawnCmd,
+        cwd: resolvedCwd,
+        alive: true,
+        pty: ptyProc,
+      };
       ctx.ptySessions.set(id, session);
 
       ptyProc.onData((data) => {
@@ -316,7 +344,13 @@ const methods: Record<string, Handler> = {
       });
       ptyProc.onExit(({ exitCode, signal }) => {
         session.alive = false;
-        ctx.ws.send(JSON.stringify({ jsonrpc: "2.0", method: "pty.exit", params: { id, code: exitCode, signal: signal ?? null } }));
+        ctx.ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            method: "pty.exit",
+            params: { id, code: exitCode, signal: signal ?? null },
+          }),
+        );
         ctx.ptySessions.delete(id);
       });
     } else {
@@ -387,7 +421,9 @@ const methods: Record<string, Handler> = {
       resolvedCwd = root;
     }
 
-    const safeExtra = Array.isArray(extraArgs) ? validateExtraArgs(cliKind, extraArgs as string[]) : [];
+    const safeExtra = Array.isArray(extraArgs)
+      ? validateExtraArgs(cliKind, extraArgs as string[])
+      : [];
 
     let execCmd: string;
     let execArgs: string[];
@@ -396,17 +432,12 @@ const methods: Record<string, Handler> = {
       execArgs = ["exec", "--json", ...safeExtra, text];
     } else if (cliKind === "claude") {
       execCmd = "claude";
-      execArgs = [
-        "-p", text,
-        "--output-format", "stream-json",
-        "--verbose",
-        ...safeExtra,
-      ];
+      execArgs = ["-p", text, "--output-format", "stream-json", "--verbose", ...safeExtra];
     } else {
       throw new Error(`chat.spawn: unsupported cli "${cliKind}"`);
     }
 
-    const mergedEnv = safeEnv(env as Record<string, string> | undefined ?? {});
+    const mergedEnv = safeEnv((env as Record<string, string> | undefined) ?? {});
 
     const id = randomUUID();
     const proc = cpSpawn(execCmd, execArgs, {
@@ -525,7 +556,8 @@ const methods: Record<string, Handler> = {
 
   async "git.stage"({ workspacePath, paths }) {
     const cwd = await validateGitRepo(workspacePath);
-    if (!Array.isArray(paths) || paths.length === 0) throw new Error("git.stage: paths must be a non-empty array");
+    if (!Array.isArray(paths) || paths.length === 0)
+      throw new Error("git.stage: paths must be a non-empty array");
     const safePaths = (paths as unknown[]).map((p) => String(p));
     await gitExec(["add", "--", ...safePaths], cwd);
     return { ok: true };
@@ -556,12 +588,13 @@ const methods: Record<string, Handler> = {
     return sessionsRepo.list(id);
   },
 
-  async "sessions.create"({ workspaceId, cli, title, model, approvalMode }) {
+  async "sessions.create"({ id, workspaceId, cli, title, model, approvalMode }) {
     const wid = String(workspaceId ?? "").trim();
     const c = String(cli ?? "").trim();
     if (!wid) throw new Error("sessions.create: workspaceId is required");
     if (!c) throw new Error("sessions.create: cli is required");
     return sessionsRepo.create({
+      id: id !== undefined ? String(id).trim() || undefined : undefined,
       workspaceId: wid,
       cli: c,
       title: title !== undefined ? String(title) : undefined,
@@ -603,8 +636,16 @@ const methods: Record<string, Handler> = {
   },
 
   async "messages.append"({
-    sessionId, role, parts, parentId, logicalParentId, isSidechain,
-    cwd, gitBranch, slug, version,
+    sessionId,
+    role,
+    parts,
+    parentId,
+    logicalParentId,
+    isSidechain,
+    cwd,
+    gitBranch,
+    slug,
+    version,
   }) {
     const sid = String(sessionId ?? "").trim();
     const r = String(role ?? "").trim();
@@ -676,16 +717,20 @@ const methods: Record<string, Handler> = {
     } catch {
       resolvedCwd = root;
     }
-    const mergedEnv = safeEnv(env as Record<string, string> | undefined ?? {});
-    const proc = cpSpawn(
-      String(cmd),
-      Array.isArray(args) ? (args as string[]) : [],
-      { cwd: resolvedCwd, env: mergedEnv, stdio: ["ignore", "pipe", "pipe"] },
-    );
+    const mergedEnv = safeEnv((env as Record<string, string> | undefined) ?? {});
+    const proc = cpSpawn(String(cmd), Array.isArray(args) ? (args as string[]) : [], {
+      cwd: resolvedCwd,
+      env: mergedEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
     const limit = typeof timeoutMs === "number" ? timeoutMs : 10_000;
     const killer = setTimeout(() => {
-      try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
     }, limit);
 
     const collect = (stream: NodeJS.ReadableStream | null): Promise<string> =>
