@@ -718,1160 +718,1210 @@ function buildInitialTasksByWorktreeId(): Record<string, WorkTask[]> {
 export const useIDE = create<State>()(
   persist<State>(
     (set, get) => ({
-  workspaces: initialWorkspaces,
-  activeWorkspaceId: "ws-sc",
-  activeBranchId: "b1",
+      workspaces: initialWorkspaces,
+      activeWorkspaceId: "ws-sc",
+      activeBranchId: "b1",
 
-  branchesByWorkspaceId: initialBranchesByWorkspaceId,
-  activeBranchIdByWorkspaceId: { "ws-sc": "b1", "ws-landing": "l1" },
+      branchesByWorkspaceId: initialBranchesByWorkspaceId,
+      activeBranchIdByWorkspaceId: { "ws-sc": "b1", "ws-landing": "l1" },
 
-  messagesBySessionId: {},
-  openFilesByScope: {},
-  activeTabByScope: { [INITIAL_SCOPE]: "overview" },
-  expandedFoldersByScope: { [INITIAL_SCOPE]: { crates: true } },
-  activeWorktreeIdByScope: { [INITIAL_SCOPE]: "wt-sc-main" },
-  tasksByWorktreeId: buildInitialTasksByWorktreeId(),
-  worktreesByWorkspaceId: initialWorktrees,
-  sessionsByWorkspaceId: {},
-  activeSessionIdByWorkspaceId: {},
-  pinnedSessionIdsByWorkspaceId: {},
+      messagesBySessionId: {},
+      openFilesByScope: {},
+      activeTabByScope: { [INITIAL_SCOPE]: "overview" },
+      expandedFoldersByScope: { [INITIAL_SCOPE]: { crates: true } },
+      activeWorktreeIdByScope: { [INITIAL_SCOPE]: "wt-sc-main" },
+      tasksByWorktreeId: buildInitialTasksByWorktreeId(),
+      worktreesByWorkspaceId: initialWorktrees,
+      sessionsByWorkspaceId: {},
+      activeSessionIdByWorkspaceId: {},
+      pinnedSessionIdsByWorkspaceId: {},
 
-  theme: readStoredTheme(),
-  showFiles: true,
-  showSidebar: true,
-  showTerminal: false,
-  showAgentPanel: false,
-  applyingFromUrl: false,
-  activeAgent: "claude",
-  previewMode: false,
-  filesTab: "files",
-  thinking: true,
-  webSearch: false,
-  codexApiKey:
-    typeof window !== "undefined" ? window.localStorage.getItem("codex-api-key") ?? undefined : undefined,
-  codexModel:
-    typeof window !== "undefined" ? window.localStorage.getItem("codex-model") ?? undefined : undefined,
-  selectedModelByCli:
-    typeof window !== "undefined"
-      ? (() => { try { const raw = window.localStorage.getItem("selected-model-by-cli"); return raw ? (JSON.parse(raw) as Record<string, string>) : {}; } catch { return {}; } })()
-      : {},
-  approvalModeByCli:
-    typeof window !== "undefined"
-      ? (() => { try { const raw = window.localStorage.getItem("approval-mode-by-cli"); return raw ? (JSON.parse(raw) as Record<string, "auto" | "confirm" | "sandbox">) : {}; } catch { return {}; } })()
-      : {},
-  codexAuth:
-    typeof window !== "undefined"
-      ? (() => {
-          try {
-            const raw = window.localStorage.getItem("codex-auth");
-            return raw ? (JSON.parse(raw) as State["codexAuth"]) : undefined;
-          } catch {
-            return undefined;
-          }
-        })()
-      : undefined,
-
-  branchesLoading: true,
-  worktreesLoading: true,
-  tasksLoading: true,
-  fileTreeLoading: true,
-  hydrate: () => {
-    set({
-      branchesLoading: false,
-      worktreesLoading: false,
-      tasksLoading: false,
-      fileTreeLoading: false,
-    });
-  },
-
-  // Legacy flat fields — kept for retrocompat with FilesPanel (consumers exist, do not remove).
-  fileTree: MOCK_FILE_TREE,
-  rootFiles: MOCK_ROOT_FILES,
-
-  // Scoped tree structure — Vague 2 le peuplera via loadRoot
-  treeByScope: {
-    [INITIAL_SCOPE]: makeScopeRootNode(INITIAL_SCOPE),
-  },
-  loadingPaths: {},
-
-  gitStatusByScope: {},
-
-  refreshGitStatus: async (sk) => {
-    const state = get();
-    const ws = workspaceForScope(state.workspaces, sk);
-    if (!ws) return;
-
-    try {
-      const provider =
-        ws.source.kind === "mock"
-          ? await (async () => {
-              const { MockProvider } = await import("@/lib/fs/mock");
-              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+      theme: readStoredTheme(),
+      showFiles: true,
+      showSidebar: true,
+      showTerminal: false,
+      showAgentPanel: false,
+      applyingFromUrl: false,
+      activeAgent: "claude",
+      previewMode: false,
+      filesTab: "files",
+      thinking: true,
+      webSearch: false,
+      codexApiKey:
+        typeof window !== "undefined"
+          ? (window.localStorage.getItem("codex-api-key") ?? undefined)
+          : undefined,
+      codexModel:
+        typeof window !== "undefined"
+          ? (window.localStorage.getItem("codex-model") ?? undefined)
+          : undefined,
+      selectedModelByCli:
+        typeof window !== "undefined"
+          ? (() => {
+              try {
+                const raw = window.localStorage.getItem("selected-model-by-cli");
+                return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+              } catch {
+                return {};
+              }
             })()
-          : await providerFor(ws.source, ws.name);
+          : {},
+      approvalModeByCli:
+        typeof window !== "undefined"
+          ? (() => {
+              try {
+                const raw = window.localStorage.getItem("approval-mode-by-cli");
+                return raw
+                  ? (JSON.parse(raw) as Record<string, "auto" | "confirm" | "sandbox">)
+                  : {};
+              } catch {
+                return {};
+              }
+            })()
+          : {},
+      codexAuth:
+        typeof window !== "undefined"
+          ? (() => {
+              try {
+                const raw = window.localStorage.getItem("codex-auth");
+                return raw ? (JSON.parse(raw) as State["codexAuth"]) : undefined;
+              } catch {
+                return undefined;
+              }
+            })()
+          : undefined,
 
-      const status = await computeStatus(provider);
-      set((s) => ({
-        gitStatusByScope: { ...s.gitStatusByScope, [sk]: status },
-      }));
-    } catch {
-      // Silencieux — ne pas spammer l'utilisateur
-    }
-  },
-
-  loadRoot: async (sk) => {
-    const state = get();
-    const ws = workspaceForScope(state.workspaces, sk);
-    if (!ws) return;
-
-    set((s) => ({
-      fileTreeLoading: sk === getCurrentScopeKey(s),
-      loadingPaths: {
-        ...s.loadingPaths,
-        [sk]: { ...s.loadingPaths[sk], "": true },
+      branchesLoading: true,
+      worktreesLoading: true,
+      tasksLoading: true,
+      fileTreeLoading: true,
+      hydrate: () => {
+        set({
+          branchesLoading: false,
+          worktreesLoading: false,
+          tasksLoading: false,
+          fileTreeLoading: false,
+        });
       },
-    }));
 
-    try {
-      const source =
-        ws.source.kind === "mock" ? { kind: "mock" as const, id: ws.source.id } : ws.source;
-      const provider =
-        ws.source.kind === "mock"
-          ? await (async () => {
-              const { MockProvider } = await import("@/lib/fs/mock");
-              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-            })()
-          : await providerFor(source, ws.name);
+      // Legacy flat fields — kept for retrocompat with FilesPanel (consumers exist, do not remove).
+      fileTree: MOCK_FILE_TREE,
+      rootFiles: MOCK_ROOT_FILES,
 
-      const raw = await provider.list("");
-      const entries = sortEntries(raw);
-      const children = entriesToTreeNodes(entries, "");
-      const { fileTree, rootFiles } = flatFieldsFromEntries(entries);
-
-      set((s) => {
-        const isActive = sk === getCurrentScopeKey(s);
-        const root = s.treeByScope[sk] ?? makeScopeRootNode(sk);
-        return {
-          treeByScope: {
-            ...s.treeByScope,
-            [sk]: { ...root, children, loaded: true },
-          },
-          loadingPaths: {
-            ...s.loadingPaths,
-            [sk]: { ...s.loadingPaths[sk], "": false },
-          },
-          fileTreeLoading: isActive ? false : s.fileTreeLoading,
-          fileTree: isActive ? fileTree : s.fileTree,
-          rootFiles: isActive ? rootFiles : s.rootFiles,
-        };
-      });
-      void get().refreshGitStatus(sk);
-    } catch (e) {
-      set((s) => ({
-        fileTreeLoading: false,
-        loadingPaths: {
-          ...s.loadingPaths,
-          [sk]: { ...s.loadingPaths[sk], "": false },
-        },
-      }));
-      if (e instanceof FsError) {
-        toast.error(e.message);
-      } else {
-        console.error("[loadRoot]", e);
-      }
-    }
-  },
-
-  loadChildren: async (sk, path) => {
-    const state = get();
-    const existingRoot = state.treeByScope[sk];
-    const node = existingRoot ? findNodeByPath(existingRoot, path) : undefined;
-    if (node?.loaded) return;
-    if (path.includes("/")) return; // FilesPanel n'affiche que 2 niveaux — skip deep
-
-    const ws = workspaceForScope(state.workspaces, sk);
-    if (!ws) return;
-
-    set((s) => ({
-      loadingPaths: {
-        ...s.loadingPaths,
-        [sk]: { ...s.loadingPaths[sk], [path]: true },
+      // Scoped tree structure — Vague 2 le peuplera via loadRoot
+      treeByScope: {
+        [INITIAL_SCOPE]: makeScopeRootNode(INITIAL_SCOPE),
       },
-    }));
+      loadingPaths: {},
 
-    try {
-      const provider =
-        ws.source.kind === "mock"
-          ? await (async () => {
-              const { MockProvider } = await import("@/lib/fs/mock");
-              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-            })()
-          : await providerFor(ws.source, ws.name);
+      gitStatusByScope: {},
 
-      const raw = await provider.list(path);
-      const entries = sortEntries(raw);
-      const children = entriesToTreeNodes(entries, path);
+      refreshGitStatus: async (sk) => {
+        const state = get();
+        const ws = workspaceForScope(state.workspaces, sk);
+        if (!ws) return;
 
-      set((s) => {
-        const isActive = sk === getCurrentScopeKey(s);
-        const root = s.treeByScope[sk] ?? makeScopeRootNode(sk);
-        const patchedRoot = patchNodeChildren(root, path, children);
-
-        const dirs = entries.filter((e) => e.type === "directory").map((e) => e.name + "/");
-        const files = entries.filter((e) => e.type === "file").map((e) => e.name);
-        const updatedFileTree = isActive
-          ? { ...s.fileTree, [path]: [...dirs, ...files] }
-          : s.fileTree;
-
-        return {
-          treeByScope: { ...s.treeByScope, [sk]: patchedRoot },
-          loadingPaths: {
-            ...s.loadingPaths,
-            [sk]: { ...s.loadingPaths[sk], [path]: false },
-          },
-          fileTree: updatedFileTree,
-        };
-      });
-    } catch (e) {
-      set((s) => ({
-        loadingPaths: {
-          ...s.loadingPaths,
-          [sk]: { ...s.loadingPaths[sk], [path]: false },
-        },
-      }));
-      if (e instanceof FsError) {
-        toast.error(e.message);
-      } else {
-        console.error("[loadChildren]", e);
-      }
-    }
-  },
-
-  createEntry: async (sk, parentPath, name, type) => {
-    const ws = workspaceForScope(get().workspaces, sk);
-    if (!ws) return;
-
-    const fullPath = parentPath ? `${parentPath}/${name}` : name;
-
-    try {
-      const provider =
-        ws.source.kind === "mock"
-          ? await (async () => {
-              const { MockProvider } = await import("@/lib/fs/mock");
-              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-            })()
-          : await providerFor(ws.source, ws.name);
-
-      if (type === "dir") {
-        await provider.mkdir(fullPath);
-      } else {
-        await provider.writeFile(fullPath, "");
-      }
-
-      if (parentPath === "") {
-        await get().loadRoot(sk);
-      } else {
-        await get().loadChildren(sk, parentPath);
-      }
-      scheduleGitRefresh(sk, get);
-    } catch (e) {
-      if (e instanceof FsError) {
-        toast.error(e.message);
-      } else {
-        console.error("[createEntry]", e);
-        toast.error("Impossible de créer l'entrée.");
-      }
-    }
-  },
-
-  removeEntry: async (sk, path) => {
-    const ws = workspaceForScope(get().workspaces, sk);
-    if (!ws) return;
-
-    const parts = path.split("/").filter(Boolean);
-    const parentPath = parts.slice(0, -1).join("/");
-
-    try {
-      const provider =
-        ws.source.kind === "mock"
-          ? await (async () => {
-              const { MockProvider } = await import("@/lib/fs/mock");
-              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-            })()
-          : await providerFor(ws.source, ws.name);
-
-      await provider.remove(path);
-
-      if (parentPath === "") {
-        await get().loadRoot(sk);
-      } else {
-        await get().loadChildren(sk, parentPath);
-      }
-      scheduleGitRefresh(sk, get);
-    } catch (e) {
-      if (e instanceof FsError) {
-        toast.error(e.message);
-      } else {
-        console.error("[removeEntry]", e);
-        toast.error("Impossible de supprimer l'entrée.");
-      }
-    }
-  },
-
-  getWorkspaceIdForBranch: (branchId) => {
-    const s = get();
-    for (const [wsId, branches] of Object.entries(s.branchesByWorkspaceId)) {
-      if (branches.some((b) => b.id === branchId)) return wsId;
-    }
-    return undefined;
-  },
-
-  hydrateSessionsFromDb: async () => {
-    const MAX_ATTEMPTS = 10;
-    const RETRY_MS = 2000;
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const { workspaces } = get();
-      const remoteWorkspaces = workspaces.filter((w) => w.source.kind === "remote-agent");
-      if (remoteWorkspaces.length === 0) return;
-
-      let anySuccess = false;
-      for (const ws of remoteWorkspaces) {
-        if (ws.source.kind !== "remote-agent") continue;
         try {
-          const provider = new RemoteAgentProvider(
-            ws.source.label,
-            ws.source.url,
-            ws.source.token,
-          );
-          await provider.connect();
-          const sessions = await persistence.sessions.list(provider, ws.id);
-          if (sessions.length === 0) {
-            anySuccess = true;
-            continue;
-          }
-          const workspaceTerminals = sessions.map((s) => ({
-            id: s.id,
-            kind: (s.cli as import("@/store/ide").TerminalKind) ?? "codex",
-            title: s.title ?? s.cli,
-            status: (s.status === "busy" ? "busy" : "idle") as "ready" | "busy" | "idle",
-            workspaceId: ws.id,
-            lastCommand: s.cli,
+          const provider =
+            ws.source.kind === "mock"
+              ? await (async () => {
+                  const { MockProvider } = await import("@/lib/fs/mock");
+                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+                })()
+              : await providerFor(ws.source, ws.name);
+
+          const status = await computeStatus(provider);
+          set((s) => ({
+            gitStatusByScope: { ...s.gitStatusByScope, [sk]: status },
           }));
-          set((cur) => ({
-            sessionsByWorkspaceId: {
-              ...cur.sessionsByWorkspaceId,
-              [ws.id]: workspaceTerminals,
-            },
-          }));
-          anySuccess = true;
+        } catch {
+          // Silencieux — ne pas spammer l'utilisateur
+        }
+      },
+
+      loadRoot: async (sk) => {
+        const state = get();
+        const ws = workspaceForScope(state.workspaces, sk);
+        if (!ws) return;
+
+        set((s) => ({
+          fileTreeLoading: sk === getCurrentScopeKey(s),
+          loadingPaths: {
+            ...s.loadingPaths,
+            [sk]: { ...s.loadingPaths[sk], "": true },
+          },
+        }));
+
+        try {
+          const source =
+            ws.source.kind === "mock" ? { kind: "mock" as const, id: ws.source.id } : ws.source;
+          const provider =
+            ws.source.kind === "mock"
+              ? await (async () => {
+                  const { MockProvider } = await import("@/lib/fs/mock");
+                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+                })()
+              : await providerFor(source, ws.name);
+
+          const raw = await provider.list("");
+          const entries = sortEntries(raw);
+          const children = entriesToTreeNodes(entries, "");
+          const { fileTree, rootFiles } = flatFieldsFromEntries(entries);
+
+          set((s) => {
+            const isActive = sk === getCurrentScopeKey(s);
+            const root = s.treeByScope[sk] ?? makeScopeRootNode(sk);
+            return {
+              treeByScope: {
+                ...s.treeByScope,
+                [sk]: { ...root, children, loaded: true },
+              },
+              loadingPaths: {
+                ...s.loadingPaths,
+                [sk]: { ...s.loadingPaths[sk], "": false },
+              },
+              fileTreeLoading: isActive ? false : s.fileTreeLoading,
+              fileTree: isActive ? fileTree : s.fileTree,
+              rootFiles: isActive ? rootFiles : s.rootFiles,
+            };
+          });
+          void get().refreshGitStatus(sk);
         } catch (e) {
-          if (attempt === MAX_ATTEMPTS) {
-            console.warn(`[store] hydrateSessionsFromDb: failed for workspace ${ws.id} after ${MAX_ATTEMPTS} attempts`, e);
+          set((s) => ({
+            fileTreeLoading: false,
+            loadingPaths: {
+              ...s.loadingPaths,
+              [sk]: { ...s.loadingPaths[sk], "": false },
+            },
+          }));
+          if (e instanceof FsError) {
+            toast.error(e.message);
           } else {
-            console.log(`[store] hydrateSessionsFromDb: attempt ${attempt}/${MAX_ATTEMPTS} failed for ${ws.id}, retrying in ${RETRY_MS}ms`);
+            console.error("[loadRoot]", e);
           }
         }
-      }
-
-      if (anySuccess) return;
-      if (attempt < MAX_ATTEMPTS) {
-        await new Promise<void>((resolve) => setTimeout(resolve, RETRY_MS));
-      }
-    }
-  },
-
-  setActiveWorkspace: (id) => {
-    set((s) => {
-      const branches = s.branchesByWorkspaceId[id] ?? [];
-      const remembered = s.activeBranchIdByWorkspaceId[id];
-      const nextBranchId =
-        remembered && branches.some((b) => b.id === remembered)
-          ? remembered
-          : (branches[0]?.id ?? s.activeBranchId);
-      const key = scopeKey(id, nextBranchId);
-      const nextWorktreeId =
-        s.activeWorktreeIdByScope[key] ??
-        getDefaultWorktreeId(s.worktreesByWorkspaceId, id, nextBranchId);
-      const isMock = s.workspaces.find((w) => w.id === id)?.source.kind === "mock";
-      return {
-        activeWorkspaceId: id,
-        activeBranchId: nextBranchId,
-        activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [id]: nextBranchId },
-        activeWorktreeIdByScope: nextWorktreeId
-          ? { ...s.activeWorktreeIdByScope, [key]: nextWorktreeId }
-          : s.activeWorktreeIdByScope,
-        fileTree: isMock ? MOCK_FILE_TREE : {},
-        rootFiles: isMock ? MOCK_ROOT_FILES : [],
-        fileTreeLoading: !isMock,
-        treeByScope: s.treeByScope[key]
-          ? s.treeByScope
-          : { ...s.treeByScope, [key]: makeScopeRootNode(key) },
-      };
-    });
-    void get().loadRoot(scopeKey(id, get().activeBranchId));
-  },
-
-  setActiveBranch: (id) => {
-    set((s) => {
-      let wsId = s.activeWorkspaceId;
-      for (const [wId, branches] of Object.entries(s.branchesByWorkspaceId)) {
-        if (branches.some((b) => b.id === id)) {
-          wsId = wId;
-          break;
-        }
-      }
-      const key = scopeKey(wsId, id);
-      const nextWorktreeId =
-        s.activeWorktreeIdByScope[key] ?? getDefaultWorktreeId(s.worktreesByWorkspaceId, wsId, id);
-      const isMock = isMockWorkspace(s.workspaces, wsId);
-      return {
-        activeBranchId: id,
-        activeWorkspaceId: wsId,
-        activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [wsId]: id },
-        activeWorktreeIdByScope: nextWorktreeId
-          ? { ...s.activeWorktreeIdByScope, [key]: nextWorktreeId }
-          : s.activeWorktreeIdByScope,
-        fileTree: isMock ? MOCK_FILE_TREE : {},
-        rootFiles: isMock ? MOCK_ROOT_FILES : [],
-        fileTreeLoading: !isMock,
-        treeByScope: s.treeByScope[key]
-          ? s.treeByScope
-          : { ...s.treeByScope, [key]: makeScopeRootNode(key) },
-      };
-    });
-    const newSk = scopeKey(get().activeWorkspaceId, id);
-    void get().loadRoot(newSk);
-    void get().refreshGitStatus(newSk);
-  },
-
-  setActiveTab: (id) =>
-    set((s) => {
-      const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
-      return { activeTabByScope: { ...s.activeTabByScope, [key]: id } };
-    }),
-
-  setActiveWorktree: (id) =>
-    set((s) => {
-      const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
-      return {
-        activeWorktreeIdByScope: { ...s.activeWorktreeIdByScope, [key]: id },
-      };
-    }),
-
-  toggleFolder: (name) =>
-    set((s) => {
-      const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
-      const current = s.expandedFoldersByScope[key] ?? {};
-      return {
-        expandedFoldersByScope: {
-          ...s.expandedFoldersByScope,
-          [key]: { ...current, [name]: !current[name] },
-        },
-      };
-    }),
-
-  toggleFiles: () => set((s) => ({ showFiles: !s.showFiles })),
-  toggleSidebar: () => set((s) => ({ showSidebar: !s.showSidebar })),
-  toggleTerminal: () => set((s) => ({ showTerminal: !s.showTerminal })),
-  toggleAgentPanel: () => set((s) => ({ showAgentPanel: !s.showAgentPanel })),
-  setApplyingFromUrl: (v) => set({ applyingFromUrl: v }),
-  setActiveAgent: (k) => set({ activeAgent: k }),
-  togglePreview: () => set((s) => ({ previewMode: !s.previewMode })),
-  setTheme: (theme) => {
-    writeStoredTheme(theme);
-    set({ theme });
-  },
-  setFilesTab: (t) => set({ filesTab: t }),
-  toggleThinking: () => set((s) => ({ thinking: !s.thinking })),
-  toggleWebSearch: () => set((s) => ({ webSearch: !s.webSearch })),
-  setCodexApiKey: (key) => {
-    if (typeof window !== "undefined") {
-      if (key) window.localStorage.setItem("codex-api-key", key);
-      else window.localStorage.removeItem("codex-api-key");
-    }
-    set({ codexApiKey: key || undefined });
-  },
-  setCodexModel: (model) => {
-    if (typeof window !== "undefined") {
-      if (model) window.localStorage.setItem("codex-model", model);
-      else window.localStorage.removeItem("codex-model");
-    }
-    set({ codexModel: model || undefined });
-  },
-  setModelForCli: (cli, model) => {
-    const next = { ...get().selectedModelByCli, [cli]: model };
-    if (typeof window !== "undefined") window.localStorage.setItem("selected-model-by-cli", JSON.stringify(next));
-    set({ selectedModelByCli: next });
-  },
-  setApprovalMode: (cli, mode) => {
-    const next = { ...get().approvalModeByCli, [cli]: mode };
-    if (typeof window !== "undefined") window.localStorage.setItem("approval-mode-by-cli", JSON.stringify(next));
-    set({ approvalModeByCli: next });
-  },
-  setCodexAuth: (auth) => {
-    if (typeof window !== "undefined") {
-      if (auth) window.localStorage.setItem("codex-auth", JSON.stringify(auth));
-      else window.localStorage.removeItem("codex-auth");
-    }
-    set({ codexAuth: auth ?? undefined });
-  },
-  refreshCodexTokens: async () => {
-    const current = get().codexAuth;
-    if (!current) return false;
-    try {
-      const { refreshTokens, parseIdTokenClaims } = await import("@/lib/codex-auth");
-      const next = await refreshTokens({ data: { refreshToken: current.refreshToken } });
-      const claims = parseIdTokenClaims(next.idToken);
-      get().setCodexAuth({
-        idToken: next.idToken,
-        accessToken: next.accessToken,
-        refreshToken: next.refreshToken,
-        lastRefresh: new Date().toISOString(),
-        email: claims.email ?? current.email,
-        chatgptPlanType: claims.chatgptPlanType ?? current.chatgptPlanType,
-        chatgptAccountId: claims.chatgptAccountId ?? current.chatgptAccountId,
-      });
-      return true;
-    } catch (e) {
-      console.error("[refreshCodexTokens]", e);
-      return false;
-    }
-  },
-
-  sendMessage: (content) =>
-    set((s) => {
-      const activeSessionId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
-      if (!activeSessionId) return s;
-      const userMsg: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "user",
-        content,
-      };
-      const assistantMsg: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        model: "Anthropic · Opus 4.6 (1M)",
-        content: generateAssistantReply(content),
-      };
-      const prev = s.messagesBySessionId[activeSessionId] ?? [];
-      return {
-        messagesBySessionId: {
-          ...s.messagesBySessionId,
-          [activeSessionId]: [...prev, userMsg, assistantMsg],
-        },
-      };
-    }),
-
-  addBranch: (workspaceId, name) =>
-    set((s) => {
-      const branchId = crypto.randomUUID();
-      const worktreeId = crypto.randomUUID();
-      const key = scopeKey(workspaceId, branchId);
-      const newBranch: Branch = { id: branchId, name, age: "just now", status: "none" };
-      return {
-        branchesByWorkspaceId: {
-          ...s.branchesByWorkspaceId,
-          [workspaceId]: [...(s.branchesByWorkspaceId[workspaceId] ?? []), newBranch],
-        },
-        tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
-        worktreesByWorkspaceId: {
-          ...s.worktreesByWorkspaceId,
-          [workspaceId]: [
-            ...(s.worktreesByWorkspaceId[workspaceId] ?? []),
-            {
-              id: worktreeId,
-              workspaceId,
-              branchId,
-              name: name.split("/").pop() ?? name,
-              path: `/worktrees/${workspaceId}/${name.replaceAll("/", "-")}`,
-              baseBranch: "main",
-              status: "ready",
-              terminals: createTerminalSet(worktreeId),
-            },
-          ],
-        },
-        activeWorktreeIdByScope: {
-          ...s.activeWorktreeIdByScope,
-          [key]: worktreeId,
-        },
-      };
-    }),
-
-  toggleStar: (branchId) =>
-    set((s) => {
-      const next: Record<string, Branch[]> = {};
-      for (const [wsId, branches] of Object.entries(s.branchesByWorkspaceId)) {
-        next[wsId] = branches.map((b) => (b.id === branchId ? { ...b, starred: !b.starred } : b));
-      }
-      return { branchesByWorkspaceId: next };
-    }),
-
-  addWorkspace: (name, source) => {
-    const id = crypto.randomUUID();
-    const branchId = crypto.randomUUID();
-    const worktreeId = crypto.randomUUID();
-    const effectiveSource: WorkspaceSource = source ?? { kind: "mock", id };
-    const color =
-      effectiveSource.kind === "local-web"
-        ? "oklch(0.55 0.15 140)"
-        : effectiveSource.kind === "remote-agent"
-          ? "oklch(0.55 0.15 30)"
-          : "oklch(0.50 0.15 200)";
-    set((s) => ({
-      workspaces: [
-        ...s.workspaces,
-        { id, letter: name.charAt(0).toUpperCase() || "W", name, color, source: effectiveSource },
-      ],
-      branchesByWorkspaceId: {
-        ...s.branchesByWorkspaceId,
-        [id]: [{ id: branchId, name: "main", age: "just now", starred: true, status: "none" }],
       },
-      activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [id]: branchId },
-      tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
-      worktreesByWorkspaceId: {
-        ...s.worktreesByWorkspaceId,
-        [id]: [
-          {
-            id: worktreeId,
-            workspaceId: id,
-            branchId,
-            name: "main",
-            path: `/worktrees/${id}/main`,
-            baseBranch: "main",
-            status: "ready",
-            terminals: createTerminalSet(worktreeId),
+
+      loadChildren: async (sk, path) => {
+        const state = get();
+        const existingRoot = state.treeByScope[sk];
+        const node = existingRoot ? findNodeByPath(existingRoot, path) : undefined;
+        if (node?.loaded) return;
+        if (path.includes("/")) return; // FilesPanel n'affiche que 2 niveaux — skip deep
+
+        const ws = workspaceForScope(state.workspaces, sk);
+        if (!ws) return;
+
+        set((s) => ({
+          loadingPaths: {
+            ...s.loadingPaths,
+            [sk]: { ...s.loadingPaths[sk], [path]: true },
           },
-        ],
-      },
-      activeWorktreeIdByScope: {
-        ...s.activeWorktreeIdByScope,
-        [scopeKey(id, branchId)]: worktreeId,
-      },
-    }));
-    return id;
-  },
+        }));
 
-  addTask: (worktreeId, title, description) =>
-    set((s) => ({
-      tasksByWorktreeId: {
-        ...s.tasksByWorktreeId,
-        [worktreeId]: [
-          ...(s.tasksByWorktreeId[worktreeId] ?? []),
-          {
-            id: crypto.randomUUID(),
-            title,
-            description: description?.trim() ? description.trim() : undefined,
-            status: "todo",
-            assignee: "Codex",
-            updatedAt: "just now",
-          },
-        ],
-      },
-    })),
+        try {
+          const provider =
+            ws.source.kind === "mock"
+              ? await (async () => {
+                  const { MockProvider } = await import("@/lib/fs/mock");
+                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+                })()
+              : await providerFor(ws.source, ws.name);
 
-  updateTask: (worktreeId, taskId, patch) =>
-    set((s) => ({
-      tasksByWorktreeId: {
-        ...s.tasksByWorktreeId,
-        [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).map((task) => {
-          if (task.id !== taskId) return task;
-          const nextTitle = patch.title !== undefined ? patch.title.trim() : task.title;
-          const nextDescription =
-            patch.description !== undefined
-              ? patch.description.trim() || undefined
-              : task.description;
-          return {
-            ...task,
-            title: nextTitle || task.title,
-            description: nextDescription,
-            updatedAt: "just now",
-          };
-        }),
-      },
-    })),
+          const raw = await provider.list(path);
+          const entries = sortEntries(raw);
+          const children = entriesToTreeNodes(entries, path);
 
-  removeTask: (worktreeId, taskId) =>
-    set((s) => ({
-      tasksByWorktreeId: {
-        ...s.tasksByWorktreeId,
-        [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).filter(
-          (task) => task.id !== taskId,
-        ),
-      },
-    })),
+          set((s) => {
+            const isActive = sk === getCurrentScopeKey(s);
+            const root = s.treeByScope[sk] ?? makeScopeRootNode(sk);
+            const patchedRoot = patchNodeChildren(root, path, children);
 
-  cycleTaskStatus: (worktreeId, taskId) =>
-    set((s) => {
-      const nextStatus: Record<TaskStatus, TaskStatus> = {
-        todo: "in_progress",
-        in_progress: "blocked",
-        blocked: "done",
-        done: "todo",
-      };
-      return {
-        tasksByWorktreeId: {
-          ...s.tasksByWorktreeId,
-          [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).map((task) =>
-            task.id === taskId
-              ? { ...task, status: nextStatus[task.status], updatedAt: "just now" }
-              : task,
-          ),
-        },
-      };
-    }),
+            const dirs = entries.filter((e) => e.type === "directory").map((e) => e.name + "/");
+            const files = entries.filter((e) => e.type === "file").map((e) => e.name);
+            const updatedFileTree = isActive
+              ? { ...s.fileTree, [path]: [...dirs, ...files] }
+              : s.fileTree;
 
-  setTaskStatus: (worktreeId, taskId, status) =>
-    set((s) => ({
-      tasksByWorktreeId: {
-        ...s.tasksByWorktreeId,
-        [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).map((task) =>
-          task.id === taskId ? { ...task, status, updatedAt: "just now" } : task,
-        ),
-      },
-    })),
-
-  addWorktree: (workspaceId, branchId, name) =>
-    set((s) => {
-      const worktreeId = crypto.randomUUID();
-      const branchName =
-        (s.branchesByWorkspaceId[workspaceId] ?? []).find((b) => b.id === branchId)?.name ??
-        "branch";
-      const displayName = name?.trim() || branchName.split("/").pop() || branchName;
-      const key = scopeKey(workspaceId, branchId);
-      return {
-        worktreesByWorkspaceId: {
-          ...s.worktreesByWorkspaceId,
-          [workspaceId]: [
-            ...(s.worktreesByWorkspaceId[workspaceId] ?? []),
-            {
-              id: worktreeId,
-              workspaceId,
-              branchId,
-              name: displayName,
-              path: `/worktrees/${workspaceId}/${displayName.replaceAll("/", "-")}`,
-              baseBranch: "main",
-              status: "ready",
-              terminals: createTerminalSet(worktreeId),
+            return {
+              treeByScope: { ...s.treeByScope, [sk]: patchedRoot },
+              loadingPaths: {
+                ...s.loadingPaths,
+                [sk]: { ...s.loadingPaths[sk], [path]: false },
+              },
+              fileTree: updatedFileTree,
+            };
+          });
+        } catch (e) {
+          set((s) => ({
+            loadingPaths: {
+              ...s.loadingPaths,
+              [sk]: { ...s.loadingPaths[sk], [path]: false },
             },
-          ],
-        },
-        tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
-        activeWorktreeIdByScope: {
-          ...s.activeWorktreeIdByScope,
-          [key]: worktreeId,
-        },
-        activeTabByScope: {
-          ...s.activeTabByScope,
-          [key]: `terminal:${worktreeId}-codex`,
-        },
-      };
-    }),
-
-  addTerminal: (worktreeId, kind) => {
-    const id = `${worktreeId}-${kind}-${crypto.randomUUID().slice(0, 8)}`;
-    const titleByKind: Record<TerminalKind, string> = {
-      codex: "Codex",
-      claude: "Claude Code",
-      opencode: "OpenCode",
-      gemini: "Gemini",
-    };
-    const commandByKind: Record<TerminalKind, string> = {
-      codex: "codex run",
-      claude: "claude",
-      opencode: "opencode run",
-      gemini: "gemini",
-    };
-    set((s) => {
-      const updated: Record<string, Worktree[]> = { ...s.worktreesByWorkspaceId };
-      for (const [wsId, wts] of Object.entries(s.worktreesByWorkspaceId)) {
-        if (wts.some((w) => w.id === worktreeId)) {
-          updated[wsId] = wts.map((w) =>
-            w.id === worktreeId
-              ? {
-                  ...w,
-                  terminals: [
-                    ...w.terminals,
-                    {
-                      id,
-                      kind,
-                      title: titleByKind[kind],
-                      status: "ready",
-                      workspaceId: wsId,
-                      worktreeId,
-                      lastCommand: commandByKind[kind],
-                    },
-                  ],
-                }
-              : w,
-          );
+          }));
+          if (e instanceof FsError) {
+            toast.error(e.message);
+          } else {
+            console.error("[loadChildren]", e);
+          }
         }
-      }
-      return { worktreesByWorkspaceId: updated };
-    });
-    return id;
-  },
-
-  pinSessionToWorktree: (sessionId, worktreeId) =>
-    set((s) => {
-      const next: Record<string, WorkspaceTerminal[]> = {};
-      for (const [wsId, sessions] of Object.entries(s.sessionsByWorkspaceId)) {
-        next[wsId] = sessions.map((sess) =>
-          sess.id === sessionId ? { ...sess, worktreeId: worktreeId ?? undefined } : sess,
-        );
-      }
-      return { sessionsByWorkspaceId: next };
-    }),
-
-  setActiveSession: (sessionId) =>
-    set((s) => ({
-      activeSessionIdByWorkspaceId: {
-        ...s.activeSessionIdByWorkspaceId,
-        [s.activeWorkspaceId]: sessionId,
       },
-    })),
 
-  addAgentSession: (kind) => {
-    const titleByKind: Record<TerminalKind, string> = {
-      codex: "Codex",
-      claude: "Claude Code",
-      opencode: "OpenCode",
-      gemini: "Gemini",
-    };
-    const commandByKind: Record<TerminalKind, string> = {
-      codex: "codex run",
-      claude: "claude",
-      opencode: "opencode run",
-      gemini: "gemini",
-    };
-    set((s) => {
-      const workspaceId = s.activeWorkspaceId;
-      const id = `${workspaceId}-${kind}-${crypto.randomUUID().slice(0, 8)}`;
-      const session: WorkspaceTerminal = {
-        id,
-        kind,
-        title: titleByKind[kind],
-        status: "ready",
-        workspaceId,
-        lastCommand: commandByKind[kind],
-      };
-      const current = s.sessionsByWorkspaceId[workspaceId] ?? [];
-      return {
-        sessionsByWorkspaceId: {
-          ...s.sessionsByWorkspaceId,
-          [workspaceId]: [...current, session],
-        },
-        activeSessionIdByWorkspaceId: {
-          ...s.activeSessionIdByWorkspaceId,
-          [workspaceId]: id,
-        },
-      };
-    });
-  },
+      createEntry: async (sk, parentPath, name, type) => {
+        const ws = workspaceForScope(get().workspaces, sk);
+        if (!ws) return;
 
-  closeAgentSession: (sessionId) =>
-    set((s) => {
-      const nextSessions: Record<string, WorkspaceTerminal[]> = {};
-      for (const [wsId, list] of Object.entries(s.sessionsByWorkspaceId)) {
-        nextSessions[wsId] = list.filter((t) => t.id !== sessionId);
-      }
-      const nextActive: Record<string, string> = { ...s.activeSessionIdByWorkspaceId };
-      for (const [wsId, id] of Object.entries(nextActive)) {
-        if (id === sessionId) {
-          const remaining = nextSessions[wsId] ?? [];
-          if (remaining.length > 0) nextActive[wsId] = remaining[remaining.length - 1].id;
-          else delete nextActive[wsId];
+        const fullPath = parentPath ? `${parentPath}/${name}` : name;
+
+        try {
+          const provider =
+            ws.source.kind === "mock"
+              ? await (async () => {
+                  const { MockProvider } = await import("@/lib/fs/mock");
+                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+                })()
+              : await providerFor(ws.source, ws.name);
+
+          if (type === "dir") {
+            await provider.mkdir(fullPath);
+          } else {
+            await provider.writeFile(fullPath, "");
+          }
+
+          if (parentPath === "") {
+            await get().loadRoot(sk);
+          } else {
+            await get().loadChildren(sk, parentPath);
+          }
+          scheduleGitRefresh(sk, get);
+        } catch (e) {
+          if (e instanceof FsError) {
+            toast.error(e.message);
+          } else {
+            console.error("[createEntry]", e);
+            toast.error("Impossible de créer l'entrée.");
+          }
         }
-      }
-      // Drop messages for the closed session.
-      const { [sessionId]: _dropped, ...restMessages } = s.messagesBySessionId;
-      // Remove from pinned lists.
-      const nextPinned: Record<string, string[]> = {};
-      for (const [wsId, pins] of Object.entries(s.pinnedSessionIdsByWorkspaceId)) {
-        nextPinned[wsId] = pins.filter((id) => id !== sessionId);
-      }
-      return {
-        sessionsByWorkspaceId: nextSessions,
-        activeSessionIdByWorkspaceId: nextActive,
-        messagesBySessionId: restMessages,
-        pinnedSessionIdsByWorkspaceId: nextPinned,
-      };
-    }),
-
-  pinSession: (sessionId) =>
-    set((s) => {
-      const workspaceId = s.activeWorkspaceId;
-      const activeId = s.activeSessionIdByWorkspaceId[workspaceId];
-      if (sessionId === activeId) return {};
-      const current = s.pinnedSessionIdsByWorkspaceId[workspaceId] ?? [];
-      if (current.includes(sessionId)) return {};
-      if (current.length >= 3) return {};
-      return {
-        pinnedSessionIdsByWorkspaceId: {
-          ...s.pinnedSessionIdsByWorkspaceId,
-          [workspaceId]: [...current, sessionId],
-        },
-      };
-    }),
-
-  unpinSession: (sessionId) =>
-    set((s) => {
-      const workspaceId = s.activeWorkspaceId;
-      const current = s.pinnedSessionIdsByWorkspaceId[workspaceId] ?? [];
-      return {
-        pinnedSessionIdsByWorkspaceId: {
-          ...s.pinnedSessionIdsByWorkspaceId,
-          [workspaceId]: current.filter((id) => id !== sessionId),
-        },
-      };
-    }),
-
-  removeWorktree: (worktreeId) =>
-    set((s) => {
-      // Drop tasks for this worktree.
-      const { [worktreeId]: _tasks, ...restTasks } = s.tasksByWorktreeId;
-      // Clear pin on any session pointing to this worktree.
-      const nextSessions: Record<string, WorkspaceTerminal[]> = {};
-      for (const [wsId, sessions] of Object.entries(s.sessionsByWorkspaceId)) {
-        nextSessions[wsId] = sessions.map((sess) =>
-          sess.worktreeId === worktreeId ? { ...sess, worktreeId: undefined } : sess,
-        );
-      }
-      // Remove the worktree from its workspace list.
-      const nextWorktrees: Record<string, Worktree[]> = {};
-      for (const [wsId, wts] of Object.entries(s.worktreesByWorkspaceId)) {
-        nextWorktrees[wsId] = wts.filter((wt) => wt.id !== worktreeId);
-      }
-      return {
-        tasksByWorktreeId: restTasks,
-        sessionsByWorkspaceId: nextSessions,
-        worktreesByWorkspaceId: nextWorktrees,
-      };
-    }),
-
-  removeBranch: (workspaceId, branchId) => {
-    const s = get();
-    // Cascade: remove all worktrees for this branch.
-    const worktreesToRemove = (s.worktreesByWorkspaceId[workspaceId] ?? [])
-      .filter((wt) => wt.branchId === branchId)
-      .map((wt) => wt.id);
-    for (const wtId of worktreesToRemove) {
-      get().removeWorktree(wtId);
-    }
-    set((cur) => ({
-      branchesByWorkspaceId: {
-        ...cur.branchesByWorkspaceId,
-        [workspaceId]: (cur.branchesByWorkspaceId[workspaceId] ?? []).filter(
-          (b) => b.id !== branchId,
-        ),
       },
-    }));
-  },
 
-  removeWorkspace: (workspaceId) => {
-    const s = get();
-    // Cascade: remove all branches (which cascade to worktrees).
-    const branches = s.branchesByWorkspaceId[workspaceId] ?? [];
-    for (const branch of branches) {
-      get().removeBranch(workspaceId, branch.id);
-    }
-    set((cur) => {
-      const { [workspaceId]: _branches, ...restBranches } = cur.branchesByWorkspaceId;
-      const { [workspaceId]: _sessions, ...restSessions } = cur.sessionsByWorkspaceId;
-      const { [workspaceId]: _worktrees, ...restWorktrees } = cur.worktreesByWorkspaceId;
-      const { [workspaceId]: _activeBranch, ...restActiveBranch } = cur.activeBranchIdByWorkspaceId;
-      return {
-        workspaces: cur.workspaces.filter((w) => w.id !== workspaceId),
-        branchesByWorkspaceId: restBranches,
-        sessionsByWorkspaceId: restSessions,
-        worktreesByWorkspaceId: restWorktrees,
-        activeBranchIdByWorkspaceId: restActiveBranch,
-      };
-    });
-  },
+      removeEntry: async (sk, path) => {
+        const ws = workspaceForScope(get().workspaces, sk);
+        if (!ws) return;
 
-  createFolder: (name) => {
-    const sk = getCurrentScopeKey(get());
-    void get().createEntry(sk, "", name, "dir");
-  },
+        const parts = path.split("/").filter(Boolean);
+        const parentPath = parts.slice(0, -1).join("/");
 
-  createFile: (folder, name) => {
-    const sk = getCurrentScopeKey(get());
-    void get().createEntry(sk, folder ?? "", name, "file");
-  },
+        try {
+          const provider =
+            ws.source.kind === "mock"
+              ? await (async () => {
+                  const { MockProvider } = await import("@/lib/fs/mock");
+                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+                })()
+              : await providerFor(ws.source, ws.name);
 
-  deleteEntry: (folder, name) => {
-    const s = get();
-    const sk = getCurrentScopeKey(s);
-    const path = folder ? `${folder}/${name}` : name;
+          await provider.remove(path);
 
-    // Ferme l'onglet si le fichier est ouvert
-    const openFiles = s.openFilesByScope[sk] ?? [];
-    const tabId: `file:${string}` = `file:${path}`;
-    if (openFiles.some((f) => f.id === tabId)) {
-      s.closeFile(tabId);
-    }
-
-    void get().removeEntry(sk, path);
-  },
-
-  openFile: (path) => {
-    const state = get();
-    const key = scopeKey(state.activeWorkspaceId, state.activeBranchId);
-    const id: `file:${string}` = `file:${path}`;
-    const current = state.openFilesByScope[key] ?? [];
-    const exists = current.some((f) => f.id === id);
-
-    if (exists) {
-      set((s) => ({
-        activeTabByScope: { ...s.activeTabByScope, [key]: id },
-      }));
-      return;
-    }
-
-    const binary = isBinaryPath(path);
-    const newTab: FileTab = { id, path, content: null, loading: !binary, isBinary: binary };
-
-    set((s) => ({
-      openFilesByScope: {
-        ...s.openFilesByScope,
-        [key]: [...(s.openFilesByScope[key] ?? []), newTab],
+          if (parentPath === "") {
+            await get().loadRoot(sk);
+          } else {
+            await get().loadChildren(sk, parentPath);
+          }
+          scheduleGitRefresh(sk, get);
+        } catch (e) {
+          if (e instanceof FsError) {
+            toast.error(e.message);
+          } else {
+            console.error("[removeEntry]", e);
+            toast.error("Impossible de supprimer l'entrée.");
+          }
+        }
       },
-      activeTabByScope: { ...s.activeTabByScope, [key]: id },
-    }));
 
-    if (binary) return;
+      getWorkspaceIdForBranch: (branchId) => {
+        const s = get();
+        for (const [wsId, branches] of Object.entries(s.branchesByWorkspaceId)) {
+          if (branches.some((b) => b.id === branchId)) return wsId;
+        }
+        return undefined;
+      },
 
-    const ws = workspaceForScope(state.workspaces, key);
-    if (!ws) return;
+      hydrateSessionsFromDb: async () => {
+        const MAX_ATTEMPTS = 10;
+        const RETRY_MS = 2000;
 
-    (async () => {
-      try {
-        const provider =
-          ws.source.kind === "mock"
-            ? await (async () => {
-                const { MockProvider } = await import("@/lib/fs/mock");
-                return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-              })()
-            : await providerFor(ws.source, ws.name);
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          const { workspaces } = get();
+          const remoteWorkspaces = workspaces.filter((w) => w.source.kind === "remote-agent");
+          if (remoteWorkspaces.length === 0) return;
 
-        const text = await provider.readFile(path);
+          let anySuccess = false;
+          for (const ws of remoteWorkspaces) {
+            if (ws.source.kind !== "remote-agent") continue;
+            try {
+              const provider = new RemoteAgentProvider(
+                ws.source.label,
+                ws.source.url,
+                ws.source.token,
+              );
+              await provider.connect();
+              const sessions = await persistence.sessions.list(provider, ws.id);
+              if (sessions.length === 0) {
+                anySuccess = true;
+                continue;
+              }
+              const workspaceTerminals = sessions.map((s) => ({
+                id: s.id,
+                kind: (s.cli as import("@/store/ide").TerminalKind) ?? "codex",
+                title: s.title ?? s.cli,
+                status: (s.status === "busy" ? "busy" : "idle") as "ready" | "busy" | "idle",
+                workspaceId: ws.id,
+                lastCommand: s.cli,
+              }));
+              set((cur) => ({
+                sessionsByWorkspaceId: {
+                  ...cur.sessionsByWorkspaceId,
+                  [ws.id]: workspaceTerminals,
+                },
+              }));
+              anySuccess = true;
+            } catch (e) {
+              if (attempt === MAX_ATTEMPTS) {
+                console.warn(
+                  `[store] hydrateSessionsFromDb: failed for workspace ${ws.id} after ${MAX_ATTEMPTS} attempts`,
+                  e,
+                );
+              } else {
+                console.log(
+                  `[store] hydrateSessionsFromDb: attempt ${attempt}/${MAX_ATTEMPTS} failed for ${ws.id}, retrying in ${RETRY_MS}ms`,
+                );
+              }
+            }
+          }
 
+          if (anySuccess) return;
+          if (attempt < MAX_ATTEMPTS) {
+            await new Promise<void>((resolve) => setTimeout(resolve, RETRY_MS));
+          }
+        }
+      },
+
+      setActiveWorkspace: (id) => {
         set((s) => {
-          const files = s.openFilesByScope[key] ?? [];
+          const branches = s.branchesByWorkspaceId[id] ?? [];
+          const remembered = s.activeBranchIdByWorkspaceId[id];
+          const nextBranchId =
+            remembered && branches.some((b) => b.id === remembered)
+              ? remembered
+              : (branches[0]?.id ?? s.activeBranchId);
+          const key = scopeKey(id, nextBranchId);
+          const nextWorktreeId =
+            s.activeWorktreeIdByScope[key] ??
+            getDefaultWorktreeId(s.worktreesByWorkspaceId, id, nextBranchId);
+          const isMock = s.workspaces.find((w) => w.id === id)?.source.kind === "mock";
           return {
-            openFilesByScope: {
-              ...s.openFilesByScope,
-              [key]: files.map((f) => (f.id === id ? { ...f, content: text, loading: false } : f)),
-            },
+            activeWorkspaceId: id,
+            activeBranchId: nextBranchId,
+            activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [id]: nextBranchId },
+            activeWorktreeIdByScope: nextWorktreeId
+              ? { ...s.activeWorktreeIdByScope, [key]: nextWorktreeId }
+              : s.activeWorktreeIdByScope,
+            fileTree: isMock ? MOCK_FILE_TREE : {},
+            rootFiles: isMock ? MOCK_ROOT_FILES : [],
+            fileTreeLoading: !isMock,
+            treeByScope: s.treeByScope[key]
+              ? s.treeByScope
+              : { ...s.treeByScope, [key]: makeScopeRootNode(key) },
           };
         });
-      } catch (e) {
-        const msg = e instanceof FsError ? e.message : "Failed to read file";
-        toast.error(msg);
+        void get().loadRoot(scopeKey(id, get().activeBranchId));
+      },
+
+      setActiveBranch: (id) => {
         set((s) => {
-          const files = s.openFilesByScope[key] ?? [];
+          let wsId = s.activeWorkspaceId;
+          for (const [wId, branches] of Object.entries(s.branchesByWorkspaceId)) {
+            if (branches.some((b) => b.id === id)) {
+              wsId = wId;
+              break;
+            }
+          }
+          const key = scopeKey(wsId, id);
+          const nextWorktreeId =
+            s.activeWorktreeIdByScope[key] ??
+            getDefaultWorktreeId(s.worktreesByWorkspaceId, wsId, id);
+          const isMock = isMockWorkspace(s.workspaces, wsId);
           return {
-            openFilesByScope: {
-              ...s.openFilesByScope,
-              [key]: files.map((f) =>
-                f.id === id ? { ...f, content: null, loading: false, error: msg } : f,
+            activeBranchId: id,
+            activeWorkspaceId: wsId,
+            activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [wsId]: id },
+            activeWorktreeIdByScope: nextWorktreeId
+              ? { ...s.activeWorktreeIdByScope, [key]: nextWorktreeId }
+              : s.activeWorktreeIdByScope,
+            fileTree: isMock ? MOCK_FILE_TREE : {},
+            rootFiles: isMock ? MOCK_ROOT_FILES : [],
+            fileTreeLoading: !isMock,
+            treeByScope: s.treeByScope[key]
+              ? s.treeByScope
+              : { ...s.treeByScope, [key]: makeScopeRootNode(key) },
+          };
+        });
+        const newSk = scopeKey(get().activeWorkspaceId, id);
+        void get().loadRoot(newSk);
+        void get().refreshGitStatus(newSk);
+      },
+
+      setActiveTab: (id) =>
+        set((s) => {
+          const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
+          return { activeTabByScope: { ...s.activeTabByScope, [key]: id } };
+        }),
+
+      setActiveWorktree: (id) =>
+        set((s) => {
+          const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
+          return {
+            activeWorktreeIdByScope: { ...s.activeWorktreeIdByScope, [key]: id },
+          };
+        }),
+
+      toggleFolder: (name) =>
+        set((s) => {
+          const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
+          const current = s.expandedFoldersByScope[key] ?? {};
+          return {
+            expandedFoldersByScope: {
+              ...s.expandedFoldersByScope,
+              [key]: { ...current, [name]: !current[name] },
+            },
+          };
+        }),
+
+      toggleFiles: () => set((s) => ({ showFiles: !s.showFiles })),
+      toggleSidebar: () => set((s) => ({ showSidebar: !s.showSidebar })),
+      toggleTerminal: () => set((s) => ({ showTerminal: !s.showTerminal })),
+      toggleAgentPanel: () => set((s) => ({ showAgentPanel: !s.showAgentPanel })),
+      setApplyingFromUrl: (v) => set({ applyingFromUrl: v }),
+      setActiveAgent: (k) => set({ activeAgent: k }),
+      togglePreview: () => set((s) => ({ previewMode: !s.previewMode })),
+      setTheme: (theme) => {
+        writeStoredTheme(theme);
+        set({ theme });
+      },
+      setFilesTab: (t) => set({ filesTab: t }),
+      toggleThinking: () => set((s) => ({ thinking: !s.thinking })),
+      toggleWebSearch: () => set((s) => ({ webSearch: !s.webSearch })),
+      setCodexApiKey: (key) => {
+        if (typeof window !== "undefined") {
+          if (key) window.localStorage.setItem("codex-api-key", key);
+          else window.localStorage.removeItem("codex-api-key");
+        }
+        set({ codexApiKey: key || undefined });
+      },
+      setCodexModel: (model) => {
+        if (typeof window !== "undefined") {
+          if (model) window.localStorage.setItem("codex-model", model);
+          else window.localStorage.removeItem("codex-model");
+        }
+        set({ codexModel: model || undefined });
+      },
+      setModelForCli: (cli, model) => {
+        const next = { ...get().selectedModelByCli, [cli]: model };
+        if (typeof window !== "undefined")
+          window.localStorage.setItem("selected-model-by-cli", JSON.stringify(next));
+        set({ selectedModelByCli: next });
+      },
+      setApprovalMode: (cli, mode) => {
+        const next = { ...get().approvalModeByCli, [cli]: mode };
+        if (typeof window !== "undefined")
+          window.localStorage.setItem("approval-mode-by-cli", JSON.stringify(next));
+        set({ approvalModeByCli: next });
+      },
+      setCodexAuth: (auth) => {
+        if (typeof window !== "undefined") {
+          if (auth) window.localStorage.setItem("codex-auth", JSON.stringify(auth));
+          else window.localStorage.removeItem("codex-auth");
+        }
+        set({ codexAuth: auth ?? undefined });
+      },
+      refreshCodexTokens: async () => {
+        const current = get().codexAuth;
+        if (!current) return false;
+        try {
+          const { refreshTokens, parseIdTokenClaims } = await import("@/lib/codex-auth");
+          const next = await refreshTokens({ data: { refreshToken: current.refreshToken } });
+          const claims = parseIdTokenClaims(next.idToken);
+          get().setCodexAuth({
+            idToken: next.idToken,
+            accessToken: next.accessToken,
+            refreshToken: next.refreshToken,
+            lastRefresh: new Date().toISOString(),
+            email: claims.email ?? current.email,
+            chatgptPlanType: claims.chatgptPlanType ?? current.chatgptPlanType,
+            chatgptAccountId: claims.chatgptAccountId ?? current.chatgptAccountId,
+          });
+          return true;
+        } catch (e) {
+          console.error("[refreshCodexTokens]", e);
+          return false;
+        }
+      },
+
+      sendMessage: (content) =>
+        set((s) => {
+          const activeSessionId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
+          if (!activeSessionId) return s;
+          const userMsg: ChatMessage = {
+            id: crypto.randomUUID(),
+            role: "user",
+            content,
+          };
+          const assistantMsg: ChatMessage = {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            model: "Anthropic · Opus 4.6 (1M)",
+            content: generateAssistantReply(content),
+          };
+          const prev = s.messagesBySessionId[activeSessionId] ?? [];
+          return {
+            messagesBySessionId: {
+              ...s.messagesBySessionId,
+              [activeSessionId]: [...prev, userMsg, assistantMsg],
+            },
+          };
+        }),
+
+      addBranch: (workspaceId, name) =>
+        set((s) => {
+          const branchId = crypto.randomUUID();
+          const worktreeId = crypto.randomUUID();
+          const key = scopeKey(workspaceId, branchId);
+          const newBranch: Branch = { id: branchId, name, age: "just now", status: "none" };
+          return {
+            branchesByWorkspaceId: {
+              ...s.branchesByWorkspaceId,
+              [workspaceId]: [...(s.branchesByWorkspaceId[workspaceId] ?? []), newBranch],
+            },
+            tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
+            worktreesByWorkspaceId: {
+              ...s.worktreesByWorkspaceId,
+              [workspaceId]: [
+                ...(s.worktreesByWorkspaceId[workspaceId] ?? []),
+                {
+                  id: worktreeId,
+                  workspaceId,
+                  branchId,
+                  name: name.split("/").pop() ?? name,
+                  path: `/worktrees/${workspaceId}/${name.replaceAll("/", "-")}`,
+                  baseBranch: "main",
+                  status: "ready",
+                  terminals: createTerminalSet(worktreeId),
+                },
+              ],
+            },
+            activeWorktreeIdByScope: {
+              ...s.activeWorktreeIdByScope,
+              [key]: worktreeId,
+            },
+          };
+        }),
+
+      toggleStar: (branchId) =>
+        set((s) => {
+          const next: Record<string, Branch[]> = {};
+          for (const [wsId, branches] of Object.entries(s.branchesByWorkspaceId)) {
+            next[wsId] = branches.map((b) =>
+              b.id === branchId ? { ...b, starred: !b.starred } : b,
+            );
+          }
+          return { branchesByWorkspaceId: next };
+        }),
+
+      addWorkspace: (name, source) => {
+        const id = crypto.randomUUID();
+        const branchId = crypto.randomUUID();
+        const worktreeId = crypto.randomUUID();
+        const effectiveSource: WorkspaceSource = source ?? { kind: "mock", id };
+        const color =
+          effectiveSource.kind === "local-web"
+            ? "oklch(0.55 0.15 140)"
+            : effectiveSource.kind === "remote-agent"
+              ? "oklch(0.55 0.15 30)"
+              : "oklch(0.50 0.15 200)";
+        set((s) => ({
+          workspaces: [
+            ...s.workspaces,
+            {
+              id,
+              letter: name.charAt(0).toUpperCase() || "W",
+              name,
+              color,
+              source: effectiveSource,
+            },
+          ],
+          branchesByWorkspaceId: {
+            ...s.branchesByWorkspaceId,
+            [id]: [{ id: branchId, name: "main", age: "just now", starred: true, status: "none" }],
+          },
+          activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [id]: branchId },
+          tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
+          worktreesByWorkspaceId: {
+            ...s.worktreesByWorkspaceId,
+            [id]: [
+              {
+                id: worktreeId,
+                workspaceId: id,
+                branchId,
+                name: "main",
+                path: `/worktrees/${id}/main`,
+                baseBranch: "main",
+                status: "ready",
+                terminals: createTerminalSet(worktreeId),
+              },
+            ],
+          },
+          activeWorktreeIdByScope: {
+            ...s.activeWorktreeIdByScope,
+            [scopeKey(id, branchId)]: worktreeId,
+          },
+        }));
+        return id;
+      },
+
+      addTask: (worktreeId, title, description) =>
+        set((s) => ({
+          tasksByWorktreeId: {
+            ...s.tasksByWorktreeId,
+            [worktreeId]: [
+              ...(s.tasksByWorktreeId[worktreeId] ?? []),
+              {
+                id: crypto.randomUUID(),
+                title,
+                description: description?.trim() ? description.trim() : undefined,
+                status: "todo",
+                assignee: "Codex",
+                updatedAt: "just now",
+              },
+            ],
+          },
+        })),
+
+      updateTask: (worktreeId, taskId, patch) =>
+        set((s) => ({
+          tasksByWorktreeId: {
+            ...s.tasksByWorktreeId,
+            [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).map((task) => {
+              if (task.id !== taskId) return task;
+              const nextTitle = patch.title !== undefined ? patch.title.trim() : task.title;
+              const nextDescription =
+                patch.description !== undefined
+                  ? patch.description.trim() || undefined
+                  : task.description;
+              return {
+                ...task,
+                title: nextTitle || task.title,
+                description: nextDescription,
+                updatedAt: "just now",
+              };
+            }),
+          },
+        })),
+
+      removeTask: (worktreeId, taskId) =>
+        set((s) => ({
+          tasksByWorktreeId: {
+            ...s.tasksByWorktreeId,
+            [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).filter(
+              (task) => task.id !== taskId,
+            ),
+          },
+        })),
+
+      cycleTaskStatus: (worktreeId, taskId) =>
+        set((s) => {
+          const nextStatus: Record<TaskStatus, TaskStatus> = {
+            todo: "in_progress",
+            in_progress: "blocked",
+            blocked: "done",
+            done: "todo",
+          };
+          return {
+            tasksByWorktreeId: {
+              ...s.tasksByWorktreeId,
+              [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).map((task) =>
+                task.id === taskId
+                  ? { ...task, status: nextStatus[task.status], updatedAt: "just now" }
+                  : task,
               ),
             },
           };
+        }),
+
+      setTaskStatus: (worktreeId, taskId, status) =>
+        set((s) => ({
+          tasksByWorktreeId: {
+            ...s.tasksByWorktreeId,
+            [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).map((task) =>
+              task.id === taskId ? { ...task, status, updatedAt: "just now" } : task,
+            ),
+          },
+        })),
+
+      addWorktree: (workspaceId, branchId, name) =>
+        set((s) => {
+          const worktreeId = crypto.randomUUID();
+          const branchName =
+            (s.branchesByWorkspaceId[workspaceId] ?? []).find((b) => b.id === branchId)?.name ??
+            "branch";
+          const displayName = name?.trim() || branchName.split("/").pop() || branchName;
+          const key = scopeKey(workspaceId, branchId);
+          return {
+            worktreesByWorkspaceId: {
+              ...s.worktreesByWorkspaceId,
+              [workspaceId]: [
+                ...(s.worktreesByWorkspaceId[workspaceId] ?? []),
+                {
+                  id: worktreeId,
+                  workspaceId,
+                  branchId,
+                  name: displayName,
+                  path: `/worktrees/${workspaceId}/${displayName.replaceAll("/", "-")}`,
+                  baseBranch: "main",
+                  status: "ready",
+                  terminals: createTerminalSet(worktreeId),
+                },
+              ],
+            },
+            tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
+            activeWorktreeIdByScope: {
+              ...s.activeWorktreeIdByScope,
+              [key]: worktreeId,
+            },
+            activeTabByScope: {
+              ...s.activeTabByScope,
+              [key]: `terminal:${worktreeId}-codex`,
+            },
+          };
+        }),
+
+      addTerminal: (worktreeId, kind) => {
+        const id = `${worktreeId}-${kind}-${crypto.randomUUID().slice(0, 8)}`;
+        const titleByKind: Record<TerminalKind, string> = {
+          codex: "Codex",
+          claude: "Claude Code",
+          opencode: "OpenCode",
+          gemini: "Gemini",
+        };
+        const commandByKind: Record<TerminalKind, string> = {
+          codex: "codex run",
+          claude: "claude",
+          opencode: "opencode run",
+          gemini: "gemini",
+        };
+        set((s) => {
+          const updated: Record<string, Worktree[]> = { ...s.worktreesByWorkspaceId };
+          for (const [wsId, wts] of Object.entries(s.worktreesByWorkspaceId)) {
+            if (wts.some((w) => w.id === worktreeId)) {
+              updated[wsId] = wts.map((w) =>
+                w.id === worktreeId
+                  ? {
+                      ...w,
+                      terminals: [
+                        ...w.terminals,
+                        {
+                          id,
+                          kind,
+                          title: titleByKind[kind],
+                          status: "ready",
+                          workspaceId: wsId,
+                          worktreeId,
+                          lastCommand: commandByKind[kind],
+                        },
+                      ],
+                    }
+                  : w,
+              );
+            }
+          }
+          return { worktreesByWorkspaceId: updated };
         });
-      }
-    })();
-  },
+        return id;
+      },
 
-  saveFile: async (tabId) => {
-    const state = get();
-    const key = scopeKey(state.activeWorkspaceId, state.activeBranchId);
-    const activeId = tabId ?? (state.activeTabByScope[key] as `file:${string}` | undefined);
-    if (!activeId?.startsWith("file:")) return;
+      pinSessionToWorktree: (sessionId, worktreeId) =>
+        set((s) => {
+          const next: Record<string, WorkspaceTerminal[]> = {};
+          for (const [wsId, sessions] of Object.entries(s.sessionsByWorkspaceId)) {
+            next[wsId] = sessions.map((sess) =>
+              sess.id === sessionId ? { ...sess, worktreeId: worktreeId ?? undefined } : sess,
+            );
+          }
+          return { sessionsByWorkspaceId: next };
+        }),
 
-    const files = state.openFilesByScope[key] ?? [];
-    const tab = files.find((f) => f.id === activeId);
-    if (!tab || !tab.isDirty || tab.content === null) return;
+      setActiveSession: (sessionId) =>
+        set((s) => ({
+          activeSessionIdByWorkspaceId: {
+            ...s.activeSessionIdByWorkspaceId,
+            [s.activeWorkspaceId]: sessionId,
+          },
+        })),
 
-    const ws = workspaceForScope(state.workspaces, key);
-    if (!ws) return;
+      addAgentSession: (kind) => {
+        const titleByKind: Record<TerminalKind, string> = {
+          codex: "Codex",
+          claude: "Claude Code",
+          opencode: "OpenCode",
+          gemini: "Gemini",
+        };
+        const commandByKind: Record<TerminalKind, string> = {
+          codex: "codex run",
+          claude: "claude",
+          opencode: "opencode run",
+          gemini: "gemini",
+        };
+        set((s) => {
+          const workspaceId = s.activeWorkspaceId;
+          const id = `${workspaceId}-${kind}-${crypto.randomUUID().slice(0, 8)}`;
+          const session: WorkspaceTerminal = {
+            id,
+            kind,
+            title: titleByKind[kind],
+            status: "ready",
+            workspaceId,
+            lastCommand: commandByKind[kind],
+          };
+          const current = s.sessionsByWorkspaceId[workspaceId] ?? [];
+          return {
+            sessionsByWorkspaceId: {
+              ...s.sessionsByWorkspaceId,
+              [workspaceId]: [...current, session],
+            },
+            activeSessionIdByWorkspaceId: {
+              ...s.activeSessionIdByWorkspaceId,
+              [workspaceId]: id,
+            },
+          };
+        });
+      },
 
-    try {
-      const provider =
-        ws.source.kind === "mock"
-          ? await (async () => {
-              const { MockProvider } = await import("@/lib/fs/mock");
-              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-            })()
-          : await providerFor(ws.source, ws.name);
+      closeAgentSession: (sessionId) =>
+        set((s) => {
+          const nextSessions: Record<string, WorkspaceTerminal[]> = {};
+          for (const [wsId, list] of Object.entries(s.sessionsByWorkspaceId)) {
+            nextSessions[wsId] = list.filter((t) => t.id !== sessionId);
+          }
+          const nextActive: Record<string, string> = { ...s.activeSessionIdByWorkspaceId };
+          for (const [wsId, id] of Object.entries(nextActive)) {
+            if (id === sessionId) {
+              const remaining = nextSessions[wsId] ?? [];
+              if (remaining.length > 0) nextActive[wsId] = remaining[remaining.length - 1].id;
+              else delete nextActive[wsId];
+            }
+          }
+          // Drop messages for the closed session.
+          const { [sessionId]: _dropped, ...restMessages } = s.messagesBySessionId;
+          // Remove from pinned lists.
+          const nextPinned: Record<string, string[]> = {};
+          for (const [wsId, pins] of Object.entries(s.pinnedSessionIdsByWorkspaceId)) {
+            nextPinned[wsId] = pins.filter((id) => id !== sessionId);
+          }
+          return {
+            sessionsByWorkspaceId: nextSessions,
+            activeSessionIdByWorkspaceId: nextActive,
+            messagesBySessionId: restMessages,
+            pinnedSessionIdsByWorkspaceId: nextPinned,
+          };
+        }),
 
-      await provider.writeFile(tab.path, tab.content);
+      pinSession: (sessionId) =>
+        set((s) => {
+          const workspaceId = s.activeWorkspaceId;
+          const activeId = s.activeSessionIdByWorkspaceId[workspaceId];
+          if (sessionId === activeId) return {};
+          const current = s.pinnedSessionIdsByWorkspaceId[workspaceId] ?? [];
+          if (current.includes(sessionId)) return {};
+          if (current.length >= 3) return {};
+          return {
+            pinnedSessionIdsByWorkspaceId: {
+              ...s.pinnedSessionIdsByWorkspaceId,
+              [workspaceId]: [...current, sessionId],
+            },
+          };
+        }),
 
-      set((s) => {
-        const f = s.openFilesByScope[key] ?? [];
-        return {
+      unpinSession: (sessionId) =>
+        set((s) => {
+          const workspaceId = s.activeWorkspaceId;
+          const current = s.pinnedSessionIdsByWorkspaceId[workspaceId] ?? [];
+          return {
+            pinnedSessionIdsByWorkspaceId: {
+              ...s.pinnedSessionIdsByWorkspaceId,
+              [workspaceId]: current.filter((id) => id !== sessionId),
+            },
+          };
+        }),
+
+      removeWorktree: (worktreeId) =>
+        set((s) => {
+          // Drop tasks for this worktree.
+          const { [worktreeId]: _tasks, ...restTasks } = s.tasksByWorktreeId;
+          // Clear pin on any session pointing to this worktree.
+          const nextSessions: Record<string, WorkspaceTerminal[]> = {};
+          for (const [wsId, sessions] of Object.entries(s.sessionsByWorkspaceId)) {
+            nextSessions[wsId] = sessions.map((sess) =>
+              sess.worktreeId === worktreeId ? { ...sess, worktreeId: undefined } : sess,
+            );
+          }
+          // Remove the worktree from its workspace list.
+          const nextWorktrees: Record<string, Worktree[]> = {};
+          for (const [wsId, wts] of Object.entries(s.worktreesByWorkspaceId)) {
+            nextWorktrees[wsId] = wts.filter((wt) => wt.id !== worktreeId);
+          }
+          return {
+            tasksByWorktreeId: restTasks,
+            sessionsByWorkspaceId: nextSessions,
+            worktreesByWorkspaceId: nextWorktrees,
+          };
+        }),
+
+      removeBranch: (workspaceId, branchId) => {
+        const s = get();
+        // Cascade: remove all worktrees for this branch.
+        const worktreesToRemove = (s.worktreesByWorkspaceId[workspaceId] ?? [])
+          .filter((wt) => wt.branchId === branchId)
+          .map((wt) => wt.id);
+        for (const wtId of worktreesToRemove) {
+          get().removeWorktree(wtId);
+        }
+        set((cur) => ({
+          branchesByWorkspaceId: {
+            ...cur.branchesByWorkspaceId,
+            [workspaceId]: (cur.branchesByWorkspaceId[workspaceId] ?? []).filter(
+              (b) => b.id !== branchId,
+            ),
+          },
+        }));
+      },
+
+      removeWorkspace: (workspaceId) => {
+        const s = get();
+        // Cascade: remove all branches (which cascade to worktrees).
+        const branches = s.branchesByWorkspaceId[workspaceId] ?? [];
+        for (const branch of branches) {
+          get().removeBranch(workspaceId, branch.id);
+        }
+        set((cur) => {
+          const { [workspaceId]: _branches, ...restBranches } = cur.branchesByWorkspaceId;
+          const { [workspaceId]: _sessions, ...restSessions } = cur.sessionsByWorkspaceId;
+          const { [workspaceId]: _worktrees, ...restWorktrees } = cur.worktreesByWorkspaceId;
+          const { [workspaceId]: _activeBranch, ...restActiveBranch } =
+            cur.activeBranchIdByWorkspaceId;
+          return {
+            workspaces: cur.workspaces.filter((w) => w.id !== workspaceId),
+            branchesByWorkspaceId: restBranches,
+            sessionsByWorkspaceId: restSessions,
+            worktreesByWorkspaceId: restWorktrees,
+            activeBranchIdByWorkspaceId: restActiveBranch,
+          };
+        });
+      },
+
+      createFolder: (name) => {
+        const sk = getCurrentScopeKey(get());
+        void get().createEntry(sk, "", name, "dir");
+      },
+
+      createFile: (folder, name) => {
+        const sk = getCurrentScopeKey(get());
+        void get().createEntry(sk, folder ?? "", name, "file");
+      },
+
+      deleteEntry: (folder, name) => {
+        const s = get();
+        const sk = getCurrentScopeKey(s);
+        const path = folder ? `${folder}/${name}` : name;
+
+        // Ferme l'onglet si le fichier est ouvert
+        const openFiles = s.openFilesByScope[sk] ?? [];
+        const tabId: `file:${string}` = `file:${path}`;
+        if (openFiles.some((f) => f.id === tabId)) {
+          s.closeFile(tabId);
+        }
+
+        void get().removeEntry(sk, path);
+      },
+
+      openFile: (path) => {
+        const state = get();
+        const key = scopeKey(state.activeWorkspaceId, state.activeBranchId);
+        const id: `file:${string}` = `file:${path}`;
+        const current = state.openFilesByScope[key] ?? [];
+        const exists = current.some((f) => f.id === id);
+
+        if (exists) {
+          set((s) => ({
+            activeTabByScope: { ...s.activeTabByScope, [key]: id },
+          }));
+          return;
+        }
+
+        const binary = isBinaryPath(path);
+        const newTab: FileTab = { id, path, content: null, loading: !binary, isBinary: binary };
+
+        set((s) => ({
           openFilesByScope: {
             ...s.openFilesByScope,
-            [key]: f.map((t) => (t.id === activeId ? { ...t, isDirty: false } : t)),
+            [key]: [...(s.openFilesByScope[key] ?? []), newTab],
           },
-        };
-      });
-      scheduleGitRefresh(key, get);
-      toast.success(`Saved ${tab.path}`);
-    } catch (e) {
-      const msg = e instanceof FsError ? e.message : "Failed to save file";
-      toast.error(msg);
-    }
-  },
+          activeTabByScope: { ...s.activeTabByScope, [key]: id },
+        }));
 
-  updateFileContent: (tabId, content) =>
-    set((s) => {
-      const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
-      const files = s.openFilesByScope[key] ?? [];
-      return {
-        openFilesByScope: {
-          ...s.openFilesByScope,
-          [key]: files.map((f) => (f.id === tabId ? { ...f, content, isDirty: true } : f)),
-        },
-      };
-    }),
+        if (binary) return;
 
-  closeFile: (id) =>
-    set((s) => {
-      const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
-      const current = s.openFilesByScope[key] ?? [];
-      const openFiles = current.filter((f) => f.id !== id);
-      const wasActive = (s.activeTabByScope[key] ?? "overview") === id;
-      const next: TabId = wasActive
-        ? (openFiles[openFiles.length - 1]?.id ?? "overview")
-        : (s.activeTabByScope[key] ?? "overview");
-      return {
-        openFilesByScope: { ...s.openFilesByScope, [key]: openFiles },
-        activeTabByScope: { ...s.activeTabByScope, [key]: next },
-      };
-    }),
+        const ws = workspaceForScope(state.workspaces, key);
+        if (!ws) return;
+
+        (async () => {
+          try {
+            const provider =
+              ws.source.kind === "mock"
+                ? await (async () => {
+                    const { MockProvider } = await import("@/lib/fs/mock");
+                    return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+                  })()
+                : await providerFor(ws.source, ws.name);
+
+            const text = await provider.readFile(path);
+
+            set((s) => {
+              const files = s.openFilesByScope[key] ?? [];
+              return {
+                openFilesByScope: {
+                  ...s.openFilesByScope,
+                  [key]: files.map((f) =>
+                    f.id === id ? { ...f, content: text, loading: false } : f,
+                  ),
+                },
+              };
+            });
+          } catch (e) {
+            const msg = e instanceof FsError ? e.message : "Failed to read file";
+            toast.error(msg);
+            set((s) => {
+              const files = s.openFilesByScope[key] ?? [];
+              return {
+                openFilesByScope: {
+                  ...s.openFilesByScope,
+                  [key]: files.map((f) =>
+                    f.id === id ? { ...f, content: null, loading: false, error: msg } : f,
+                  ),
+                },
+              };
+            });
+          }
+        })();
+      },
+
+      saveFile: async (tabId) => {
+        const state = get();
+        const key = scopeKey(state.activeWorkspaceId, state.activeBranchId);
+        const activeId = tabId ?? (state.activeTabByScope[key] as `file:${string}` | undefined);
+        if (!activeId?.startsWith("file:")) return;
+
+        const files = state.openFilesByScope[key] ?? [];
+        const tab = files.find((f) => f.id === activeId);
+        if (!tab || !tab.isDirty || tab.content === null) return;
+
+        const ws = workspaceForScope(state.workspaces, key);
+        if (!ws) return;
+
+        try {
+          const provider =
+            ws.source.kind === "mock"
+              ? await (async () => {
+                  const { MockProvider } = await import("@/lib/fs/mock");
+                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+                })()
+              : await providerFor(ws.source, ws.name);
+
+          await provider.writeFile(tab.path, tab.content);
+
+          set((s) => {
+            const f = s.openFilesByScope[key] ?? [];
+            return {
+              openFilesByScope: {
+                ...s.openFilesByScope,
+                [key]: f.map((t) => (t.id === activeId ? { ...t, isDirty: false } : t)),
+              },
+            };
+          });
+          scheduleGitRefresh(key, get);
+          toast.success(`Saved ${tab.path}`);
+        } catch (e) {
+          const msg = e instanceof FsError ? e.message : "Failed to save file";
+          toast.error(msg);
+        }
+      },
+
+      updateFileContent: (tabId, content) =>
+        set((s) => {
+          const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
+          const files = s.openFilesByScope[key] ?? [];
+          return {
+            openFilesByScope: {
+              ...s.openFilesByScope,
+              [key]: files.map((f) => (f.id === tabId ? { ...f, content, isDirty: true } : f)),
+            },
+          };
+        }),
+
+      closeFile: (id) =>
+        set((s) => {
+          const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
+          const current = s.openFilesByScope[key] ?? [];
+          const openFiles = current.filter((f) => f.id !== id);
+          const wasActive = (s.activeTabByScope[key] ?? "overview") === id;
+          const next: TabId = wasActive
+            ? (openFiles[openFiles.length - 1]?.id ?? "overview")
+            : (s.activeTabByScope[key] ?? "overview");
+          return {
+            openFilesByScope: { ...s.openFilesByScope, [key]: openFiles },
+            activeTabByScope: { ...s.activeTabByScope, [key]: next },
+          };
+        }),
     }),
     {
       name: "ide-ux-agentik",
       storage: createJSONStorage(() => localStorage),
       version: 1,
       migrate: (_persistedState, _version) => _persistedState as State,
-      partialize: (state) => ({
-        workspaces: state.workspaces,
-        activeWorkspaceId: state.activeWorkspaceId,
-        activeBranchIdByWorkspaceId: state.activeBranchIdByWorkspaceId,
-        activeSessionIdByWorkspaceId: state.activeSessionIdByWorkspaceId,
-        pinnedSessionIdsByWorkspaceId: state.pinnedSessionIdsByWorkspaceId,
-        selectedModelByCli: state.selectedModelByCli,
-        approvalModeByCli: state.approvalModeByCli,
-      }) as State,
-      onRehydrateStorage: () => (_state, error) => {
+      partialize: (state) =>
+        ({
+          workspaces: state.workspaces,
+          activeWorkspaceId: state.activeWorkspaceId,
+          activeBranchIdByWorkspaceId: state.activeBranchIdByWorkspaceId,
+          activeSessionIdByWorkspaceId: state.activeSessionIdByWorkspaceId,
+          pinnedSessionIdsByWorkspaceId: state.pinnedSessionIdsByWorkspaceId,
+          selectedModelByCli: state.selectedModelByCli,
+          approvalModeByCli: state.approvalModeByCli,
+        }) as State,
+      onRehydrateStorage: () => (state, error) => {
         if (error) {
           console.warn("[store] rehydration error:", error);
           return;
         }
-        void useIDE.getState().hydrateSessionsFromDb();
+        // Defer one tick: the `useIDE` const isn't bound yet while create()
+        // is still returning, and calling useIDE.getState() synchronously
+        // would hit a TDZ. The rehydrated `state` snapshot carries the
+        // action already.
+        setTimeout(() => {
+          try {
+            void state?.hydrateSessionsFromDb();
+          } catch (e) {
+            console.warn("[store] hydrateSessionsFromDb failed:", e);
+          }
+        }, 0);
       },
     },
   ),
