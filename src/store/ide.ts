@@ -254,6 +254,7 @@ type State = {
   closeAgentSession: (sessionId: string) => void;
   setCodexApiKey: (key: string) => void;
   setCodexAuth: (auth: State["codexAuth"] | null) => void;
+  refreshCodexTokens: () => Promise<boolean>;
   togglePreview: () => void;
   setTheme: (t: Theme) => void;
   setFilesTab: (t: "files" | "changes" | "checks") => void;
@@ -1106,6 +1107,28 @@ export const useIDE = create<State>((set, get) => ({
       else window.localStorage.removeItem("codex-auth");
     }
     set({ codexAuth: auth ?? undefined });
+  },
+  refreshCodexTokens: async () => {
+    const current = get().codexAuth;
+    if (!current) return false;
+    try {
+      const { refreshTokens, parseIdTokenClaims } = await import("@/lib/codex-auth");
+      const next = await refreshTokens({ data: { refreshToken: current.refreshToken } });
+      const claims = parseIdTokenClaims(next.idToken);
+      get().setCodexAuth({
+        idToken: next.idToken,
+        accessToken: next.accessToken,
+        refreshToken: next.refreshToken,
+        lastRefresh: new Date().toISOString(),
+        email: claims.email ?? current.email,
+        chatgptPlanType: claims.chatgptPlanType ?? current.chatgptPlanType,
+        chatgptAccountId: claims.chatgptAccountId ?? current.chatgptAccountId,
+      });
+      return true;
+    } catch (e) {
+      console.error("[refreshCodexTokens]", e);
+      return false;
+    }
   },
 
   sendMessage: (content) =>

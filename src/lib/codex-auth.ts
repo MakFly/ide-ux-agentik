@@ -156,6 +156,39 @@ export const exchangeCode = createServerFn({ method: "POST" })
     };
   });
 
+// --- Step 4 (later): refresh ---------------------------------------------
+
+const RefreshSchema = z.object({ refreshToken: z.string().min(1) });
+
+export const refreshTokens = createServerFn({ method: "POST" })
+  .inputValidator((d: unknown) => RefreshSchema.parse(d))
+  .handler(async ({ data }): Promise<CodexTokens> => {
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: CODEX_CLIENT_ID,
+      refresh_token: data.refreshToken,
+    });
+    const resp = await fetch(`${ISSUER}/oauth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+    if (!resp.ok) {
+      throw new Error(`refresh failed: ${resp.status} ${await resp.text()}`);
+    }
+    const json = (await resp.json()) as {
+      id_token: string;
+      access_token: string;
+      refresh_token?: string;
+    };
+    return {
+      idToken: json.id_token,
+      accessToken: json.access_token,
+      // OpenAI may or may not rotate the refresh token; keep previous one if absent.
+      refreshToken: json.refresh_token ?? data.refreshToken,
+    };
+  });
+
 // --- Helpers -------------------------------------------------------------
 
 /**

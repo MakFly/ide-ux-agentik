@@ -106,6 +106,14 @@ function RootComponent() {
 
   useEffect(() => {
     hydrate();
+    // If Codex auth is older than 23h, silently refresh it in the background.
+    const s = useIDE.getState();
+    if (s.codexAuth) {
+      const ageMs = Date.now() - new Date(s.codexAuth.lastRefresh).getTime();
+      if (ageMs > 23 * 60 * 60 * 1000) {
+        void s.refreshCodexTokens();
+      }
+    }
   }, [hydrate]);
 
   return (

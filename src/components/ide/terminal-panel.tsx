@@ -230,6 +230,12 @@ export function TerminalPanel() {
       const env: Record<string, string> = {};
       if (codexApiKey) env.OPENAI_API_KEY = codexApiKey;
       if (codexAuth) {
+        // Refresh opportunistically if the tokens are >12h old — keeps access_token fresh.
+        const ageMs = Date.now() - new Date(codexAuth.lastRefresh).getTime();
+        if (ageMs > 12 * 60 * 60 * 1000) {
+          await useIDE.getState().refreshCodexTokens();
+        }
+        const fresh = useIDE.getState().codexAuth ?? codexAuth;
         // Write auth.json so `codex` on the agent picks up the browser-side login.
         // CODEX_HOME is relative to the PTY cwd (= --root of the agent).
         try {
@@ -238,9 +244,9 @@ export function TerminalPanel() {
           await provider.writeFile(
             ".codex-home/auth.json",
             buildAuthDotJson({
-              idToken: codexAuth.idToken,
-              accessToken: codexAuth.accessToken,
-              refreshToken: codexAuth.refreshToken,
+              idToken: fresh.idToken,
+              accessToken: fresh.accessToken,
+              refreshToken: fresh.refreshToken,
             }),
           );
           env.CODEX_HOME = ".codex-home";

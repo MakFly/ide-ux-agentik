@@ -1,7 +1,7 @@
-import { type ReactNode, useEffect, useState } from "react";
-import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { z } from "zod";
-import { ArrowLeft, LogOut, Settings as SettingsIcon, Sparkles } from "lucide-react";
+import { ArrowLeft, LogOut, RefreshCw, Settings as SettingsIcon, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import { useIDE, type Theme } from "@/store/ide";
@@ -86,18 +86,22 @@ function SettingsPage() {
   const setCodexApiKey = useIDE((s) => s.setCodexApiKey);
   const codexAuth = useIDE((s) => s.codexAuth);
   const setCodexAuth = useIDE((s) => s.setCodexAuth);
+  const refreshCodexTokens = useIDE((s) => s.refreshCodexTokens);
+  const [refreshing, setRefreshing] = useState(false);
   const [apiKeyDraft, setApiKeyDraft] = useState(codexApiKey ?? "");
   const { login } = Route.useSearch();
-  const navigate = useNavigate({ from: "/settings" });
-  const [loginOpen, setLoginOpen] = useState(login === "codex");
+  const [loginOpen, setLoginOpen] = useState(false);
+  const openedRef = useRef(false);
 
+  // One-shot auto-open when the URL asks for it. Does NOT clear the URL:
+  // closing the dialog just sets loginOpen=false, and the ref guard prevents
+  // re-opening on future re-renders.
   useEffect(() => {
-    if (login === "codex") {
+    if (login === "codex" && !openedRef.current) {
+      openedRef.current = true;
       setLoginOpen(true);
-      // Clear the query param so the dialog can be closed and re-opened cleanly.
-      void navigate({ search: (prev) => ({ ...prev, login: undefined }), replace: true });
     }
-  }, [login, navigate]);
+  }, [login]);
 
   return (
     <div
@@ -188,18 +192,38 @@ function SettingsPage() {
                       {new Date(codexAuth.lastRefresh).toLocaleString()}
                     </div>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 gap-1.5"
-                    onClick={() => {
-                      setCodexAuth(null);
-                      toast.success("Signed out of Codex.");
-                    }}
-                  >
-                    <LogOut className="h-3.5 w-3.5" />
-                    Sign out
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 gap-1.5"
+                      disabled={refreshing}
+                      onClick={async () => {
+                        setRefreshing(true);
+                        const ok = await refreshCodexTokens();
+                        setRefreshing(false);
+                        if (ok) toast.success("Tokens refreshed.");
+                        else toast.error("Refresh failed.");
+                      }}
+                    >
+                      <RefreshCw
+                        className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`}
+                      />
+                      Refresh
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 gap-1.5"
+                      onClick={() => {
+                        setCodexAuth(null);
+                        toast.success("Signed out of Codex.");
+                      }}
+                    >
+                      <LogOut className="h-3.5 w-3.5" />
+                      Sign out
+                    </Button>
+                  </div>
                 </div>
               ) : (
                 <div className="flex items-center justify-between gap-3">
