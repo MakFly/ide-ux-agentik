@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { CheckCircle2Icon, ChevronRightIcon } from "lucide-react";
 import { useAuiState } from "@assistant-ui/react";
 import { cn } from "@/lib/utils";
@@ -71,14 +71,18 @@ export function ThoughtSummary({ messageId }: ThoughtSummaryProps) {
     });
   }, [messageId]);
 
-  // Retrieve reasoning parts for this message so we can display them in the
-  // expanded panel.
-  const reasoningParts = useAuiState((s) => {
-    if (s.message.id !== messageId) return null;
-    return s.message.parts
+  // useAuiState selectors MUST return stable refs or primitives — filter/map
+  // allocates a new array each render and tripped the "getSnapshot should be
+  // cached" infinite loop. Select the raw parts ref (stable, memoized by
+  // assistant-ui) and derive via useMemo.
+  const currentMessageId = useAuiState((s) => s.message.id);
+  const rawParts = useAuiState((s) => s.message.parts);
+  const reasoningParts = useMemo<string[] | null>(() => {
+    if (currentMessageId !== messageId) return null;
+    return rawParts
       .filter((p) => p.type === "reasoning")
       .map((p) => (p as { type: "reasoning"; text: string }).text);
-  });
+  }, [currentMessageId, messageId, rawParts]);
 
   const toggleExpand = useCallback(() => setExpanded((v) => !v), []);
 
