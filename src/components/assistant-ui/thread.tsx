@@ -43,10 +43,13 @@ import { ReasoningPill } from "@/components/ide/reasoning-pill";
 import { SandboxLockButton } from "@/components/ide/sandbox-lock";
 import { VoiceButton } from "@/components/ide/voice-button";
 import { SkillsTrigger } from "@/components/ide/skills-trigger";
+import { PlanToggle } from "@/components/ide/plan-toggle";
 import { ComposerModeTabs } from "@/components/ide/composer-mode-tabs";
 import { ComposerWorktreePicker } from "@/components/ide/composer-worktree-picker";
 import { FileMentionPopover } from "@/components/ide/composer-file-mention";
 import { SlashCommandPopover } from "@/components/ide/composer-slash-command";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { executeSlash, maybeInterceptSlash, SLASH_COMMANDS } from "@/lib/chat/slash-commands";
 
 const CLI_PLACEHOLDERS: Record<string, string> = {
   codex: "Ask Codex anything, @ to add files, / for commands",
@@ -179,6 +182,7 @@ const Composer: FC = () => {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const [popover, setPopover] = useState<"files" | "slash" | null>(null);
   const [query, setQuery] = useState("");
+  const [helpOpen, setHelpOpen] = useState(false);
 
   // Reactive detection: watch composer.text directly from the assistant-ui
   // runtime. More reliable than attaching DOM listeners — React re-runs this
@@ -217,6 +221,22 @@ const Composer: FC = () => {
     console.debug("[composer] trigger=", trigger, "query=", q);
   }, [composerText]);
 
+  // Stable slash context derived from the store.
+  const slashCtx = useIDE((s) => ({
+    workspaceSource: s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.source,
+    sessionId: s.activeSessionIdByWorkspaceId[s.activeWorkspaceId],
+    workspaceId: s.activeWorkspaceId,
+  }));
+
+  /** Programmatically clear the assistant-ui composer textarea. */
+  function clearInput() {
+    const el = inputRef.current;
+    if (!el) return;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    setter?.call(el, "");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
   function replaceTriggerWith(replacement: string) {
     const el = inputRef.current;
     if (!el) return;
@@ -233,48 +253,91 @@ const Composer: FC = () => {
     el.focus();
   }
 
+  /** Called when user picks a builtin from the popover. */
+  function handleBuiltinPick(cmdId: string) {
+    setPopover(null);
+    setQuery("");
+    clearInput();
+    void executeSlash(cmdId, { ...slashCtx, onHelp: () => setHelpOpen(true) });
+  }
+
   return (
-    <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <ComposerPrimitive.AttachmentDropzone asChild>
-        <div
-          ref={shellRef}
-          data-slot="aui_composer-shell"
-          className="flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-background p-(--composer-padding) transition-shadow focus-within:border-ring/75 focus-within:ring-2 focus-within:ring-ring/20 data-[dragging=true]:border-ring data-[dragging=true]:border-dashed data-[dragging=true]:bg-accent/50"
-        >
-          <ComposerAttachments />
-          <ComposerPrimitive.Input
-            placeholder={placeholder}
-            className="aui-composer-input max-h-32 min-h-10 w-full resize-none bg-transparent px-1.75 py-1 text-sm outline-none placeholder:text-muted-foreground/80"
-            rows={1}
-            autoFocus
-            aria-label="Message input"
+    <>
+      <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
+        <ComposerPrimitive.AttachmentDropzone asChild>
+          <div
+            ref={shellRef}
+            data-slot="aui_composer-shell"
+            className="flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-background p-(--composer-padding) transition-shadow focus-within:border-ring/75 focus-within:ring-2 focus-within:ring-ring/20 data-[dragging=true]:border-ring data-[dragging=true]:border-dashed data-[dragging=true]:bg-accent/50"
+          >
+            <ComposerAttachments />
+            <ComposerPrimitive.Input
+              placeholder={placeholder}
+              className="aui-composer-input max-h-32 min-h-10 w-full resize-none bg-transparent px-1.75 py-1 text-sm outline-none placeholder:text-muted-foreground/80"
+              rows={1}
+              autoFocus
+              aria-label="Message input"
+            />
+            <ComposerAction onHelp={() => setHelpOpen(true)} />
+          </div>
+        </ComposerPrimitive.AttachmentDropzone>
+        {popover === "files" && (
+          <FileMentionPopover
+            anchorRef={shellRef}
+            query={query}
+            onPick={(path) => replaceTriggerWith(`@${path}`)}
+            onClose={() => setPopover(null)}
           />
-          <ComposerAction />
+        )}
+        {popover === "slash" && (
+          <SlashCommandPopover
+            anchorRef={shellRef}
+            query={query}
+            onPick={(cmd) => {
+              if (cmd.kind === "builtin") {
+                handleBuiltinPick(cmd.id);
+              } else {
+                replaceTriggerWith(`/${cmd.id}`);
+              }
+            }}
+            onClose={() => setPopover(null)}
+          />
+        )}
+        <div className="mt-1 flex items-center justify-between gap-2">
+          <ComposerModeTabs />
+          <ComposerWorktreePicker />
         </div>
-      </ComposerPrimitive.AttachmentDropzone>
-      {popover === "files" && (
-        <FileMentionPopover
-          anchorRef={shellRef}
-          query={query}
-          onPick={(path) => replaceTriggerWith(`@${path}`)}
-          onClose={() => setPopover(null)}
-        />
-      )}
-      {popover === "slash" && (
-        <SlashCommandPopover
-          anchorRef={shellRef}
-          query={query}
-          onPick={(cmd) => replaceTriggerWith(`/${cmd.id}`)}
-          onClose={() => setPopover(null)}
-        />
-      )}
-      <div className="mt-1 flex items-center justify-between gap-2">
-        <ComposerModeTabs />
-        <ComposerWorktreePicker />
-      </div>
-    </ComposerPrimitive.Root>
+      </ComposerPrimitive.Root>
+      <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
+    </>
   );
 };
+
+const HelpDialog: FC<{ open: boolean; onOpenChange: (v: boolean) => void }> = ({
+  open,
+  onOpenChange,
+}) => (
+  <Dialog open={open} onOpenChange={onOpenChange}>
+    <DialogContent className="max-w-md">
+      <DialogHeader>
+        <DialogTitle>Slash commands</DialogTitle>
+      </DialogHeader>
+      <div className="mt-2 space-y-3">
+        {SLASH_COMMANDS.filter((c) => c.id !== "reset" && c.id !== "new").map((cmd) => (
+          <div key={cmd.id} className="flex flex-col gap-0.5">
+            <span className="font-mono text-sm font-medium">{cmd.label}</span>
+            <span className="text-[12px] text-muted-foreground">{cmd.description}</span>
+            {cmd.aliases && cmd.aliases.length > 0 && (
+              <span className="text-[11px] text-muted-foreground/60">
+                aliases: {cmd.aliases.map((a) => `/${a}`).join(", ")}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </DialogContent>
+  </Dialog>
+);
 
 function formatCompact(n: number): string {
   if (n < 1000) return `${n}`;
@@ -303,7 +366,7 @@ const TokenBadge: FC<{ used: number; max: number }> = ({ used, max }) => {
   );
 };
 
-const ComposerAction: FC = () => {
+const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
   const activeAgent = useIDE((s) => {
     const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
     const activeId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
@@ -320,6 +383,7 @@ const ComposerAction: FC = () => {
         <ComposerAddAttachment />
         <ModelPill cli={activeAgent} />
         <ReasoningPill cli={activeAgent} />
+        <PlanToggle cli={activeAgent} />
         <SkillsTrigger />
       </div>
       <div className="pointer-events-auto absolute left-1/2 -translate-x-1/2">

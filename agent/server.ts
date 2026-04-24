@@ -635,6 +635,14 @@ const methods: Record<string, Handler> = {
     });
   },
 
+  async "messages.deleteForSession"({ sessionId }) {
+    const sid = String(sessionId ?? "").trim();
+    if (!sid) throw new Error("messages.deleteForSession: sessionId is required");
+    const db = openDb();
+    db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(sid);
+    return { ok: true };
+  },
+
   async "messages.append"({
     sessionId,
     role,
@@ -857,6 +865,21 @@ const methods: Record<string, Handler> = {
 
   // ─── MCP RPC ──────────────────────────────────────────────────────────────
 
+  /**
+   * mcp.list — scan all known MCP config locations and return a merged list.
+   *
+   * Universal format {"mcpServers":{...}} shared by Cursor, Claude Desktop,
+   * and Claude Code — see R3 audit §2
+   * (https://modelcontextprotocol.io/docs/concepts/configuration).
+   *
+   * Scanned paths (first-wins per id):
+   *   agentik-global    ~/.config/agentik/mcp.json   (writable via mcp.save)
+   *   agentik-workspace <root>/.agentik/mcp.json      (writable via mcp.save)
+   *   claude            ~/.config/claude/mcp.json
+   *   codex             ~/.codex/mcp.json
+   *   codex-home        <root>/.codex-home/mcp.json
+   *   workspace-root    <root>/.mcp.json
+   */
   async "mcp.list"(_params) {
     type McpRawEntry = {
       command?: string;
@@ -864,6 +887,7 @@ const methods: Record<string, Handler> = {
       transport?: string;
       description?: string;
       args?: string[];
+      env?: Record<string, string>;
       [k: string]: unknown;
     };
     type McpFileShape = {
@@ -871,27 +895,33 @@ const methods: Record<string, Handler> = {
     };
 
     const home = process.env.HOME ?? "/root";
-    const candidates = [
-      path.join(home, ".config", "claude", "mcp.json"),
-      path.join(home, ".codex", "mcp.json"),
-      path.join(root, ".codex-home", "mcp.json"),
-      path.join(root, ".mcp.json"),
+    // Agentik-managed paths are listed first so they win the seen-map (first-wins).
+    const candidates: { filePath: string; scope?: "global" | "workspace" }[] = [
+      { filePath: path.join(home, ".config", "agentik", "mcp.json"), scope: "global" },
+      { filePath: path.join(root, ".agentik", "mcp.json"), scope: "workspace" },
+      { filePath: path.join(home, ".config", "claude", "mcp.json") },
+      { filePath: path.join(home, ".codex", "mcp.json") },
+      { filePath: path.join(root, ".codex-home", "mcp.json") },
+      { filePath: path.join(root, ".mcp.json") },
     ];
 
     const seen = new Map<
       string,
       {
         id: string;
-        transport: "stdio" | "http" | "ws";
+        transport: "stdio" | "http" | "ws" | "sse";
         command?: string;
+        args?: string[];
+        env?: Record<string, string>;
         url?: string;
         status: "configured";
         source: string;
+        scope?: "global" | "workspace";
         description?: string;
       }
     >();
 
-    for (const filePath of candidates) {
+    for (const { filePath, scope } of candidates) {
       let raw: string;
       try {
         raw = await fs.readFile(filePath, "utf8");
@@ -907,8 +937,9 @@ const methods: Record<string, Handler> = {
       const servers = parsed.mcpServers ?? {};
       for (const [id, entry] of Object.entries(servers)) {
         if (seen.has(id)) continue;
-        let transport: "stdio" | "http" | "ws" = "stdio";
+        let transport: "stdio" | "http" | "ws" | "sse" = "stdio";
         if (entry.transport === "http") transport = "http";
+        else if (entry.transport === "sse") transport = "sse";
         else if (entry.transport === "ws") transport = "ws";
         else if (entry.url) {
           const u = entry.url.toLowerCase();
@@ -918,15 +949,118 @@ const methods: Record<string, Handler> = {
           id,
           transport,
           ...(entry.command !== undefined ? { command: entry.command } : {}),
+          ...(Array.isArray(entry.args) ? { args: entry.args as string[] } : {}),
+          ...(entry.env && typeof entry.env === "object" ? { env: entry.env } : {}),
           ...(entry.url !== undefined ? { url: entry.url } : {}),
           status: "configured",
           source: filePath,
+          ...(scope !== undefined ? { scope } : {}),
           ...(entry.description !== undefined ? { description: entry.description } : {}),
         });
       }
     }
 
     return Array.from(seen.values());
+  },
+
+  /**
+   * mcp.save — write entries to the agentik-managed config file.
+   * scope "global"    → ~/.config/agentik/mcp.json
+   * scope "workspace" → <root>/.agentik/mcp.json
+   *
+   * Merges with any existing entries in that file (does not touch other scopes).
+   */
+  async "mcp.save"({ scope: rawScope, entries: rawEntries }) {
+    const scope = String(rawScope ?? "").trim();
+    if (scope !== "global" && scope !== "workspace") {
+      throw new Error('mcp.save: scope must be "global" or "workspace"');
+    }
+    if (!rawEntries || typeof rawEntries !== "object" || Array.isArray(rawEntries)) {
+      throw new Error("mcp.save: entries must be an object");
+    }
+    const entries = rawEntries as Record<string, Record<string, unknown>>;
+
+    // Validate each entry id and structure (manual Zod-style, no dep).
+    const ID_RE = /^[a-z0-9_-]+$/;
+    for (const [id, entry] of Object.entries(entries)) {
+      if (!ID_RE.test(id)) {
+        throw new Error(`mcp.save: invalid entry id "${id}" — must match /^[a-z0-9_-]+$/`);
+      }
+      if (!entry || typeof entry !== "object") {
+        throw new Error(`mcp.save: entry "${id}" must be an object`);
+      }
+      const hasCommand = "command" in entry && typeof entry.command === "string";
+      const hasUrl = "url" in entry && typeof entry.url === "string";
+      if (!hasCommand && !hasUrl) {
+        throw new Error(
+          `mcp.save: entry "${id}" must have either command (stdio) or url (http/sse)`,
+        );
+      }
+      if ("transport" in entry && entry.transport !== undefined) {
+        if (!["stdio", "http", "sse"].includes(String(entry.transport))) {
+          throw new Error(`mcp.save: entry "${id}" transport must be stdio | http | sse`);
+        }
+      }
+      if ("args" in entry && entry.args !== undefined && !Array.isArray(entry.args)) {
+        throw new Error(`mcp.save: entry "${id}" args must be an array`);
+      }
+      if ("env" in entry && entry.env !== undefined) {
+        if (typeof entry.env !== "object" || Array.isArray(entry.env)) {
+          throw new Error(`mcp.save: entry "${id}" env must be an object`);
+        }
+      }
+    }
+
+    const home = process.env.HOME ?? "/root";
+    const configPath =
+      scope === "global"
+        ? path.join(home, ".config", "agentik", "mcp.json")
+        : path.join(root, ".agentik", "mcp.json");
+
+    // Read existing file (if any) and merge.
+    type McpFileShape = { mcpServers?: Record<string, unknown> };
+    let existing: McpFileShape = {};
+    try {
+      existing = JSON.parse(await fs.readFile(configPath, "utf8")) as McpFileShape;
+    } catch {
+      existing = {};
+    }
+    const merged: Record<string, unknown> = { ...(existing.mcpServers ?? {}), ...entries };
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({ mcpServers: merged }, null, 2), "utf8");
+    return { ok: true, path: configPath };
+  },
+
+  /**
+   * mcp.remove — delete a single entry from an agentik-managed config file.
+   * Only operates on global or workspace scope (read-only sources are not modified).
+   */
+  async "mcp.remove"({ scope: rawScope, id: rawId }) {
+    const scope = String(rawScope ?? "").trim();
+    if (scope !== "global" && scope !== "workspace") {
+      throw new Error('mcp.remove: scope must be "global" or "workspace"');
+    }
+    const id = String(rawId ?? "").trim();
+    if (!id) throw new Error("mcp.remove: id is required");
+
+    const home = process.env.HOME ?? "/root";
+    const configPath =
+      scope === "global"
+        ? path.join(home, ".config", "agentik", "mcp.json")
+        : path.join(root, ".agentik", "mcp.json");
+
+    type McpFileShape = { mcpServers?: Record<string, unknown> };
+    let existing: McpFileShape = {};
+    try {
+      existing = JSON.parse(await fs.readFile(configPath, "utf8")) as McpFileShape;
+    } catch {
+      return { ok: true, path: configPath }; // nothing to remove
+    }
+    const servers = { ...(existing.mcpServers ?? {}) };
+    delete servers[id];
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({ mcpServers: servers }, null, 2), "utf8");
+    return { ok: true, path: configPath };
   },
 
   async "mcp.state"(_params) {

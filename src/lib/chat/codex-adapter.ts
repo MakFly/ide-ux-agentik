@@ -9,6 +9,29 @@ import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import { codexExtraArgs } from "@/lib/chat/models";
 import { useIDE } from "@/store/ide";
 import { persistence } from "@/lib/persistence/client";
+import { maybeInterceptSlash } from "@/lib/chat/slash-commands";
+
+/**
+ * Plan Mode prefix — verbatim from Piebald-AI's Claude Code system-prompts
+ * repo, agent-prompt-plan-mode-enhanced.md (Claude Code v2.1.119, 2026-04-23).
+ * Source: https://github.com/Piebald-AI/claude-code-system-prompts/blob/main/system-prompts/agent-prompt-plan-mode-enhanced.md
+ */
+const PLAN_MODE_SYSTEM_PREFIX = `You are a software architect and planning specialist. Your role is EXCLUSIVELY to explore the codebase and design implementation plans.
+
+READ-ONLY MODE — NO FILE MODIFICATIONS.
+STRICTLY PROHIBITED: Creating new files, editing files, deleting files, moving files, running write commands.
+
+Process:
+1. Understand Requirements — analyze the task with the assigned perspective.
+2. Explore Thoroughly — read files, trace code paths (ls, grep, cat, git status only).
+3. Design Solution — follow existing patterns, consider architectural trade-offs.
+4. Detail the Plan — step-by-step with dependency analysis.
+
+Use the update_plan tool to stream a structured list of steps with statuses (pending / in_progress / completed). At most ONE step should be in_progress at any time.
+
+End every response with a "Critical Files for Implementation" section identifying 3-5 files essential for the next phase.
+
+Plan mode is active. The user indicated that they do not want you to execute yet — you MUST NOT make any edits.`;
 
 /**
  * assistant-ui adapter that runs `codex exec --json "<prompt>"` via the remote
@@ -151,8 +174,43 @@ export const codexAdapter: ChatModelAdapter = {
       return;
     }
 
-    const prompt = flattenMessages(options);
+    // Intercept typed builtin slash commands BEFORE flattening / sending.
+    // Source: src/lib/chat/slash-commands.ts (inspired by Claude Code
+    // src/commands/clear/conversation.ts:49-251).
+    const lastMsg = options.messages[options.messages.length - 1];
+    const rawLast = (lastMsg?.content ?? [])
+      .filter((p) => p.type === "text")
+      .map((p) => (p as { type: "text"; text: string }).text)
+      .join("")
+      .trim();
+    if (rawLast.startsWith("/")) {
+      const { activeWorkspaceId, activeSessionIdByWorkspaceId, workspaces } = useIDE.getState();
+      const ws = workspaces.find((w) => w.id === activeWorkspaceId);
+      const handled = await maybeInterceptSlash(rawLast, {
+        workspaceSource: ws?.source,
+        sessionId: activeSessionIdByWorkspaceId[activeWorkspaceId],
+        workspaceId: activeWorkspaceId,
+      });
+      if (handled) return;
+    }
+
+    let prompt = flattenMessages(options);
     if (!prompt.trim()) return;
+
+    // Plan Mode: read localStorage directly (can't call hooks from a generator).
+    // Source: Piebald-AI/claude-code-system-prompts — agent-prompt-plan-mode-enhanced.md
+    // https://github.com/Piebald-AI/claude-code-system-prompts
+    try {
+      const planMap = JSON.parse(localStorage.getItem("plan-mode-by-cli") ?? "{}") as Record<
+        string,
+        boolean
+      >;
+      if (planMap.codex === true) {
+        prompt = `${PLAN_MODE_SYSTEM_PREFIX}\n\n---\n\n${prompt}`;
+      }
+    } catch {
+      /* no-op — no localStorage or malformed JSON */
+    }
 
     const provider = (await providerFor(source, source.label)) as RemoteAgentProvider;
     await provider.connect();
@@ -163,10 +221,14 @@ export const codexAdapter: ChatModelAdapter = {
     if (sessionId) {
       await ensureSessionInDb(provider, sessionId, activeWorkspaceId);
       try {
-        const userParts = options.messages
-          .slice(-1)[0]
-          ?.content.filter((p) => p.type === "text")
-          .map((p) => ({ type: "text" as const, text: (p as { type: "text"; text: string }).text })) ?? [];
+        const userParts =
+          options.messages
+            .slice(-1)[0]
+            ?.content.filter((p) => p.type === "text")
+            .map((p) => ({
+              type: "text" as const,
+              text: (p as { type: "text"; text: string }).text,
+            })) ?? [];
         await persistence.messages.append(provider, {
           sessionId,
           role: "user",
@@ -233,7 +295,11 @@ export const codexAdapter: ChatModelAdapter = {
     });
 
     const abortListener = () => {
-      try { handle.kill(); } catch { /* ignore */ }
+      try {
+        handle.kill();
+      } catch {
+        /* ignore */
+      }
     };
     options.abortSignal.addEventListener("abort", abortListener);
 
@@ -284,7 +350,8 @@ export const codexAdapter: ChatModelAdapter = {
             const cmd = typeof evt.item?.command === "string" ? evt.item.command : "";
             const stdout = typeof evt.item?.stdout === "string" ? evt.item.stdout : "";
             const stderr = typeof evt.item?.stderr === "string" ? evt.item.stderr : "";
-            const exitCode = typeof evt.item?.exit_code === "number" ? evt.item.exit_code : undefined;
+            const exitCode =
+              typeof evt.item?.exit_code === "number" ? evt.item.exit_code : undefined;
             const out = [stdout, stderr].filter(Boolean).join("\n").trim();
             // Only set `result` when the item is completed: leaving it undefined
             // during `item.updated` keeps the spinner state in the UI.
@@ -309,7 +376,8 @@ export const codexAdapter: ChatModelAdapter = {
               result: isCompleted ? JSON.stringify(evt.item ?? {}, null, 2) : undefined,
             });
           } else if (itemType === "file_change") {
-            const summary = typeof evt.item?.summary === "string" ? evt.item.summary : "file change";
+            const summary =
+              typeof evt.item?.summary === "string" ? evt.item.summary : "file change";
             const key = itemId ? `file:${itemId}` : nextAnon();
             upsert(key, { kind: "note", text: `📝 ${summary}` });
           } else if (itemType === "web_search") {
@@ -317,9 +385,41 @@ export const codexAdapter: ChatModelAdapter = {
             const key = itemId ? `web:${itemId}` : nextAnon();
             upsert(key, { kind: "note", text: `🔎 web search${q ? ` · ${q}` : ""}` });
           } else if (itemType === "plan_update") {
-            const plan = typeof evt.item?.plan === "string" ? evt.item.plan : "plan updated";
+            // Codex native update_plan tool events.
+            // Source: openai/codex-rs/tools/src/plan_tool.rs — schema:
+            //   { explanation?: string, plan: Array<{ step: string, status: "pending"|"in_progress"|"completed" }> }
+            const rawPlan = evt.item?.plan;
+            const explanation =
+              typeof evt.item?.explanation === "string" ? evt.item.explanation : undefined;
+            const steps = Array.isArray(rawPlan)
+              ? rawPlan
+                  .filter((p) => p && typeof p === "object")
+                  .map((p) => {
+                    const obj = p as { step?: unknown; status?: unknown };
+                    const step = typeof obj.step === "string" ? obj.step : "";
+                    const status =
+                      obj.status === "in_progress" || obj.status === "completed"
+                        ? obj.status
+                        : "pending";
+                    return { step, status };
+                  })
+                  .filter((s) => s.step.length > 0)
+              : [];
             const key = itemId ? `plan:${itemId}` : nextAnon();
-            upsert(key, { kind: "note", text: `🗂 ${plan}` });
+            if (steps.length > 0) {
+              upsert(key, {
+                kind: "tool",
+                id: itemId ?? key,
+                name: "plan",
+                args: { explanation, steps } as Record<string, unknown>,
+                result: undefined,
+              });
+            } else {
+              // Fallback: stringified plan (non-standard payload) — keep as a note.
+              const fallback =
+                typeof rawPlan === "string" ? rawPlan : JSON.stringify(rawPlan ?? {});
+              upsert(key, { kind: "note", text: `🗂 ${fallback}` });
+            }
           }
         } else if (type === "stderr") {
           // Raw stderr chunks from codex itself — usually setup chatter. Skip
@@ -372,7 +472,12 @@ export const codexAdapter: ChatModelAdapter = {
               return { type: "text", text: JSON.stringify(p) };
             }),
           });
-          console.debug("[persistence] assistant message persisted", sessionId, collectedParts.length, "parts");
+          console.debug(
+            "[persistence] assistant message persisted",
+            sessionId,
+            collectedParts.length,
+            "parts",
+          );
         } catch (e) {
           console.warn("[persistence] messages.append (assistant) failed", sessionId, e);
         }

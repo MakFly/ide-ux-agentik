@@ -37,16 +37,16 @@ export const persistence = {
     },
   },
   messages: {
-    list(
-      provider: RemoteAgentProvider,
-      input: ListMessagesInput | string,
-    ): Promise<DbMessage[]> {
+    list(provider: RemoteAgentProvider, input: ListMessagesInput | string): Promise<DbMessage[]> {
       // Accept plain sessionId string for backwards compatibility
       const params = typeof input === "string" ? { sessionId: input } : input;
       return rpc<DbMessage[]>(provider, "messages.list", params);
     },
     append(provider: RemoteAgentProvider, input: AppendMessageInput): Promise<DbMessage> {
       return rpc<DbMessage>(provider, "messages.append", input);
+    },
+    deleteForSession(provider: RemoteAgentProvider, sessionId: string): Promise<{ ok: true }> {
+      return rpc<{ ok: true }>(provider, "messages.deleteForSession", { sessionId });
     },
   },
   snapshots: {

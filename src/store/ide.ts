@@ -196,6 +196,8 @@ type State = {
   sessionsByWorkspaceId: Record<string, WorkspaceTerminal[]>;
   activeSessionIdByWorkspaceId: Record<string, string>;
   pinnedSessionIdsByWorkspaceId: Record<string, string[]>;
+  /** Incremented by tickClearSession() to force ChatView remount with empty history. */
+  sessionClearTickByWorkspace: Record<string, number>;
 
   // Global prefs
   theme: Theme;
@@ -207,6 +209,7 @@ type State = {
   activeAgent: TerminalKind;
   previewMode: boolean;
   filesTab: "files" | "changes" | "checks";
+  settingsSidebarCollapsed: boolean;
   thinking: boolean;
   webSearch: boolean;
   codexApiKey?: string;
@@ -230,6 +233,7 @@ type State = {
   worktreesLoading: boolean;
   tasksLoading: boolean;
   fileTreeLoading: boolean;
+  sessionsLoading: boolean;
   hydrate: () => void;
 
   // Flat legacy fields — kept for retrocompat with FilesPanel (consumers exist, do not remove).
@@ -256,6 +260,7 @@ type State = {
   toggleFolder: (name: string) => void;
   toggleFiles: () => void;
   toggleSidebar: () => void;
+  toggleSettingsSidebar: () => void;
   toggleTerminal: () => void;
   toggleAgentPanel: () => void;
   setApplyingFromUrl: (v: boolean) => void;
@@ -292,6 +297,8 @@ type State = {
   addWorktree: (workspaceId: string, branchId: string, name?: string) => void;
   addTerminal: (worktreeId: string, kind: TerminalKind) => string;
   pinSessionToWorktree: (sessionId: string, worktreeId: string | null) => void;
+  /** Bump the clear-tick for workspaceId → forces ChatView to remount with empty history. */
+  tickClearSession: (workspaceId: string) => void;
 
   // Cascade removal helpers — available as store actions, not wired to UI.
   removeWorktree: (worktreeId: string) => void;
@@ -735,6 +742,7 @@ export const useIDE = create<State>()(
       sessionsByWorkspaceId: {},
       activeSessionIdByWorkspaceId: {},
       pinnedSessionIdsByWorkspaceId: {},
+      sessionClearTickByWorkspace: {},
 
       theme: readStoredTheme(),
       showFiles: true,
@@ -745,6 +753,7 @@ export const useIDE = create<State>()(
       activeAgent: "claude",
       previewMode: false,
       filesTab: "files",
+      settingsSidebarCollapsed: false,
       thinking: true,
       webSearch: false,
       codexApiKey:
@@ -795,6 +804,7 @@ export const useIDE = create<State>()(
       worktreesLoading: true,
       tasksLoading: true,
       fileTreeLoading: true,
+      sessionsLoading: true,
       hydrate: () => {
         set({
           branchesLoading: false,
@@ -1050,59 +1060,63 @@ export const useIDE = create<State>()(
         const MAX_ATTEMPTS = 10;
         const RETRY_MS = 2000;
 
-        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-          const { workspaces } = get();
-          const remoteWorkspaces = workspaces.filter((w) => w.source.kind === "remote-agent");
-          if (remoteWorkspaces.length === 0) return;
+        try {
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            const { workspaces } = get();
+            const remoteWorkspaces = workspaces.filter((w) => w.source.kind === "remote-agent");
+            if (remoteWorkspaces.length === 0) return;
 
-          let anySuccess = false;
-          for (const ws of remoteWorkspaces) {
-            if (ws.source.kind !== "remote-agent") continue;
-            try {
-              const provider = new RemoteAgentProvider(
-                ws.source.label,
-                ws.source.url,
-                ws.source.token,
-              );
-              await provider.connect();
-              const sessions = await persistence.sessions.list(provider, ws.id);
-              if (sessions.length === 0) {
+            let anySuccess = false;
+            for (const ws of remoteWorkspaces) {
+              if (ws.source.kind !== "remote-agent") continue;
+              try {
+                const provider = new RemoteAgentProvider(
+                  ws.source.label,
+                  ws.source.url,
+                  ws.source.token,
+                );
+                await provider.connect();
+                const sessions = await persistence.sessions.list(provider, ws.id);
+                if (sessions.length === 0) {
+                  anySuccess = true;
+                  continue;
+                }
+                const workspaceTerminals = sessions.map((s) => ({
+                  id: s.id,
+                  kind: (s.cli as import("@/store/ide").TerminalKind) ?? "codex",
+                  title: s.title ?? s.cli,
+                  status: (s.status === "busy" ? "busy" : "idle") as "ready" | "busy" | "idle",
+                  workspaceId: ws.id,
+                  lastCommand: s.cli,
+                }));
+                set((cur) => ({
+                  sessionsByWorkspaceId: {
+                    ...cur.sessionsByWorkspaceId,
+                    [ws.id]: workspaceTerminals,
+                  },
+                }));
                 anySuccess = true;
-                continue;
-              }
-              const workspaceTerminals = sessions.map((s) => ({
-                id: s.id,
-                kind: (s.cli as import("@/store/ide").TerminalKind) ?? "codex",
-                title: s.title ?? s.cli,
-                status: (s.status === "busy" ? "busy" : "idle") as "ready" | "busy" | "idle",
-                workspaceId: ws.id,
-                lastCommand: s.cli,
-              }));
-              set((cur) => ({
-                sessionsByWorkspaceId: {
-                  ...cur.sessionsByWorkspaceId,
-                  [ws.id]: workspaceTerminals,
-                },
-              }));
-              anySuccess = true;
-            } catch (e) {
-              if (attempt === MAX_ATTEMPTS) {
-                console.warn(
-                  `[store] hydrateSessionsFromDb: failed for workspace ${ws.id} after ${MAX_ATTEMPTS} attempts`,
-                  e,
-                );
-              } else {
-                console.log(
-                  `[store] hydrateSessionsFromDb: attempt ${attempt}/${MAX_ATTEMPTS} failed for ${ws.id}, retrying in ${RETRY_MS}ms`,
-                );
+              } catch (e) {
+                if (attempt === MAX_ATTEMPTS) {
+                  console.warn(
+                    `[store] hydrateSessionsFromDb: failed for workspace ${ws.id} after ${MAX_ATTEMPTS} attempts`,
+                    e,
+                  );
+                } else {
+                  console.log(
+                    `[store] hydrateSessionsFromDb: attempt ${attempt}/${MAX_ATTEMPTS} failed for ${ws.id}, retrying in ${RETRY_MS}ms`,
+                  );
+                }
               }
             }
-          }
 
-          if (anySuccess) return;
-          if (attempt < MAX_ATTEMPTS) {
-            await new Promise<void>((resolve) => setTimeout(resolve, RETRY_MS));
+            if (anySuccess) return;
+            if (attempt < MAX_ATTEMPTS) {
+              await new Promise<void>((resolve) => setTimeout(resolve, RETRY_MS));
+            }
           }
+        } finally {
+          set({ sessionsLoading: false });
         }
       },
 
@@ -1199,6 +1213,8 @@ export const useIDE = create<State>()(
 
       toggleFiles: () => set((s) => ({ showFiles: !s.showFiles })),
       toggleSidebar: () => set((s) => ({ showSidebar: !s.showSidebar })),
+      toggleSettingsSidebar: () =>
+        set((s) => ({ settingsSidebarCollapsed: !s.settingsSidebarCollapsed })),
       toggleTerminal: () => set((s) => ({ showTerminal: !s.showTerminal })),
       toggleAgentPanel: () => set((s) => ({ showAgentPanel: !s.showAgentPanel })),
       setApplyingFromUrl: (v) => set({ applyingFromUrl: v }),
@@ -1559,6 +1575,14 @@ export const useIDE = create<State>()(
           return { sessionsByWorkspaceId: next };
         }),
 
+      tickClearSession: (workspaceId) =>
+        set((s) => ({
+          sessionClearTickByWorkspace: {
+            ...s.sessionClearTickByWorkspace,
+            [workspaceId]: (s.sessionClearTickByWorkspace[workspaceId] ?? 0) + 1,
+          },
+        })),
+
       setActiveSession: (sessionId) =>
         set((s) => ({
           activeSessionIdByWorkspaceId: {
@@ -1905,6 +1929,7 @@ export const useIDE = create<State>()(
           pinnedSessionIdsByWorkspaceId: state.pinnedSessionIdsByWorkspaceId,
           selectedModelByCli: state.selectedModelByCli,
           approvalModeByCli: state.approvalModeByCli,
+          settingsSidebarCollapsed: state.settingsSidebarCollapsed,
         }) as State,
       onRehydrateStorage: () => (state, error) => {
         if (error) {

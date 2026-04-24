@@ -1,9 +1,13 @@
-import { AssistantRuntimeProvider, useLocalRuntime, type ThreadMessageLike } from "@assistant-ui/react";
+import {
+  AssistantRuntimeProvider,
+  useLocalRuntime,
+  type ThreadMessageLike,
+} from "@assistant-ui/react";
 import { FlaskConical } from "lucide-react";
 import { Thread } from "@/components/assistant-ui/thread";
 import { codexAdapter } from "@/lib/chat/codex-adapter";
 import type { WorkspaceSource } from "@/lib/fs";
-import type { TerminalKind } from "@/store/ide";
+import { useIDE, type TerminalKind } from "@/store/ide";
 import { useSessionHistory } from "@/hooks/use-session-history";
 
 export function ChatView({
@@ -15,6 +19,9 @@ export function ChatView({
   sessionId?: string;
   workspaceSource?: WorkspaceSource;
 }) {
+  const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
+  const clearTick = useIDE((s) => s.sessionClearTickByWorkspace[activeWorkspaceId] ?? 0);
+
   const { messages, loading, error } = useSessionHistory(sessionId, workspaceSource);
 
   // Mount the runtime only once history has loaded. useLocalRuntime consumes
@@ -31,7 +38,17 @@ export function ChatView({
     );
   }
 
-  return <CodexChat kind={kind} initialMessages={messages} error={error} />;
+  // `key` includes clearTick: incrementing it forces React to remount CodexChat
+  // (and its AssistantRuntimeProvider) with an empty initialMessages array,
+  // giving us a clean-slate thread without touching the PTY process.
+  return (
+    <CodexChat
+      key={`${sessionId ?? "none"}-${clearTick}`}
+      kind={kind}
+      initialMessages={clearTick === 0 ? messages : []}
+      error={error}
+    />
+  );
 }
 
 function CodexChat({
@@ -67,8 +84,8 @@ function ExperimentalBanner({ kind }: { kind: TerminalKind }) {
     <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-1.5 text-[11.5px] text-muted-foreground">
       <FlaskConical className="size-3.5 shrink-0" />
       <span>
-        <span className="font-mono font-medium text-foreground">{kind}</span> chat is experimental
-        — RPC adapter not fully wired. Use the Terminal tab for full CLI access.
+        <span className="font-mono font-medium text-foreground">{kind}</span> chat is experimental —
+        RPC adapter not fully wired. Use the Terminal tab for full CLI access.
       </span>
     </div>
   );
