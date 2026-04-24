@@ -72,6 +72,65 @@ SSH connection from inside the app.
 
 ## Protocol
 
-JSON-RPC 2.0. Methods: `auth`, `ls`, `stat`, `readFile`, `writeFile`,
-`mkdir`, `remove`, `rename`, `watch`, `unwatch`. See
-`src/lib/fs/remote-agent.ts` for the full spec and payload shapes.
+JSON-RPC 2.0. First message must be `auth`. All paths are relative to `--root`.
+
+### Filesystem methods
+
+`auth`, `ls`, `stat`, `readFile`, `writeFile`, `mkdir`, `remove`, `rename`,
+`watch`, `unwatch`. See `src/lib/fs/remote-agent.ts` for the full spec and payload shapes.
+
+### PTY methods
+
+All PTY calls require a prior `auth`. PTY sessions are automatically killed when the WebSocket closes.
+
+#### `pty.spawn` → `{ id: string }`
+
+Spawn a PTY session. Returns a unique session `id`.
+
+```json
+{
+  "cmd":  "bash",          // optional — defaults to $SHELL or /bin/bash
+  "args": ["-il"],         // optional — defaults to ["-il"] when cmd is omitted
+  "cwd":  "src/",          // optional — relative to --root; clamped to root on escape
+  "env":  { "FOO": "bar" }, // optional — merged over process.env
+  "cols": 220,             // optional — terminal width (default 80)
+  "rows": 50               // optional — terminal height (default 24)
+}
+```
+
+#### `pty.write` → `{ ok: true }`
+
+Send stdin to a session.
+
+```json
+{ "id": "<uuid>", "data": "ls -la\r" }
+```
+
+#### `pty.resize` → `{ ok: true }`
+
+Resize the PTY (e.g. on xterm resize event).
+
+```json
+{ "id": "<uuid>", "cols": 220, "rows": 50 }
+```
+
+#### `pty.kill` → `{ ok: true }`
+
+Kill a session.
+
+```json
+{ "id": "<uuid>", "signal": "SIGTERM" }
+```
+
+#### `pty.list` → `{ sessions: [{id, cmd, cwd, alive}] }`
+
+List all active PTY sessions (useful for debugging).
+
+### Server push notifications
+
+The server sends these over the same WebSocket (no `id` field — they are notifications, not responses):
+
+```json
+{ "jsonrpc": "2.0", "method": "pty.data", "params": { "id": "<uuid>", "data": "<utf8 output>" } }
+{ "jsonrpc": "2.0", "method": "pty.exit", "params": { "id": "<uuid>", "code": 0, "signal": null } }
+```

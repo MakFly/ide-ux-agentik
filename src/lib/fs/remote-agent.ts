@@ -1,5 +1,23 @@
 import { FsError, type FsEntry, type FsProvider, type FsUnsubscribe, type FsWatchEvent } from "./types";
 
+export type PtySpawnParams = {
+  cmd?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  cols?: number;
+  rows?: number;
+};
+
+export type PtyHandle = {
+  id: string;
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(signal?: string): void;
+  onData(cb: (data: string) => void): () => void;
+  onExit(cb: (code: number | null, signal: string | null) => void): () => void;
+};
+
 /**
  * Remote-agent provider.
  *
@@ -56,6 +74,8 @@ export class RemoteAgentProvider implements FsProvider {
   private nextId = 1;
   private pending = new Map<JsonRpcId, Pending>();
   private watchers = new Map<string, (ev: FsWatchEvent) => void>();
+  private ptyDataListeners = new Map<string, Set<(data: string) => void>>();
+  private ptyExitListeners = new Map<string, Set<(code: number | null, signal: string | null) => void>>();
   private connecting: Promise<void> | null = null;
 
   constructor(
@@ -128,6 +148,18 @@ export class RemoteAgentProvider implements FsProvider {
     if ("method" in msg && msg.method === "watch") {
       const { subId, event } = msg.params as { subId: string; event: FsWatchEvent };
       this.watchers.get(subId)?.(event);
+      return;
+    }
+    if ("method" in msg && msg.method === "pty.data") {
+      const { id, data } = msg.params as { id: string; data: string };
+      for (const cb of this.ptyDataListeners.get(id) ?? []) cb(data);
+      return;
+    }
+    if ("method" in msg && msg.method === "pty.exit") {
+      const { id, code, signal } = msg.params as { id: string; code: number | null; signal: string | null };
+      for (const cb of this.ptyExitListeners.get(id) ?? []) cb(code, signal);
+      this.ptyDataListeners.delete(id);
+      this.ptyExitListeners.delete(id);
     }
   }
 
@@ -167,6 +199,46 @@ export class RemoteAgentProvider implements FsProvider {
   }
   async rename(oldPath: string, newPath: string): Promise<void> {
     await this.call<void>("rename", { oldPath, newPath });
+  }
+
+  onPtyData(id: string, cb: (data: string) => void): () => void {
+    if (!this.ptyDataListeners.has(id)) this.ptyDataListeners.set(id, new Set());
+    this.ptyDataListeners.get(id)!.add(cb);
+    return () => this.ptyDataListeners.get(id)?.delete(cb);
+  }
+
+  onPtyExit(id: string, cb: (code: number | null, signal: string | null) => void): () => void {
+    if (!this.ptyExitListeners.has(id)) this.ptyExitListeners.set(id, new Set());
+    this.ptyExitListeners.get(id)!.add(cb);
+    return () => this.ptyExitListeners.get(id)?.delete(cb);
+  }
+
+  async ptySpawn(params: PtySpawnParams = {}): Promise<PtyHandle> {
+    const { id } = await this.call<{ id: string }>("pty.spawn", params);
+    return {
+      id,
+      write: (data) => { this.call<void>("pty.write", { id, data }).catch(() => {}); },
+      resize: (cols, rows) => { this.call<void>("pty.resize", { id, cols, rows }).catch(() => {}); },
+      kill: (signal) => { this.call<void>("pty.kill", { id, signal }).catch(() => {}); },
+      onData: (cb) => this.onPtyData(id, cb),
+      onExit: (cb) => this.onPtyExit(id, cb),
+    };
+  }
+
+  async ptyWrite(id: string, data: string): Promise<void> {
+    await this.call<void>("pty.write", { id, data });
+  }
+
+  async ptyResize(id: string, cols: number, rows: number): Promise<void> {
+    await this.call<void>("pty.resize", { id, cols, rows });
+  }
+
+  async ptyKill(id: string, signal?: string): Promise<void> {
+    await this.call<void>("pty.kill", { id, signal });
+  }
+
+  async ptyList(): Promise<{ sessions: Array<{ id: string; cmd: string; cwd: string; alive: boolean }> }> {
+    return this.call("pty.list", {});
   }
 
   watch(path: string, cb: (ev: FsWatchEvent) => void): FsUnsubscribe {
