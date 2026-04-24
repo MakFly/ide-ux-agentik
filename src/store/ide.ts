@@ -18,14 +18,17 @@ export type Branch = {
 
 export type TaskStatus = "todo" | "in_progress" | "blocked" | "done";
 
-export type BranchTask = {
+// Renamed from BranchTask — tasks now scoped to worktrees, not branches.
+export type WorkTask = {
   id: string;
-  branchId: string;
   title: string;
   status: TaskStatus;
   assignee: string;
   updatedAt: string;
 };
+
+// Backward-compat alias so existing UI consumers still compile.
+export type BranchTask = WorkTask;
 
 export type TerminalKind = "codex" | "claude" | "opencode" | "gemini";
 
@@ -57,13 +60,13 @@ export type WorkspaceSource =
   | { kind: "local-web"; handleId: string; name: string }
   | { kind: "remote-agent"; url: string; token: string; label: string };
 
+// Workspace no longer carries branches — they live in branchesByWorkspaceId.
 export type Workspace = {
   id: string;
   letter: string;
   name: string;
   color: string;
   gitUrl?: string;
-  branches: Branch[];
   source: WorkspaceSource;
 };
 
@@ -134,13 +137,27 @@ type State = {
   activeWorkspaceId: string;
   activeBranchId: string;
 
-  // Scoped per (workspace, branch)
-  messagesByScope: Record<ScopeKey, ChatMessage[]>;
+  // Normalized branch storage — replaces Workspace.branches (denormalized).
+  branchesByWorkspaceId: Record<string, Branch[]>;
+
+  // activeBranchId per workspace — remembered on workspace switch.
+  activeBranchIdByWorkspaceId: Record<string, string>;
+
+  // Tasks keyed by worktree (was: branchId). DO NOT touch ScopeKey-keyed fields below.
+  tasksByWorktreeId: Record<string, WorkTask[]>;
+
+  // Messages keyed by sessionId (was: messagesByScope keyed by ScopeKey).
+  messagesBySessionId: Record<string, ChatMessage[]>;
+
+  // These remain ScopeKey-keyed — kept as-is to avoid touching file/tree consumers.
   openFilesByScope: Record<ScopeKey, FileTab[]>;
   activeTabByScope: Record<ScopeKey, TabId>;
   expandedFoldersByScope: Record<ScopeKey, Record<string, boolean>>;
   activeWorktreeIdByScope: Record<ScopeKey, string>;
-  tasksByBranchId: Record<string, BranchTask[]>;
+  treeByScope: Record<ScopeKey, TreeNode>;
+  loadingPaths: Record<ScopeKey, Record<string, boolean>>;
+  gitStatusByScope: Record<ScopeKey, GitStatusMap>;
+
   worktreesByWorkspaceId: Record<string, Worktree[]>;
   sessionsByWorkspaceId: Record<string, WorkspaceTerminal[]>;
   activeSessionIdByWorkspaceId: Record<string, string>;
@@ -164,19 +181,13 @@ type State = {
   fileTreeLoading: boolean;
   hydrate: () => void;
 
-  // Flat legacy fields (kept for rétrocompat avec FilesPanel)
+  // Flat legacy fields — kept for retrocompat with FilesPanel (consumers exist, do not remove).
   fileTree: Record<string, string[]>;
   rootFiles: string[];
 
-  // New scoped tree structure
-  treeByScope: Record<ScopeKey, TreeNode>;
-  loadingPaths: Record<ScopeKey, Record<string, boolean>>;
-
-  // Git status par scope
-  gitStatusByScope: Record<ScopeKey, GitStatusMap>;
   refreshGitStatus: (scopeKey: ScopeKey) => Promise<void>;
 
-  // Vague 2 stubs
+  // Async file/tree actions — kept untouched from previous version.
   loadRoot: (scopeKey: ScopeKey) => Promise<void>;
   loadChildren: (scopeKey: ScopeKey, path: string) => Promise<void>;
   createEntry: (scopeKey: ScopeKey, parentPath: string, name: string, type: "dir" | "file") => Promise<void>;
@@ -205,11 +216,17 @@ type State = {
   addBranch: (workspaceId: string, name: string) => void;
   toggleStar: (branchId: string) => void;
   addWorkspace: (name: string, source?: WorkspaceSource) => void;
-  addTask: (branchId: string, title: string) => void;
-  cycleTaskStatus: (branchId: string, taskId: string) => void;
-  setTaskStatus: (branchId: string, taskId: string, status: TaskStatus) => void;
+  addTask: (worktreeId: string, title: string) => void;
+  cycleTaskStatus: (worktreeId: string, taskId: string) => void;
+  setTaskStatus: (worktreeId: string, taskId: string, status: TaskStatus) => void;
   addWorktree: (workspaceId: string, branchId: string, name?: string) => void;
   addTerminal: (worktreeId: string, kind: TerminalKind) => string;
+  pinSessionToWorktree: (sessionId: string, worktreeId: string | null) => void;
+
+  // Cascade removal helpers — available as store actions, not wired to UI.
+  removeWorktree: (worktreeId: string) => void;
+  removeBranch: (workspaceId: string, branchId: string) => void;
+  removeWorkspace: (workspaceId: string) => void;
 
   createFolder: (name: string) => void;
   createFile: (folder: string | null, name: string) => void;
@@ -222,6 +239,30 @@ type State = {
   getWorkspaceIdForBranch: (branchId: string) => string | undefined;
 };
 
+// ─── Seed data ────────────────────────────────────────────────────────────────
+
+const initialBranchesByWorkspaceId: Record<string, Branch[]> = {
+  "ws-sc": [
+    { id: "b1", name: "master", age: "14h ago", starred: true, status: "none" },
+    { id: "b2", name: "feat/meta-chat", age: "5h ago", added: 5518, removed: 169, status: "loading" },
+    { id: "b3", name: "fix/chat-feedback-notifications", age: "3m ago", added: 178, removed: 13, status: "none" },
+    { id: "b4", name: "fix/diff-view-text-selection", age: "3m ago", added: 86, removed: 18, status: "none" },
+    { id: "b5", name: "fix/right-sidebar-vertical-line", age: "58m ago", status: "warn" },
+    { id: "b6", name: "fix/workspace-sidebar-state", age: "2h ago", added: 109, removed: 23, status: "warn" },
+    { id: "b7", name: "fix/git-diff-highlight-accuracy", age: "2h ago", added: 447, removed: 57, status: "active" },
+    { id: "b8", name: "fix/tab-title-overwrite", age: "14m ago", added: 59, removed: 5, status: "warn" },
+    { id: "b9", name: "feat/git-action-dropdown-menu", age: "14h ago", added: 1136, removed: 184, status: "none" },
+    { id: "b10", name: "fix/shared-context-isolation", age: "3h ago", added: 90, removed: 20, status: "active" },
+    { id: "b11", name: "fix/stear-chat-timeline", age: "14h ago", added: 899, removed: 129, status: "none" },
+    { id: "b12", name: "feat/scrollable-tab-bar", age: "6d ago", added: 147, removed: 86, status: "none" },
+    { id: "b13", name: "feat/shared-context-sorting-dnd", age: "1w ago", added: 2163, removed: 21, status: "none" },
+  ],
+  "ws-landing": [
+    { id: "l1", name: "main", age: "4w ago", starred: true, status: "none" },
+    { id: "l2", name: "feat/marketing-landing-page", age: "1d ago", added: 533, removed: 26, status: "none" },
+  ],
+};
+
 const initialWorkspaces: Workspace[] = [
   {
     id: "ws-sc",
@@ -230,98 +271,6 @@ const initialWorkspaces: Workspace[] = [
     color: "oklch(0.45 0.18 270)",
     gitUrl: "https://github.com/superconductor/superconductor",
     source: { kind: "mock", id: "ws-sc" },
-    branches: [
-      { id: "b1", name: "master", age: "14h ago", starred: true, status: "none" },
-      {
-        id: "b2",
-        name: "feat/meta-chat",
-        age: "5h ago",
-        added: 5518,
-        removed: 169,
-        status: "loading",
-      },
-      {
-        id: "b3",
-        name: "fix/chat-feedback-notifications",
-        age: "3m ago",
-        added: 178,
-        removed: 13,
-        status: "none",
-      },
-      {
-        id: "b4",
-        name: "fix/diff-view-text-selection",
-        age: "3m ago",
-        added: 86,
-        removed: 18,
-        status: "none",
-      },
-      { id: "b5", name: "fix/right-sidebar-vertical-line", age: "58m ago", status: "warn" },
-      {
-        id: "b6",
-        name: "fix/workspace-sidebar-state",
-        age: "2h ago",
-        added: 109,
-        removed: 23,
-        status: "warn",
-      },
-      {
-        id: "b7",
-        name: "fix/git-diff-highlight-accuracy",
-        age: "2h ago",
-        added: 447,
-        removed: 57,
-        status: "active",
-      },
-      {
-        id: "b8",
-        name: "fix/tab-title-overwrite",
-        age: "14m ago",
-        added: 59,
-        removed: 5,
-        status: "warn",
-      },
-      {
-        id: "b9",
-        name: "feat/git-action-dropdown-menu",
-        age: "14h ago",
-        added: 1136,
-        removed: 184,
-        status: "none",
-      },
-      {
-        id: "b10",
-        name: "fix/shared-context-isolation",
-        age: "3h ago",
-        added: 90,
-        removed: 20,
-        status: "active",
-      },
-      {
-        id: "b11",
-        name: "fix/stear-chat-timeline",
-        age: "14h ago",
-        added: 899,
-        removed: 129,
-        status: "none",
-      },
-      {
-        id: "b12",
-        name: "feat/scrollable-tab-bar",
-        age: "6d ago",
-        added: 147,
-        removed: 86,
-        status: "none",
-      },
-      {
-        id: "b13",
-        name: "feat/shared-context-sorting-dnd",
-        age: "1w ago",
-        added: 2163,
-        removed: 21,
-        status: "none",
-      },
-    ],
   },
   {
     id: "ws-landing",
@@ -330,25 +279,8 @@ const initialWorkspaces: Workspace[] = [
     color: "oklch(0.55 0.13 60)",
     gitUrl: "https://github.com/superconductor/landing",
     source: { kind: "mock", id: "ws-landing" },
-    branches: [
-      { id: "l1", name: "main", age: "4w ago", starred: true, status: "none" },
-      {
-        id: "l2",
-        name: "feat/marketing-landing-page",
-        age: "1d ago",
-        added: 533,
-        removed: 26,
-        status: "none",
-      },
-    ],
   },
 ];
-
-const seedMessage: ChatMessage = {
-  id: "seed",
-  role: "user",
-  content: "explain this codebase",
-};
 
 // Mini mock tree for workspaces with kind="mock" — fallback until Vague 2 loads real data
 const MOCK_FILE_TREE: Record<string, string[]> = {
@@ -382,7 +314,7 @@ function sortEntries(entries: FsEntry[]): FsEntry[] {
   });
 }
 
-function entriesToTreeNodes(entries: FsEntry[], parentPath: string): TreeNode[] {
+function entriesToTreeNodes(entries: FsEntry[], _parentPath: string): TreeNode[] {
   return sortEntries(entries).map((e) => ({
     path: e.path,
     name: e.name,
@@ -445,27 +377,7 @@ function flatFieldsFromEntries(
   return { fileTree, rootFiles };
 }
 
-function mockFileContent(path: string): string {
-  const name = path.split("/").pop() ?? path;
-  if (name.endsWith(".md")) {
-    return `# ${name.replace(".md", "")}\n\nMock documentation file.\n`;
-  }
-  if (name.endsWith(".toml")) {
-    return `# ${name}\n[package]\nname = "mock"\nversion = "0.1.0"\n`;
-  }
-  if (name.endsWith(".json")) {
-    return `{\n  "name": "${name}",\n  "mock": true\n}\n`;
-  }
-  if (name.endsWith(".rs")) {
-    return `fn main() {\n    println!("Hello from ${name}");\n}\n`;
-  }
-  if (name.endsWith(".sh")) {
-    return `#!/usr/bin/env bash\nset -euo pipefail\necho "Running ${name}"\n`;
-  }
-  return `// ${path}\n// Mock file content\n`;
-}
-
-function makeScopeRootNode(sk: ScopeKey): TreeNode {
+function makeScopeRootNode(_sk: ScopeKey): TreeNode {
   return { path: "", name: "", type: "dir", children: [], loaded: false };
 }
 
@@ -484,6 +396,15 @@ function scheduleGitRefresh(sk: ScopeKey, getStore: () => { refreshGitStatus: (s
 
 function createTerminalSet(_worktreeId: string): WorkspaceTerminal[] {
   return [];
+}
+
+function getDefaultWorktreeId(
+  worktreesByWorkspaceId: Record<string, Worktree[]>,
+  workspaceId: string,
+  branchId: string,
+): string | undefined {
+  const worktrees = worktreesByWorkspaceId[workspaceId] ?? [];
+  return worktrees.find((wt) => wt.branchId === branchId)?.id ?? worktrees[0]?.id;
 }
 
 const initialWorktrees: Record<string, Worktree[]> = {
@@ -544,80 +465,43 @@ const initialWorktrees: Record<string, Worktree[]> = {
   ],
 };
 
-const initialTasksByBranchId: Record<string, BranchTask[]> = {
-  b1: [
-    {
-      id: "task-b1-1",
-      branchId: "b1",
-      title: "Stabilize workspace bootstrap",
-      status: "in_progress",
-      assignee: "Codex",
-      updatedAt: "12m ago",
-    },
-    {
-      id: "task-b1-2",
-      branchId: "b1",
-      title: "Review multi-worktree session model",
-      status: "todo",
-      assignee: "Claude",
-      updatedAt: "1h ago",
-    },
-  ],
-  b2: [
-    {
-      id: "task-b2-1",
-      branchId: "b2",
-      title: "Ship meta chat timeline",
-      status: "blocked",
-      assignee: "Gemini",
-      updatedAt: "4m ago",
-    },
-    {
-      id: "task-b2-2",
-      branchId: "b2",
-      title: "Rebase worktree on master",
-      status: "todo",
-      assignee: "OpenCode",
-      updatedAt: "18m ago",
-    },
-  ],
-  b6: [
-    {
-      id: "task-b6-1",
-      branchId: "b6",
-      title: "Persist workspace sidebar collapse state",
-      status: "in_progress",
-      assignee: "Codex",
-      updatedAt: "9m ago",
-    },
-  ],
-  l2: [
-    {
-      id: "task-l2-1",
-      branchId: "l2",
-      title: "Refresh hero copy",
-      status: "done",
-      assignee: "Claude",
-      updatedAt: "1d ago",
-    },
-    {
-      id: "task-l2-2",
-      branchId: "l2",
-      title: "QA responsive navbar",
-      status: "todo",
-      assignee: "Codex",
-      updatedAt: "39m ago",
-    },
-  ],
-};
+// Migrate old tasksByBranchId seed → tasksByWorktreeId by matching branchId on worktrees.
+function buildInitialTasksByWorktreeId(): Record<string, WorkTask[]> {
+  const legacy: Record<string, { id: string; title: string; status: TaskStatus; assignee: string; updatedAt: string }[]> = {
+    b1: [
+      { id: "task-b1-1", title: "Stabilize workspace bootstrap", status: "in_progress", assignee: "Codex", updatedAt: "12m ago" },
+      { id: "task-b1-2", title: "Review multi-worktree session model", status: "todo", assignee: "Claude", updatedAt: "1h ago" },
+    ],
+    b2: [
+      { id: "task-b2-1", title: "Ship meta chat timeline", status: "blocked", assignee: "Gemini", updatedAt: "4m ago" },
+      { id: "task-b2-2", title: "Rebase worktree on master", status: "todo", assignee: "OpenCode", updatedAt: "18m ago" },
+    ],
+    b6: [
+      { id: "task-b6-1", title: "Persist workspace sidebar collapse state", status: "in_progress", assignee: "Codex", updatedAt: "9m ago" },
+    ],
+    l2: [
+      { id: "task-l2-1", title: "Refresh hero copy", status: "done", assignee: "Claude", updatedAt: "1d ago" },
+      { id: "task-l2-2", title: "QA responsive navbar", status: "todo", assignee: "Codex", updatedAt: "39m ago" },
+    ],
+  };
 
-function getDefaultWorktreeId(
-  worktreesByWorkspaceId: Record<string, Worktree[]>,
-  workspaceId: string,
-  branchId: string,
-): string | undefined {
-  const worktrees = worktreesByWorkspaceId[workspaceId] ?? [];
-  return worktrees.find((wt) => wt.branchId === branchId)?.id ?? worktrees[0]?.id;
+  const result: Record<string, WorkTask[]> = {};
+
+  for (const [wsId, wts] of Object.entries(initialWorktrees)) {
+    for (const wt of wts) {
+      const tasks = legacy[wt.branchId];
+      if (tasks) {
+        result[wt.id] = tasks.map(({ id, title, status, assignee, updatedAt }) => ({
+          id, title, status, assignee, updatedAt,
+        }));
+      } else {
+        result[wt.id] = [];
+      }
+      void wsId; // suppress unused-var lint
+    }
+  }
+
+  return result;
 }
 
 export const useIDE = create<State>((set, get) => ({
@@ -625,12 +509,15 @@ export const useIDE = create<State>((set, get) => ({
   activeWorkspaceId: "ws-sc",
   activeBranchId: "b1",
 
-  messagesByScope: { [INITIAL_SCOPE]: [seedMessage] },
+  branchesByWorkspaceId: initialBranchesByWorkspaceId,
+  activeBranchIdByWorkspaceId: { "ws-sc": "b1", "ws-landing": "l1" },
+
+  messagesBySessionId: {},
   openFilesByScope: {},
   activeTabByScope: { [INITIAL_SCOPE]: "overview" },
   expandedFoldersByScope: { [INITIAL_SCOPE]: { crates: true } },
   activeWorktreeIdByScope: { [INITIAL_SCOPE]: "wt-sc-main" },
-  tasksByBranchId: initialTasksByBranchId,
+  tasksByWorktreeId: buildInitialTasksByWorktreeId(),
   worktreesByWorkspaceId: initialWorktrees,
   sessionsByWorkspaceId: {},
   activeSessionIdByWorkspaceId: {},
@@ -660,8 +547,7 @@ export const useIDE = create<State>((set, get) => ({
     });
   },
 
-  // Legacy flat fields — kept for rétrocompat avec FilesPanel
-  // Pré-remplis avec un mini mock pour ws-sc (mock workspace) jusqu'à Vague 2
+  // Legacy flat fields — kept for retrocompat with FilesPanel (consumers exist, do not remove).
   fileTree: MOCK_FILE_TREE,
   rootFiles: MOCK_ROOT_FILES,
 
@@ -892,30 +778,32 @@ export const useIDE = create<State>((set, get) => ({
   },
 
   getWorkspaceIdForBranch: (branchId) => {
-    const ws = get().workspaces.find((w) => w.branches.some((b) => b.id === branchId));
-    return ws?.id;
+    const s = get();
+    for (const [wsId, branches] of Object.entries(s.branchesByWorkspaceId)) {
+      if (branches.some((b) => b.id === branchId)) return wsId;
+    }
+    return undefined;
   },
 
   setActiveWorkspace: (id) => {
     set((s) => {
-      const ws = s.workspaces.find((w) => w.id === id);
-      if (!ws) return s;
-      const currentBranchInWs = ws.branches.some((b) => b.id === s.activeBranchId);
-      const nextBranchId = currentBranchInWs
-        ? s.activeBranchId
-        : (ws.branches[0]?.id ?? s.activeBranchId);
+      const branches = s.branchesByWorkspaceId[id] ?? [];
+      const remembered = s.activeBranchIdByWorkspaceId[id];
+      const nextBranchId = (remembered && branches.some((b) => b.id === remembered))
+        ? remembered
+        : (branches[0]?.id ?? s.activeBranchId);
       const key = scopeKey(id, nextBranchId);
       const nextWorktreeId =
         s.activeWorktreeIdByScope[key] ??
         getDefaultWorktreeId(s.worktreesByWorkspaceId, id, nextBranchId);
-      const isMock = ws.source.kind === "mock";
+      const isMock = s.workspaces.find((w) => w.id === id)?.source.kind === "mock";
       return {
         activeWorkspaceId: id,
         activeBranchId: nextBranchId,
+        activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [id]: nextBranchId },
         activeWorktreeIdByScope: nextWorktreeId
           ? { ...s.activeWorktreeIdByScope, [key]: nextWorktreeId }
           : s.activeWorktreeIdByScope,
-        // Fallback mock data pour les workspaces mock, vide sinon (Vague 2 le remplira)
         fileTree: isMock ? MOCK_FILE_TREE : {},
         rootFiles: isMock ? MOCK_ROOT_FILES : [],
         fileTreeLoading: !isMock,
@@ -924,14 +812,15 @@ export const useIDE = create<State>((set, get) => ({
           : { ...s.treeByScope, [key]: makeScopeRootNode(key) },
       };
     });
-    // Déclencher loadRoot (stub pour l'instant, sera connecté en Vague 2)
     void get().loadRoot(scopeKey(id, get().activeBranchId));
   },
 
   setActiveBranch: (id) => {
     set((s) => {
-      const wsId =
-        s.workspaces.find((w) => w.branches.some((b) => b.id === id))?.id ?? s.activeWorkspaceId;
+      let wsId = s.activeWorkspaceId;
+      for (const [wId, branches] of Object.entries(s.branchesByWorkspaceId)) {
+        if (branches.some((b) => b.id === id)) { wsId = wId; break; }
+      }
       const key = scopeKey(wsId, id);
       const nextWorktreeId =
         s.activeWorktreeIdByScope[key] ?? getDefaultWorktreeId(s.worktreesByWorkspaceId, wsId, id);
@@ -939,6 +828,7 @@ export const useIDE = create<State>((set, get) => ({
       return {
         activeBranchId: id,
         activeWorkspaceId: wsId,
+        activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [wsId]: id },
         activeWorktreeIdByScope: nextWorktreeId
           ? { ...s.activeWorktreeIdByScope, [key]: nextWorktreeId }
           : s.activeWorktreeIdByScope,
@@ -998,7 +888,8 @@ export const useIDE = create<State>((set, get) => ({
 
   sendMessage: (content) =>
     set((s) => {
-      const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
+      const activeSessionId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
+      if (!activeSessionId) return s;
       const userMsg: ChatMessage = {
         id: crypto.randomUUID(),
         role: "user",
@@ -1010,9 +901,9 @@ export const useIDE = create<State>((set, get) => ({
         model: "Anthropic · Opus 4.6 (1M)",
         content: generateAssistantReply(content),
       };
-      const prev = s.messagesByScope[key] ?? [];
+      const prev = s.messagesBySessionId[activeSessionId] ?? [];
       return {
-        messagesByScope: { ...s.messagesByScope, [key]: [...prev, userMsg, assistantMsg] },
+        messagesBySessionId: { ...s.messagesBySessionId, [activeSessionId]: [...prev, userMsg, assistantMsg] },
       };
     }),
 
@@ -1021,24 +912,13 @@ export const useIDE = create<State>((set, get) => ({
       const branchId = crypto.randomUUID();
       const worktreeId = crypto.randomUUID();
       const key = scopeKey(workspaceId, branchId);
+      const newBranch: Branch = { id: branchId, name, age: "just now", status: "none" };
       return {
-        workspaces: s.workspaces.map((w) =>
-          w.id === workspaceId
-            ? {
-                ...w,
-                branches: [
-                  ...w.branches,
-                  {
-                    id: branchId,
-                    name,
-                    age: "just now",
-                    status: "none",
-                  },
-                ],
-              }
-            : w,
-        ),
-        tasksByBranchId: { ...s.tasksByBranchId, [branchId]: [] },
+        branchesByWorkspaceId: {
+          ...s.branchesByWorkspaceId,
+          [workspaceId]: [...(s.branchesByWorkspaceId[workspaceId] ?? []), newBranch],
+        },
+        tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
         worktreesByWorkspaceId: {
           ...s.worktreesByWorkspaceId,
           [workspaceId]: [
@@ -1063,12 +943,13 @@ export const useIDE = create<State>((set, get) => ({
     }),
 
   toggleStar: (branchId) =>
-    set((s) => ({
-      workspaces: s.workspaces.map((w) => ({
-        ...w,
-        branches: w.branches.map((b) => (b.id === branchId ? { ...b, starred: !b.starred } : b)),
-      })),
-    })),
+    set((s) => {
+      const next: Record<string, Branch[]> = {};
+      for (const [wsId, branches] of Object.entries(s.branchesByWorkspaceId)) {
+        next[wsId] = branches.map((b) => b.id === branchId ? { ...b, starred: !b.starred } : b);
+      }
+      return { branchesByWorkspaceId: next };
+    }),
 
   addWorkspace: (name, source) =>
     set((s) => {
@@ -1085,18 +966,14 @@ export const useIDE = create<State>((set, get) => ({
       return {
         workspaces: [
           ...s.workspaces,
-          {
-            id,
-            letter: name.charAt(0).toUpperCase() || "W",
-            name,
-            color,
-            source: effectiveSource,
-            branches: [
-              { id: branchId, name: "main", age: "just now", starred: true, status: "none" },
-            ],
-          },
+          { id, letter: name.charAt(0).toUpperCase() || "W", name, color, source: effectiveSource },
         ],
-        tasksByBranchId: { ...s.tasksByBranchId, [branchId]: [] },
+        branchesByWorkspaceId: {
+          ...s.branchesByWorkspaceId,
+          [id]: [{ id: branchId, name: "main", age: "just now", starred: true, status: "none" }],
+        },
+        activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [id]: branchId },
+        tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
         worktreesByWorkspaceId: {
           ...s.worktreesByWorkspaceId,
           [id]: [
@@ -1119,15 +996,14 @@ export const useIDE = create<State>((set, get) => ({
       };
     }),
 
-  addTask: (branchId, title) =>
+  addTask: (worktreeId, title) =>
     set((s) => ({
-      tasksByBranchId: {
-        ...s.tasksByBranchId,
-        [branchId]: [
-          ...(s.tasksByBranchId[branchId] ?? []),
+      tasksByWorktreeId: {
+        ...s.tasksByWorktreeId,
+        [worktreeId]: [
+          ...(s.tasksByWorktreeId[worktreeId] ?? []),
           {
             id: crypto.randomUUID(),
-            branchId,
             title,
             status: "todo",
             assignee: "Codex",
@@ -1137,7 +1013,7 @@ export const useIDE = create<State>((set, get) => ({
       },
     })),
 
-  cycleTaskStatus: (branchId, taskId) =>
+  cycleTaskStatus: (worktreeId, taskId) =>
     set((s) => {
       const nextStatus: Record<TaskStatus, TaskStatus> = {
         todo: "in_progress",
@@ -1146,9 +1022,9 @@ export const useIDE = create<State>((set, get) => ({
         done: "todo",
       };
       return {
-        tasksByBranchId: {
-          ...s.tasksByBranchId,
-          [branchId]: (s.tasksByBranchId[branchId] ?? []).map((task) =>
+        tasksByWorktreeId: {
+          ...s.tasksByWorktreeId,
+          [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).map((task) =>
             task.id === taskId
               ? { ...task, status: nextStatus[task.status], updatedAt: "just now" }
               : task,
@@ -1157,11 +1033,11 @@ export const useIDE = create<State>((set, get) => ({
       };
     }),
 
-  setTaskStatus: (branchId, taskId, status) =>
+  setTaskStatus: (worktreeId, taskId, status) =>
     set((s) => ({
-      tasksByBranchId: {
-        ...s.tasksByBranchId,
-        [branchId]: (s.tasksByBranchId[branchId] ?? []).map((task) =>
+      tasksByWorktreeId: {
+        ...s.tasksByWorktreeId,
+        [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).map((task) =>
           task.id === taskId ? { ...task, status, updatedAt: "just now" } : task,
         ),
       },
@@ -1171,8 +1047,7 @@ export const useIDE = create<State>((set, get) => ({
     set((s) => {
       const worktreeId = crypto.randomUUID();
       const branchName =
-        s.workspaces.find((w) => w.id === workspaceId)?.branches.find((b) => b.id === branchId)
-          ?.name ?? "branch";
+        (s.branchesByWorkspaceId[workspaceId] ?? []).find((b) => b.id === branchId)?.name ?? "branch";
       const displayName = name?.trim() || branchName.split("/").pop() || branchName;
       const key = scopeKey(workspaceId, branchId);
       return {
@@ -1192,6 +1067,7 @@ export const useIDE = create<State>((set, get) => ({
             },
           ],
         },
+        tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
         activeWorktreeIdByScope: {
           ...s.activeWorktreeIdByScope,
           [key]: worktreeId,
@@ -1246,6 +1122,19 @@ export const useIDE = create<State>((set, get) => ({
     });
     return id;
   },
+
+  pinSessionToWorktree: (sessionId, worktreeId) =>
+    set((s) => {
+      const next: Record<string, WorkspaceTerminal[]> = {};
+      for (const [wsId, sessions] of Object.entries(s.sessionsByWorkspaceId)) {
+        next[wsId] = sessions.map((sess) =>
+          sess.id === sessionId
+            ? { ...sess, worktreeId: worktreeId ?? undefined }
+            : sess,
+        );
+      }
+      return { sessionsByWorkspaceId: next };
+    }),
 
   setActiveSession: (sessionId) =>
     set((s) => ({
@@ -1307,11 +1196,76 @@ export const useIDE = create<State>((set, get) => ({
           else delete nextActive[wsId];
         }
       }
+      // Drop messages for the closed session.
+      const { [sessionId]: _dropped, ...restMessages } = s.messagesBySessionId;
       return {
         sessionsByWorkspaceId: nextSessions,
         activeSessionIdByWorkspaceId: nextActive,
+        messagesBySessionId: restMessages,
       };
     }),
+
+  removeWorktree: (worktreeId) =>
+    set((s) => {
+      // Drop tasks for this worktree.
+      const { [worktreeId]: _tasks, ...restTasks } = s.tasksByWorktreeId;
+      // Clear pin on any session pointing to this worktree.
+      const nextSessions: Record<string, WorkspaceTerminal[]> = {};
+      for (const [wsId, sessions] of Object.entries(s.sessionsByWorkspaceId)) {
+        nextSessions[wsId] = sessions.map((sess) =>
+          sess.worktreeId === worktreeId ? { ...sess, worktreeId: undefined } : sess,
+        );
+      }
+      // Remove the worktree from its workspace list.
+      const nextWorktrees: Record<string, Worktree[]> = {};
+      for (const [wsId, wts] of Object.entries(s.worktreesByWorkspaceId)) {
+        nextWorktrees[wsId] = wts.filter((wt) => wt.id !== worktreeId);
+      }
+      return {
+        tasksByWorktreeId: restTasks,
+        sessionsByWorkspaceId: nextSessions,
+        worktreesByWorkspaceId: nextWorktrees,
+      };
+    }),
+
+  removeBranch: (workspaceId, branchId) => {
+    const s = get();
+    // Cascade: remove all worktrees for this branch.
+    const worktreesToRemove = (s.worktreesByWorkspaceId[workspaceId] ?? [])
+      .filter((wt) => wt.branchId === branchId)
+      .map((wt) => wt.id);
+    for (const wtId of worktreesToRemove) {
+      get().removeWorktree(wtId);
+    }
+    set((cur) => ({
+      branchesByWorkspaceId: {
+        ...cur.branchesByWorkspaceId,
+        [workspaceId]: (cur.branchesByWorkspaceId[workspaceId] ?? []).filter((b) => b.id !== branchId),
+      },
+    }));
+  },
+
+  removeWorkspace: (workspaceId) => {
+    const s = get();
+    // Cascade: remove all branches (which cascade to worktrees).
+    const branches = s.branchesByWorkspaceId[workspaceId] ?? [];
+    for (const branch of branches) {
+      get().removeBranch(workspaceId, branch.id);
+    }
+    set((cur) => {
+      const { [workspaceId]: _branches, ...restBranches } = cur.branchesByWorkspaceId;
+      const { [workspaceId]: _sessions, ...restSessions } = cur.sessionsByWorkspaceId;
+      const { [workspaceId]: _worktrees, ...restWorktrees } = cur.worktreesByWorkspaceId;
+      const { [workspaceId]: _activeBranch, ...restActiveBranch } = cur.activeBranchIdByWorkspaceId;
+      return {
+        workspaces: cur.workspaces.filter((w) => w.id !== workspaceId),
+        branchesByWorkspaceId: restBranches,
+        sessionsByWorkspaceId: restSessions,
+        worktreesByWorkspaceId: restWorktrees,
+        activeBranchIdByWorkspaceId: restActiveBranch,
+      };
+    });
+  },
 
   createFolder: (name) => {
     const sk = getCurrentScopeKey(get());
@@ -1380,7 +1334,6 @@ export const useIDE = create<State>((set, get) => ({
         const text = await provider.readFile(path);
 
         set((s) => {
-          const sk = scopeKey(s.activeWorkspaceId, s.activeBranchId);
           const files = s.openFilesByScope[key] ?? [];
           return {
             openFilesByScope: {
@@ -1481,7 +1434,8 @@ export const useIDE = create<State>((set, get) => ({
     }),
 }));
 
-// Derived-scope hooks — read current scope's slices cleanly.
+// ─── Derived-scope hooks ──────────────────────────────────────────────────────
+
 export function useCurrentScopeKey(): ScopeKey {
   const ws = useIDE((s) => s.activeWorkspaceId);
   const br = useIDE((s) => s.activeBranchId);
@@ -1504,8 +1458,9 @@ export function useCurrentExpandedFolders(): Record<string, boolean> {
 }
 
 export function useCurrentMessages(): ChatMessage[] {
-  const key = useCurrentScopeKey();
-  return useIDE((s) => s.messagesByScope[key] ?? EMPTY_MESSAGES);
+  const workspaceId = useIDE((s) => s.activeWorkspaceId);
+  const activeSessionId = useIDE((s) => s.activeSessionIdByWorkspaceId[workspaceId]);
+  return useIDE((s) => (activeSessionId ? s.messagesBySessionId[activeSessionId] : undefined) ?? EMPTY_MESSAGES);
 }
 
 export const TOKEN_CONTEXT_MAX = 200_000;
@@ -1518,9 +1473,17 @@ export function useTokenEstimate(): { used: number; max: number } {
   }, [messages]);
 }
 
-export function useCurrentTasks(): BranchTask[] {
-  const branchId = useIDE((s) => s.activeBranchId);
-  return useIDE((s) => s.tasksByBranchId[branchId] ?? EMPTY_TASKS);
+// Returns tasks for the active worktree (derived from activeWorktreeIdByScope).
+export function useCurrentTasks(): WorkTask[] {
+  const key = useCurrentScopeKey();
+  const worktreeId = useIDE((s) => s.activeWorktreeIdByScope[key]);
+  return useIDE((s) => (worktreeId ? s.tasksByWorktreeId[worktreeId] : undefined) ?? EMPTY_TASKS);
+}
+
+// Helper: all branches for the active workspace.
+export function useCurrentBranches(): Branch[] {
+  const workspaceId = useIDE((s) => s.activeWorkspaceId);
+  return useIDE((s) => s.branchesByWorkspaceId[workspaceId] ?? EMPTY_BRANCHES);
 }
 
 export function useCurrentWorktrees(): Worktree[] {
@@ -1568,8 +1531,9 @@ export function useActiveSession(): WorkspaceTerminal | undefined {
 const EMPTY_FILES: FileTab[] = [];
 const EMPTY_FOLDERS: Record<string, boolean> = {};
 const EMPTY_MESSAGES: ChatMessage[] = [];
-const EMPTY_TASKS: BranchTask[] = [];
+const EMPTY_TASKS: WorkTask[] = [];
 const EMPTY_WORKTREES: Worktree[] = [];
+const EMPTY_BRANCHES: Branch[] = [];
 
 export function useCurrentTree(): TreeNode | undefined {
   const key = useCurrentScopeKey();
