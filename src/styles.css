@@ -359,3 +359,39 @@
 }
 .markdown-preview table { border-collapse: collapse; margin: 0.8rem 0; }
 .markdown-preview th, .markdown-preview td { border: 1px solid oklch(0.5 0 0 / 0.3); padding: 0.4rem 0.7rem; }
+
+/* ===== View Transitions ===== */
+/* Slow down browser default cross-fade a bit so it's perceivable. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 220ms;
+  animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* Settings page slides in from the right (evokes the old sheet),
+   and slides back out to the right on navigation away. */
+::view-transition-old(settings-page) {
+  animation: settings-slide-out 240ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+::view-transition-new(settings-page) {
+  animation: settings-slide-in 280ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@keyframes settings-slide-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes settings-slide-out {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(24px); }
+}
+
+/* Respect reduced-motion. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root),
+  ::view-transition-old(settings-page),
+  ::view-transition-new(settings-page) {
+    animation-duration: 1ms !important;
+  }
+}

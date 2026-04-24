@@ -1,7 +1,7 @@
 import { FolderPlus, HelpCircle, Plus, Settings, Star, GitBranch } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 
 import { cn } from "@/lib/utils";
 import { useIDE, useCurrentBranches, type Branch } from "@/store/ide";
@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/accordion";
 import { AddWorkspaceDialog } from "@/components/ide/add-workspace-dialog";
 import { PromptDialog } from "@/components/ide/prompt-dialog";
-import { SettingsSheet } from "@/components/ide/settings-sheet";
 import { TasksSection } from "@/components/ide/sidebar/tasks-section";
 import { WorktreesSection } from "@/components/ide/sidebar/worktrees-section";
 import { BranchesSkeleton } from "@/components/ide/skeletons/sidebar-skeletons";
@@ -174,14 +173,15 @@ export function Sidebar() {
       </div>
 
       <div className="flex items-center gap-2 border-t border-border px-3 py-2">
-        <SettingsSheet>
-          <button
-            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Settings"
-          >
-            <Settings className="h-4 w-4" />
-          </button>
-        </SettingsSheet>
+        <Link
+          to="/settings"
+          viewTransition
+          className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+          title="Settings"
+          style={{ viewTransitionName: "settings-trigger" }}
+        >
+          <Settings className="h-4 w-4" />
+        </Link>
         <button
           onClick={() => setWorkspaceDialogOpen(true)}
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
