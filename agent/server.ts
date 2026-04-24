@@ -704,6 +704,110 @@ const methods: Record<string, Handler> = {
     return summariesRepo.listBySession(sid);
   },
 
+  async "skills.list"() {
+    const codexHome = path.join(root, ".codex-home");
+
+    async function parseSkillMd(
+      mdPath: string,
+      dirName: string,
+    ): Promise<{ name: string; description?: string }> {
+      let raw: string;
+      try {
+        raw = await fs.readFile(mdPath, "utf8");
+      } catch {
+        return { name: dirName };
+      }
+      if (raw.startsWith("---")) {
+        const end = raw.indexOf("\n---", 3);
+        if (end !== -1) {
+          const fm = raw.slice(3, end);
+          const nameMatch = fm.match(/^name:\s*["']?(.+?)["']?\s*$/m);
+          const descMatch = fm.match(/^description:\s*["']?(.+?)["']?\s*$/m);
+          return {
+            name: nameMatch?.[1]?.trim() ?? dirName,
+            description: descMatch?.[1]?.trim(),
+          };
+        }
+      }
+      const firstLine = raw.split("\n").find((l) => l.trim());
+      const title = firstLine?.replace(/^#+\s*/, "").trim();
+      return { name: title ?? dirName };
+    }
+
+    async function resolveIconUrl(skillDir: string, name: string): Promise<string | undefined> {
+      const assetsDir = path.join(skillDir, "assets");
+      for (const candidate of [`${name}-small.svg`, `${name}.png`]) {
+        try {
+          await fs.stat(path.join(assetsDir, candidate));
+          return path.relative(root, path.join(assetsDir, candidate));
+        } catch {
+          /* not found */
+        }
+      }
+    }
+
+    type SkillEntry = {
+      id: string;
+      name: string;
+      description?: string;
+      kind: "system" | "personal";
+      iconUrl?: string;
+      source: "codex" | "plugin";
+    };
+    const skills: SkillEntry[] = [];
+
+    // System skills: .codex-home/skills/.system/*/SKILL.md
+    const systemBase = path.join(codexHome, "skills", ".system");
+    try {
+      const dirs = await fs.readdir(systemBase, { withFileTypes: true });
+      for (const d of dirs) {
+        if (!d.isDirectory()) continue;
+        const dirPath = path.join(systemBase, d.name);
+        const { name, description } = await parseSkillMd(path.join(dirPath, "SKILL.md"), d.name);
+        const iconUrl = await resolveIconUrl(dirPath, d.name);
+        skills.push({
+          id: `system:${d.name}`,
+          name,
+          description,
+          kind: "system",
+          source: "codex",
+          iconUrl,
+        });
+      }
+    } catch {
+      /* no system skills dir */
+    }
+
+    // Plugin skills: .codex-home/plugins/cache/*/*/*/skills/**/SKILL.md
+    const pluginCache = path.join(codexHome, "plugins", "cache");
+    async function scanPluginDir(dir: string): Promise<void> {
+      let entries: import("node:fs").Dirent[];
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        if (e.isDirectory()) {
+          await scanPluginDir(path.join(dir, e.name));
+        } else if (e.name === "SKILL.md") {
+          const dirPath = path.dirname(path.join(dir, e.name));
+          const dirName = path.basename(dirPath);
+          const { name, description } = await parseSkillMd(path.join(dir, e.name), dirName);
+          const iconUrl = await resolveIconUrl(dirPath, dirName);
+          const id = `plugin:${path.relative(pluginCache, path.join(dir, e.name)).replace(/\\/g, "/")}`;
+          skills.push({ id, name, description, kind: "personal", source: "plugin", iconUrl });
+        }
+      }
+    }
+    await scanPluginDir(pluginCache).catch(() => {});
+
+    return skills.sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === "system" ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  },
+
   /**
    * One-shot non-interactive command. Captures stdout+stderr up to `timeoutMs`
    * (default 10s), then returns { exitCode, stdout, stderr }. Useful for
@@ -749,6 +853,139 @@ const methods: Record<string, Handler> = {
     ]);
     clearTimeout(killer);
     return { exitCode: code, stdout, stderr };
+  },
+
+  // ─── MCP RPC ──────────────────────────────────────────────────────────────
+
+  async "mcp.list"(_params) {
+    type McpRawEntry = {
+      command?: string;
+      url?: string;
+      transport?: string;
+      description?: string;
+      args?: string[];
+      [k: string]: unknown;
+    };
+    type McpFileShape = {
+      mcpServers?: Record<string, McpRawEntry>;
+    };
+
+    const home = process.env.HOME ?? "/root";
+    const candidates = [
+      path.join(home, ".config", "claude", "mcp.json"),
+      path.join(home, ".codex", "mcp.json"),
+      path.join(root, ".codex-home", "mcp.json"),
+      path.join(root, ".mcp.json"),
+    ];
+
+    const seen = new Map<
+      string,
+      {
+        id: string;
+        transport: "stdio" | "http" | "ws";
+        command?: string;
+        url?: string;
+        status: "configured";
+        source: string;
+        description?: string;
+      }
+    >();
+
+    for (const filePath of candidates) {
+      let raw: string;
+      try {
+        raw = await fs.readFile(filePath, "utf8");
+      } catch {
+        continue;
+      }
+      let parsed: McpFileShape;
+      try {
+        parsed = JSON.parse(raw) as McpFileShape;
+      } catch {
+        continue;
+      }
+      const servers = parsed.mcpServers ?? {};
+      for (const [id, entry] of Object.entries(servers)) {
+        if (seen.has(id)) continue;
+        let transport: "stdio" | "http" | "ws" = "stdio";
+        if (entry.transport === "http") transport = "http";
+        else if (entry.transport === "ws") transport = "ws";
+        else if (entry.url) {
+          const u = entry.url.toLowerCase();
+          transport = u.startsWith("ws") ? "ws" : "http";
+        }
+        seen.set(id, {
+          id,
+          transport,
+          ...(entry.command !== undefined ? { command: entry.command } : {}),
+          ...(entry.url !== undefined ? { url: entry.url } : {}),
+          status: "configured",
+          source: filePath,
+          ...(entry.description !== undefined ? { description: entry.description } : {}),
+        });
+      }
+    }
+
+    return Array.from(seen.values());
+  },
+
+  async "mcp.state"(_params) {
+    const home = process.env.HOME ?? "/root";
+    const stateFile = path.join(home, ".ide-ux-agentik", "mcp-state.json");
+    try {
+      const raw = await fs.readFile(stateFile, "utf8");
+      const parsed = JSON.parse(raw) as { enabled?: unknown };
+      const enabled = Array.isArray(parsed.enabled)
+        ? (parsed.enabled as unknown[]).filter((x): x is string => typeof x === "string")
+        : [];
+      return { enabled };
+    } catch {
+      return { enabled: [] };
+    }
+  },
+
+  async "mcp.enable"({ id: rawId }) {
+    const id = String(rawId ?? "").trim();
+    if (!id) throw new Error("mcp.enable: id is required");
+    const home = process.env.HOME ?? "/root";
+    const stateDir = path.join(home, ".ide-ux-agentik");
+    const stateFile = path.join(stateDir, "mcp-state.json");
+    let enabled: string[] = [];
+    try {
+      const raw = await fs.readFile(stateFile, "utf8");
+      const parsed = JSON.parse(raw) as { enabled?: unknown };
+      enabled = Array.isArray(parsed.enabled)
+        ? (parsed.enabled as unknown[]).filter((x): x is string => typeof x === "string")
+        : [];
+    } catch {
+      enabled = [];
+    }
+    if (!enabled.includes(id)) enabled.push(id);
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(stateFile, JSON.stringify({ enabled }, null, 2), "utf8");
+    return { ok: true, enabled };
+  },
+
+  async "mcp.disable"({ id: rawId }) {
+    const id = String(rawId ?? "").trim();
+    if (!id) throw new Error("mcp.disable: id is required");
+    const home = process.env.HOME ?? "/root";
+    const stateDir = path.join(home, ".ide-ux-agentik");
+    const stateFile = path.join(stateDir, "mcp-state.json");
+    let enabled: string[] = [];
+    try {
+      const raw = await fs.readFile(stateFile, "utf8");
+      const parsed = JSON.parse(raw) as { enabled?: unknown };
+      enabled = Array.isArray(parsed.enabled)
+        ? (parsed.enabled as unknown[]).filter((x): x is string => typeof x === "string")
+        : [];
+    } catch {
+      enabled = [];
+    }
+    enabled = enabled.filter((x) => x !== id);
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(stateFile, JSON.stringify({ enabled }, null, 2), "utf8");
+    return { ok: true, enabled };
   },
 };
 

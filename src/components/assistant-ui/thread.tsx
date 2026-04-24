@@ -24,36 +24,44 @@ import {
 import {
   ArrowDownIcon,
   ArrowUpIcon,
-  Brain,
   CheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
-  Globe,
   LoaderIcon,
   MoreHorizontalIcon,
   PencilIcon,
   RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
-import type { FC } from "react";
-import { Toggle } from "@/components/ui/toggle";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { useEffect, useMemo, useRef, useState, type FC } from "react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useIDE, TOKEN_CONTEXT_MAX } from "@/store/ide";
 import { ModelPill } from "@/components/ide/model-pill";
-import { ApprovalPill } from "@/components/ide/approval-pill";
+import { ReasoningPill } from "@/components/ide/reasoning-pill";
+import { SandboxLockButton } from "@/components/ide/sandbox-lock";
+import { VoiceButton } from "@/components/ide/voice-button";
+import { SkillsTrigger } from "@/components/ide/skills-trigger";
+import { ComposerModeTabs } from "@/components/ide/composer-mode-tabs";
+import { ComposerWorktreePicker } from "@/components/ide/composer-worktree-picker";
+import { FileMentionPopover } from "@/components/ide/composer-file-mention";
+import { SlashCommandPopover } from "@/components/ide/composer-slash-command";
+
+const CLI_PLACEHOLDERS: Record<string, string> = {
+  codex: "Ask Codex anything, @ to add files, / for commands",
+  claude: "Ask Claude anything, @ to add files, / for commands",
+  opencode: "Ask OpenCode anything, @ to add files, / for commands",
+  gemini: "Ask Gemini anything, @ to add files, / for commands",
+};
 
 type PartLike = { type?: string; text?: string };
 type MessageLike = { content?: ReadonlyArray<PartLike> };
 function messageTextLength(m: MessageLike): number {
   if (!m.content) return 0;
   let n = 0;
-  for (const p of m.content) if (p?.type === "text" && typeof p.text === "string") n += p.text.length;
+  for (const p of m.content)
+    if (p?.type === "text" && typeof p.text === "string") n += p.text.length;
   return n;
 }
 
@@ -82,9 +90,7 @@ export const Thread: FC = () => {
           data-slot="aui_message-group"
           className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-y-8 pb-10 empty:hidden"
         >
-          <ThreadPrimitive.Messages>
-            {() => <ThreadMessage />}
-          </ThreadPrimitive.Messages>
+          <ThreadPrimitive.Messages>{() => <ThreadMessage />}</ThreadPrimitive.Messages>
         </div>
 
         <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-(--composer-radius) bg-background pb-4 md:pb-6">
@@ -140,9 +146,7 @@ const ThreadWelcome: FC = () => {
 const ThreadSuggestions: FC = () => {
   return (
     <div className="aui-thread-welcome-suggestions grid w-full @md:grid-cols-2 gap-2 pb-4">
-      <ThreadPrimitive.Suggestions>
-        {() => <ThreadSuggestionItem />}
-      </ThreadPrimitive.Suggestions>
+      <ThreadPrimitive.Suggestions>{() => <ThreadSuggestionItem />}</ThreadPrimitive.Suggestions>
     </div>
   );
 };
@@ -164,16 +168,83 @@ const ThreadSuggestionItem: FC = () => {
 };
 
 const Composer: FC = () => {
+  const activeAgent = useIDE((s) => {
+    const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
+    const activeId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
+    return sessions.find((t) => t.id === activeId)?.kind ?? s.activeAgent;
+  });
+  const placeholder = CLI_PLACEHOLDERS[activeAgent] ?? CLI_PLACEHOLDERS.codex;
+
+  const shellRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [popover, setPopover] = useState<"files" | "slash" | null>(null);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    const ta = shell.querySelector("textarea");
+    if (!ta) return;
+    inputRef.current = ta as HTMLTextAreaElement;
+
+    const detect = () => {
+      const el = inputRef.current;
+      if (!el) return;
+      const caret = el.selectionStart ?? 0;
+      const before = el.value.slice(0, caret);
+      const m = before.match(/(?:^|\s)([@/])([^\s]*)$/);
+      if (!m) {
+        setPopover(null);
+        setQuery("");
+        return;
+      }
+      setQuery(m[2]);
+      setPopover(m[1] === "@" ? "files" : "slash");
+    };
+
+    ta.addEventListener("input", detect);
+    ta.addEventListener("click", detect);
+    ta.addEventListener("keyup", detect);
+    return () => {
+      ta.removeEventListener("input", detect);
+      ta.removeEventListener("click", detect);
+      ta.removeEventListener("keyup", detect);
+    };
+  }, []);
+
+  function replaceTriggerWith(replacement: string) {
+    const el = inputRef.current;
+    if (!el) return;
+    const caret = el.selectionStart ?? el.value.length;
+    const before = el.value.slice(0, caret);
+    const after = el.value.slice(caret);
+    const m = before.match(/((?:^|\s)[@/])[^\s]*$/);
+    if (!m) return;
+    const startIdx = before.lastIndexOf(m[0]);
+    const keepPrefix = before.slice(0, startIdx);
+    const lead = m[0].startsWith(" ") ? " " : "";
+    const next = keepPrefix + lead + replacement + " " + after;
+    const newCaret = (keepPrefix + lead + replacement + " ").length;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    setter?.call(el, next);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.selectionStart = el.selectionEnd = newCaret;
+    setPopover(null);
+    setQuery("");
+    el.focus();
+  }
+
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ComposerPrimitive.AttachmentDropzone asChild>
         <div
+          ref={shellRef}
           data-slot="aui_composer-shell"
           className="flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-background p-(--composer-padding) transition-shadow focus-within:border-ring/75 focus-within:ring-2 focus-within:ring-ring/20 data-[dragging=true]:border-ring data-[dragging=true]:border-dashed data-[dragging=true]:bg-accent/50"
         >
           <ComposerAttachments />
           <ComposerPrimitive.Input
-            placeholder="Send a message..."
+            placeholder={placeholder}
             className="aui-composer-input max-h-32 min-h-10 w-full resize-none bg-transparent px-1.75 py-1 text-sm outline-none placeholder:text-muted-foreground/80"
             rows={1}
             autoFocus
@@ -182,6 +253,26 @@ const Composer: FC = () => {
           <ComposerAction />
         </div>
       </ComposerPrimitive.AttachmentDropzone>
+      {popover === "files" && (
+        <FileMentionPopover
+          anchorRef={shellRef}
+          query={query}
+          onPick={(path) => replaceTriggerWith(`@${path}`)}
+          onClose={() => setPopover(null)}
+        />
+      )}
+      {popover === "slash" && (
+        <SlashCommandPopover
+          anchorRef={shellRef}
+          query={query}
+          onPick={(cmd) => replaceTriggerWith(`/${cmd.id}`)}
+          onClose={() => setPopover(null)}
+        />
+      )}
+      <div className="mt-1 flex items-center justify-between gap-2">
+        <ComposerModeTabs />
+        <ComposerWorktreePicker />
+      </div>
     </ComposerPrimitive.Root>
   );
 };
@@ -208,26 +299,16 @@ const TokenBadge: FC<{ used: number; max: number }> = ({ used, max }) => {
           ctx {formatCompact(used)}/{formatCompact(max)}
         </span>
       </TooltipTrigger>
-      <TooltipContent side="top">
-        Estimated context usage (~4 chars / token)
-      </TooltipContent>
+      <TooltipContent side="top">Estimated context usage (~4 chars / token)</TooltipContent>
     </Tooltip>
   );
 };
 
 const ComposerAction: FC = () => {
-  const thinking = useIDE((s) => s.thinking);
-  const toggleThinking = useIDE((s) => s.toggleThinking);
-  const webSearch = useIDE((s) => s.webSearch);
-  const toggleWebSearch = useIDE((s) => s.toggleWebSearch);
-  // Derive the CLI kind from the active session (not the global activeAgent
-  // setting). Multiple sessions can coexist in a workspace with different
-  // CLIs; the pills must reflect the session currently rendered.
   const activeAgent = useIDE((s) => {
     const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
     const activeId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
-    const session = sessions.find((t) => t.id === activeId);
-    return session?.kind ?? s.activeAgent;
+    return sessions.find((t) => t.id === activeId)?.kind ?? s.activeAgent;
   });
   const messagesChars = useAuiState((s) =>
     s.thread.messages.reduce((acc, m) => acc + messageTextLength(m as MessageLike), 0),
@@ -239,32 +320,15 @@ const ComposerAction: FC = () => {
       <div className="flex items-center gap-1">
         <ComposerAddAttachment />
         <ModelPill cli={activeAgent} />
-        <ApprovalPill cli={activeAgent} />
-        <Toggle
-          pressed={webSearch}
-          onPressedChange={toggleWebSearch}
-          size="sm"
-          aria-label="Web search"
-          className="h-8 gap-1.5 rounded-full px-2.5 text-muted-foreground data-[state=on]:bg-accent data-[state=on]:text-foreground"
-        >
-          <Globe className="size-4" />
-          <span className="text-xs">Web</span>
-        </Toggle>
-        <Toggle
-          pressed={thinking}
-          onPressedChange={toggleThinking}
-          size="sm"
-          aria-label="Thinking mode"
-          className="h-8 gap-1.5 rounded-full px-2.5 text-muted-foreground data-[state=on]:bg-accent data-[state=on]:text-foreground"
-        >
-          <Brain className="size-4" />
-          <span className="text-xs">Think</span>
-        </Toggle>
+        <ReasoningPill cli={activeAgent} />
+        <SkillsTrigger />
       </div>
       <div className="pointer-events-auto absolute left-1/2 -translate-x-1/2">
         <TokenBadge used={used} max={TOKEN_CONTEXT_MAX} />
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
+        <SandboxLockButton cli={activeAgent} />
+        <VoiceButton />
         <AuiIf condition={(s) => !s.thread.isRunning}>
           <ComposerPrimitive.Send asChild>
             <TooltipIconButton
@@ -333,9 +397,7 @@ const AssistantMessage: FC = () => {
             tools: { Fallback: ToolFallback },
           }}
         />
-        <AuiIf
-          condition={(s) => s.thread.isRunning && s.message.content.length === 0}
-        >
+        <AuiIf condition={(s) => s.thread.isRunning && s.message.content.length === 0}>
           <div className="flex items-center gap-2 text-muted-foreground">
             <LoaderIcon className="size-4 animate-spin" />
             <span className="text-sm">Thinking…</span>
@@ -379,10 +441,7 @@ const AssistantActionBar: FC = () => {
       </ActionBarPrimitive.Reload>
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
-          <TooltipIconButton
-            tooltip="More"
-            className="data-[state=open]:bg-accent"
-          >
+          <TooltipIconButton tooltip="More" className="data-[state=open]:bg-accent">
             <MoreHorizontalIcon />
           </TooltipIconButton>
         </ActionBarMorePrimitive.Trigger>
@@ -447,10 +506,7 @@ const UserActionBar: FC = () => {
 
 const EditComposer: FC = () => {
   return (
-    <MessagePrimitive.Root
-      data-slot="aui_edit-composer-wrapper"
-      className="flex flex-col px-2"
-    >
+    <MessagePrimitive.Root data-slot="aui_edit-composer-wrapper" className="flex flex-col px-2">
       <ComposerPrimitive.Root className="aui-edit-composer-root ml-auto flex w-full max-w-[85%] flex-col rounded-2xl bg-muted">
         <ComposerPrimitive.Input
           className="aui-edit-composer-input min-h-14 w-full resize-none bg-transparent p-4 text-foreground text-sm outline-none"
@@ -471,10 +527,7 @@ const EditComposer: FC = () => {
   );
 };
 
-const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
-  className,
-  ...rest
-}) => {
+const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({ className, ...rest }) => {
   return (
     <BranchPickerPrimitive.Root
       hideWhenSingleBranch

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import { createReadStream } from "node:fs";
-import { sessionsRepo, messagesRepo } from "./db.js";
+import { sessionsRepo, messagesRepo } from "./db.ts";
 
 const CODEX_HOME = process.env.CODEX_HOME ?? path.join(process.cwd(), ".codex-home");
 const SESSIONS_DIR = path.join(CODEX_HOME, "sessions");
@@ -143,7 +143,7 @@ async function importFile(filePath: string): Promise<number> {
         : `Imported — ${path.basename(filePath)}`;
 
       try {
-        const db = (await import("./db.js")).openDb();
+        const db = (await import("./db.ts")).openDb();
         const now = Date.now();
         db.prepare(
           `INSERT OR IGNORE INTO sessions
