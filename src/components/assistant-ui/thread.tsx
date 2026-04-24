@@ -7,7 +7,6 @@ import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Reasoning, ReasoningGroup } from "@/components/assistant-ui/reasoning";
-import { ThreadMessageSkeleton } from "@/components/assistant-ui/thread-message-skeleton";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -32,6 +31,7 @@ import {
   CopyIcon,
   DownloadIcon,
   Globe,
+  LoaderIcon,
   MoreHorizontalIcon,
   PencilIcon,
   RefreshCwIcon,
@@ -45,6 +45,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useIDE, TOKEN_CONTEXT_MAX } from "@/store/ide";
+import { ModelPill } from "@/components/ide/model-pill";
+import { ApprovalPill } from "@/components/ide/approval-pill";
 
 type PartLike = { type?: string; text?: string };
 type MessageLike = { content?: ReadonlyArray<PartLike> };
@@ -65,33 +67,30 @@ export const Thread: FC = () => {
         ["--composer-padding" as string]: "10px",
       }}
     >
+      {/* No `turnAnchor="top"` — that disables auto-scroll entirely in
+          assistant-ui (see useThreadViewportAutoScroll). We want the
+          ChatGPT-style "stick to bottom when new messages arrive" behavior. */}
       <ThreadPrimitive.Viewport
-        turnAnchor="top"
         data-slot="aui_thread-viewport"
-        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-6"
       >
-        <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
-          <AuiIf condition={(s) => s.thread.isEmpty}>
-            <ThreadWelcome />
-          </AuiIf>
+        <AuiIf condition={(s) => s.thread.isEmpty}>
+          <ThreadWelcome />
+        </AuiIf>
 
-          <div
-            data-slot="aui_message-group"
-            className="mb-10 flex flex-col gap-y-8 empty:hidden"
-          >
-            <ThreadPrimitive.Messages>
-              {() => <ThreadMessage />}
-            </ThreadPrimitive.Messages>
-            <AuiIf condition={(s) => s.thread.isRunning}>
-              <ThreadMessageSkeleton />
-            </AuiIf>
-          </div>
-
-          <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mt-auto flex flex-col gap-4 overflow-visible rounded-t-(--composer-radius) bg-background pb-4 md:pb-6">
-            <ThreadScrollToBottom />
-            <Composer />
-          </ThreadPrimitive.ViewportFooter>
+        <div
+          data-slot="aui_message-group"
+          className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-y-8 pb-10 empty:hidden"
+        >
+          <ThreadPrimitive.Messages>
+            {() => <ThreadMessage />}
+          </ThreadPrimitive.Messages>
         </div>
+
+        <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-(--composer-radius) bg-background pb-4 md:pb-6">
+          <ThreadScrollToBottom />
+          <Composer />
+        </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
   );
@@ -221,6 +220,7 @@ const ComposerAction: FC = () => {
   const toggleThinking = useIDE((s) => s.toggleThinking);
   const webSearch = useIDE((s) => s.webSearch);
   const toggleWebSearch = useIDE((s) => s.toggleWebSearch);
+  const activeAgent = useIDE((s) => s.activeAgent);
   const messagesChars = useAuiState((s) =>
     s.thread.messages.reduce((acc, m) => acc + messageTextLength(m as MessageLike), 0),
   );
@@ -230,6 +230,8 @@ const ComposerAction: FC = () => {
     <div className="aui-composer-action-wrapper relative flex items-center justify-between gap-2">
       <div className="flex items-center gap-1">
         <ComposerAddAttachment />
+        <ModelPill cli={activeAgent} />
+        <ApprovalPill cli={activeAgent} />
         <Toggle
           pressed={webSearch}
           onPressedChange={toggleWebSearch}
@@ -323,6 +325,14 @@ const AssistantMessage: FC = () => {
             tools: { Fallback: ToolFallback },
           }}
         />
+        <AuiIf
+          condition={(s) => s.thread.isRunning && s.message.content.length === 0}
+        >
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <LoaderIcon className="size-4 animate-spin" />
+            <span className="text-sm">Thinking…</span>
+          </div>
+        </AuiIf>
         <MessageError />
       </div>
 
