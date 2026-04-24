@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useIDE } from "@/store/ide";
 import { providerFor } from "@/lib/fs";
 import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
@@ -7,13 +7,25 @@ import type { McpServer } from "./types.js";
 
 const POLL_MS = 30_000;
 
-export function useMcpServers(): McpServer[] {
+export type UseMcpServersResult = {
+  servers: McpServer[];
+  /** Immediately re-fetches the server list (e.g. after save/remove/enable/disable). */
+  refetch: () => void;
+};
+
+export function useMcpServers(): UseMcpServersResult {
   const workspaces = useIDE((s) => s.workspaces);
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
   const source = workspaces.find((w) => w.id === activeWorkspaceId)?.source;
 
   const [servers, setServers] = useState<McpServer[]>([]);
+  // Bump this counter to trigger an immediate refetch.
+  const [version, setVersion] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refetch = useCallback(() => {
+    setVersion((v) => v + 1);
+  }, []);
 
   useEffect(() => {
     if (source?.kind !== "remote-agent") {
@@ -51,7 +63,8 @@ export function useMcpServers(): McpServer[] {
         timerRef.current = null;
       }
     };
-  }, [source]);
+    // version is intentionally included: bumping it re-runs this effect → immediate re-fetch.
+  }, [source, version]);
 
-  return servers;
+  return { servers, refetch };
 }
