@@ -114,6 +114,17 @@ function RootComponent() {
         void s.refreshCodexTokens();
       }
     }
+    // Dev-only testing handle for Playwright. No-op in production builds.
+    if (import.meta.env.DEV && typeof window !== "undefined") {
+      (window as unknown as { __ideStore?: unknown }).__ideStore = {
+        addWorkspace: (name: string, source: unknown) =>
+          useIDE.getState().addWorkspace(name, source as Parameters<ReturnType<typeof useIDE.getState>["addWorkspace"]>[1]),
+        setActiveWorkspace: (id: string) => useIDE.getState().setActiveWorkspace(id),
+        get workspaces() {
+          return useIDE.getState().workspaces;
+        },
+      };
+    }
   }, [hydrate]);
 
   return (

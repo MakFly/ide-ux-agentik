@@ -1,0 +1,63 @@
+import { expect, test } from "@playwright/test";
+
+/**
+ * Offline smoke tests — exercise the /settings UI without a running agent.
+ * All provider Check buttons should report a connection failure (not crash).
+ */
+
+test.beforeEach(async ({ context }) => {
+  // Reset any persisted codex tokens / api keys from previous runs so the
+  // "Sign in with ChatGPT" CTA is always visible.
+  await context.addInitScript(() => {
+    try {
+      window.localStorage.removeItem("codex-auth");
+      window.localStorage.removeItem("codex-api-key");
+    } catch {
+      /* ignore */
+    }
+  });
+});
+
+test.describe("settings page — offline", () => {
+  test("renders provider cards and runs check that fails cleanly", async ({ page }) => {
+    await page.goto("/settings");
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+
+    for (const provider of ["codex", "claude", "opencode", "gemini"] as const) {
+      await expect(page.locator(`[data-provider="${provider}"]`)).toBeVisible();
+    }
+
+    const btn = page.getByTestId("check-codex");
+    await btn.scrollIntoViewIfNeeded();
+    await btn.click();
+
+    const summary = page.getByTestId("check-codex-summary");
+    await expect(summary).toBeVisible({ timeout: 15_000 });
+    // Poll until the "Running…" placeholder flips to the final message.
+    await expect(summary).not.toHaveText(/Running/i, { timeout: 15_000 });
+    const text = (await summary.textContent()) ?? "";
+    expect(text).toMatch(/remote-agent|connection|checks require/i);
+  });
+
+  test("codex sign-in dialog opens via ?login=codex", async ({ page }) => {
+    await page.goto("/settings?login=codex");
+    await expect(page.getByRole("heading", { name: "Sign in to Codex" })).toBeVisible();
+    await expect(page.getByText(/ChatGPT device authorization flow/i)).toBeVisible();
+  });
+
+  test("codex sign-in dialog opens via button", async ({ page }) => {
+    await page.goto("/settings");
+    // Wait for hydration — React 19 + TanStack Start SSR means DOM is present
+    // before onClick handlers are attached. Polling an attribute that is only
+    // rendered by the client component ensures hydration is complete.
+    await expect(page.locator("[data-login-open]")).toBeVisible();
+    await page.waitForLoadState("networkidle");
+    const btn = page.getByTestId("codex-signin");
+    await expect(btn).toBeVisible();
+    const container = page.locator("[data-login-open]");
+    await expect(container).toHaveAttribute("data-login-open", "false");
+    await btn.click();
+    await expect(container).toHaveAttribute("data-login-open", "true", { timeout: 5_000 });
+    await expect(page.getByText("Sign in to Codex")).toBeVisible({ timeout: 5_000 });
+  });
+});

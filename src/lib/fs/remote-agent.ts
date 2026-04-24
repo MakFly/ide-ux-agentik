@@ -237,6 +237,17 @@ export class RemoteAgentProvider implements FsProvider {
     await this.call<void>("pty.kill", { id, signal });
   }
 
+  /** One-shot non-interactive command (uses pipes, not PTY). */
+  async execRun(params: {
+    cmd: string;
+    args?: string[];
+    cwd?: string;
+    env?: Record<string, string>;
+    timeoutMs?: number;
+  }): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+    return this.call("exec.run", params);
+  }
+
   async ptyList(): Promise<{ sessions: Array<{ id: string; cmd: string; cwd: string; alive: boolean }> }> {
     return this.call("pty.list", {});
   }

@@ -1,15 +1,25 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { z } from "zod";
-import { ArrowLeft, LogOut, RefreshCw, Settings as SettingsIcon, Sparkles } from "lucide-react";
+import {
+  ArrowLeft,
+  CheckCircle2,
+  CircleAlert,
+  CircleDashed,
+  Loader2,
+  LogOut,
+  RefreshCw,
+  Settings as SettingsIcon,
+  Sparkles,
+  XCircle,
+} from "lucide-react";
 import { toast } from "sonner";
+import { z } from "zod";
 
 import { useIDE, type Theme } from "@/store/ide";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-import { CodexLoginDialog } from "@/components/ide/codex-login-dialog";
 import {
   Select,
   SelectContent,
@@ -17,6 +27,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { CodexLoginDialog } from "@/components/ide/codex-login-dialog";
+import {
+  PROVIDER_CHECKS,
+  PROVIDER_META,
+  type CheckResult,
+  type CheckStatus,
+  type ProviderId,
+  emptyResult,
+} from "@/lib/providers-check";
 
 const settingsSearchSchema = z.object({
   login: z.enum(["codex"]).optional(),
@@ -28,7 +47,7 @@ export const Route = createFileRoute("/settings")({
   head: () => ({
     meta: [
       { title: "Settings — Superconductor" },
-      { name: "description", content: "Tweak appearance, layout, and AI behavior." },
+      { name: "description", content: "Tweak appearance, layout, and AI providers." },
     ],
   }),
 });
@@ -71,6 +90,22 @@ function Section({
   );
 }
 
+function statusIcon(s: CheckStatus) {
+  const cls = "h-3.5 w-3.5 shrink-0";
+  switch (s) {
+    case "ok":
+      return <CheckCircle2 className={`${cls} text-status-add`} />;
+    case "warn":
+      return <CircleAlert className={`${cls} text-status-warn`} />;
+    case "fail":
+      return <XCircle className={`${cls} text-status-del`} />;
+    case "running":
+      return <Loader2 className={`${cls} animate-spin text-muted-foreground`} />;
+    default:
+      return <CircleDashed className={`${cls} text-muted-foreground`} />;
+  }
+}
+
 function SettingsPage() {
   const theme = useIDE((s) => s.theme);
   const setTheme = useIDE((s) => s.setTheme);
@@ -82,20 +117,10 @@ function SettingsPage() {
   const toggleThinking = useIDE((s) => s.toggleThinking);
   const filesTab = useIDE((s) => s.filesTab);
   const setFilesTab = useIDE((s) => s.setFilesTab);
-  const codexApiKey = useIDE((s) => s.codexApiKey);
-  const setCodexApiKey = useIDE((s) => s.setCodexApiKey);
-  const codexAuth = useIDE((s) => s.codexAuth);
-  const setCodexAuth = useIDE((s) => s.setCodexAuth);
-  const refreshCodexTokens = useIDE((s) => s.refreshCodexTokens);
-  const [refreshing, setRefreshing] = useState(false);
-  const [apiKeyDraft, setApiKeyDraft] = useState(codexApiKey ?? "");
   const { login } = Route.useSearch();
   const [loginOpen, setLoginOpen] = useState(false);
   const openedRef = useRef(false);
 
-  // One-shot auto-open when the URL asks for it. Does NOT clear the URL:
-  // closing the dialog just sets loginOpen=false, and the ref guard prevents
-  // re-opening on future re-renders.
   useEffect(() => {
     if (login === "codex" && !openedRef.current) {
       openedRef.current = true;
@@ -107,6 +132,7 @@ function SettingsPage() {
     <div
       className="flex min-h-svh flex-col bg-background text-foreground"
       style={{ viewTransitionName: "settings-page" }}
+      data-login-open={String(loginOpen)}
     >
       <header className="sticky top-0 z-10 border-b border-border bg-background/80 backdrop-blur">
         <div className="mx-auto flex max-w-3xl items-center gap-3 px-6 py-4">
@@ -175,102 +201,245 @@ function SettingsPage() {
           </Section>
 
           <Section
-            id="codex"
-            title="Codex"
-            description="Sign in with ChatGPT to use your Plus / Pro / Team plan, or provide an API key as a bypass."
+            id="providers"
+            title="Providers"
+            description="One-click health checks for each CLI agent on the active remote-agent workspace."
           >
-            <div className="py-4">
-              {codexAuth ? (
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 text-[13.5px] text-foreground">
-                      <Sparkles className="h-3.5 w-3.5 text-status-add" />
-                      <span className="truncate">{codexAuth.email ?? "Signed in with ChatGPT"}</span>
-                    </div>
-                    <div className="mt-0.5 font-mono text-[11.5px] text-muted-foreground">
-                      plan: {codexAuth.chatgptPlanType ?? "unknown"} · last refresh{" "}
-                      {new Date(codexAuth.lastRefresh).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 gap-1.5"
-                      disabled={refreshing}
-                      onClick={async () => {
-                        setRefreshing(true);
-                        const ok = await refreshCodexTokens();
-                        setRefreshing(false);
-                        if (ok) toast.success("Tokens refreshed.");
-                        else toast.error("Refresh failed.");
-                      }}
-                    >
-                      <RefreshCw
-                        className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`}
-                      />
-                      Refresh
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 gap-1.5"
-                      onClick={() => {
-                        setCodexAuth(null);
-                        toast.success("Signed out of Codex.");
-                      }}
-                    >
-                      <LogOut className="h-3.5 w-3.5" />
-                      Sign out
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0 text-[12.5px] text-muted-foreground">
-                    Device-code flow via <code className="font-mono">auth.openai.com</code>. Tokens
-                    persisted in localStorage.
-                  </div>
-                  <Button size="sm" className="h-8" onClick={() => setLoginOpen(true)}>
-                    Sign in with ChatGPT
-                  </Button>
-                </div>
-              )}
-            </div>
+            <ProviderCard provider="codex" onOpenLogin={() => setLoginOpen(true)} />
             <Separator />
-            <div className="py-4">
-              <label className="mb-1.5 block text-[13.5px] text-foreground">
-                OPENAI_API_KEY <span className="text-[11.5px] text-muted-foreground">(advanced)</span>
-              </label>
-              <p className="mb-3 text-[12px] text-muted-foreground">
-                Alternative to ChatGPT login. Injected as <code>OPENAI_API_KEY</code> into the PTY env
-                when spawning <code>codex</code>.
-              </p>
-              <div className="flex gap-2">
-                <Input
-                  type="password"
-                  placeholder="sk-..."
-                  value={apiKeyDraft}
-                  onChange={(e) => setApiKeyDraft(e.target.value)}
-                  className="h-9 flex-1 font-mono text-[12.5px]"
-                  autoComplete="off"
-                />
-                <Button
-                  size="sm"
-                  className="h-9"
-                  onClick={() => {
-                    setCodexApiKey(apiKeyDraft);
-                    toast.success(apiKeyDraft ? "API key saved." : "API key cleared.");
-                  }}
-                >
-                  Save
-                </Button>
-              </div>
-            </div>
+            <ProviderCard provider="claude" />
+            <Separator />
+            <ProviderCard provider="opencode" />
+            <Separator />
+            <ProviderCard provider="gemini" />
           </Section>
         </div>
       </main>
       <CodexLoginDialog open={loginOpen} onOpenChange={setLoginOpen} />
+    </div>
+  );
+}
+
+function ProviderCard({
+  provider,
+  onOpenLogin,
+}: {
+  provider: ProviderId;
+  onOpenLogin?: () => void;
+}) {
+  const meta = PROVIDER_META[provider];
+  const [result, setResult] = useState<CheckResult>(emptyResult());
+  const [running, setRunning] = useState(false);
+
+  async function runCheck() {
+    setRunning(true);
+    setResult((r) => ({ ...r, status: "running", summary: "Running…" }));
+    try {
+      const next = await PROVIDER_CHECKS[provider]();
+      setResult(next);
+    } catch (e) {
+      setResult({
+        status: "fail",
+        summary: e instanceof Error ? e.message : String(e),
+        details: [],
+        runAt: new Date().toISOString(),
+      });
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="py-4" data-provider={provider}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <img
+            src={meta.icon}
+            alt={meta.label}
+            className="h-6 w-6 shrink-0 rounded-[4px] bg-white/5 object-contain p-0.5"
+          />
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-[13.5px] font-medium text-foreground">
+              {meta.label}
+              {statusIcon(result.status)}
+            </div>
+            <div className="truncate text-[12px] text-muted-foreground">{meta.description}</div>
+          </div>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 gap-1.5"
+          onClick={() => void runCheck()}
+          disabled={running}
+          data-testid={`check-${provider}`}
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${running ? "animate-spin" : ""}`} />
+          Check
+        </Button>
+      </div>
+
+      {result.status !== "unknown" && (
+        <div className="mt-3 rounded-md border border-border bg-code-bg/40 px-3 py-2 text-[12px]">
+          <div
+            className={`font-medium ${
+              result.status === "ok"
+                ? "text-status-add"
+                : result.status === "warn"
+                  ? "text-status-warn"
+                  : result.status === "fail"
+                    ? "text-status-del"
+                    : "text-muted-foreground"
+            }`}
+            data-testid={`check-${provider}-summary`}
+          >
+            {result.summary}
+          </div>
+          {result.details.length > 0 && (
+            <ul className="mt-2 space-y-1">
+              {result.details.map((d, i) => (
+                <li
+                  key={i}
+                  className="flex items-center gap-2 font-mono text-[11.5px] text-muted-foreground"
+                >
+                  {d.ok ? (
+                    <CheckCircle2 className="h-3 w-3 shrink-0 text-status-add" />
+                  ) : (
+                    <XCircle className="h-3 w-3 shrink-0 text-status-del" />
+                  )}
+                  <span className="text-foreground">{d.label}:</span>
+                  <span className="truncate">{d.value}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {result.runAt && (
+            <div className="mt-2 text-[10.5px] text-muted-foreground">
+              last check {new Date(result.runAt).toLocaleTimeString()}
+            </div>
+          )}
+        </div>
+      )}
+
+      {provider === "codex" && <CodexAuthBlock onOpenLogin={onOpenLogin} />}
+      {provider === "claude" && <AnthropicApiKeyBlock />}
+      {provider === "gemini" && <GeminiApiKeyBlock />}
+    </div>
+  );
+}
+
+function CodexAuthBlock({ onOpenLogin }: { onOpenLogin?: () => void }) {
+  const codexAuth = useIDE((s) => s.codexAuth);
+  const setCodexAuth = useIDE((s) => s.setCodexAuth);
+  const refreshCodexTokens = useIDE((s) => s.refreshCodexTokens);
+  const codexApiKey = useIDE((s) => s.codexApiKey);
+  const setCodexApiKey = useIDE((s) => s.setCodexApiKey);
+  const [refreshing, setRefreshing] = useState(false);
+  const [apiDraft, setApiDraft] = useState(codexApiKey ?? "");
+
+  return (
+    <div className="mt-3 space-y-3 border-t border-border pt-3">
+      {codexAuth ? (
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-[12.5px] text-foreground">
+              <Sparkles className="h-3 w-3 text-status-add" />
+              <span className="truncate">{codexAuth.email ?? "Signed in with ChatGPT"}</span>
+            </div>
+            <div className="font-mono text-[10.5px] text-muted-foreground">
+              plan: {codexAuth.chatgptPlanType ?? "unknown"} ·{" "}
+              {new Date(codexAuth.lastRefresh).toLocaleString()}
+            </div>
+          </div>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5"
+              disabled={refreshing}
+              onClick={async () => {
+                setRefreshing(true);
+                const ok = await refreshCodexTokens();
+                setRefreshing(false);
+                if (ok) toast.success("Tokens refreshed.");
+                else toast.error("Refresh failed.");
+              }}
+            >
+              <RefreshCw className={`h-3 w-3 ${refreshing ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5"
+              onClick={() => {
+                setCodexAuth(null);
+                toast.success("Signed out of Codex.");
+              }}
+            >
+              <LogOut className="h-3 w-3" />
+              Sign out
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-[12px] text-muted-foreground">
+            Browser device-code flow via <code className="font-mono">auth.openai.com</code>.
+          </div>
+          <Button
+            size="sm"
+            className="h-7"
+            onClick={() => onOpenLogin?.()}
+            data-testid="codex-signin"
+          >
+            Sign in with ChatGPT
+          </Button>
+        </div>
+      )}
+      <div className="space-y-1.5">
+        <div className="text-[11.5px] text-muted-foreground">
+          Fallback: <code className="font-mono">OPENAI_API_KEY</code>
+        </div>
+        <div className="flex gap-2">
+          <Input
+            type="password"
+            placeholder="sk-..."
+            value={apiDraft}
+            onChange={(e) => setApiDraft(e.target.value)}
+            className="h-8 flex-1 font-mono text-[12px]"
+            autoComplete="off"
+          />
+          <Button
+            size="sm"
+            className="h-8"
+            onClick={() => {
+              setCodexApiKey(apiDraft);
+              toast.success(apiDraft ? "API key saved." : "API key cleared.");
+            }}
+          >
+            Save
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AnthropicApiKeyBlock() {
+  return (
+    <div className="mt-3 border-t border-border pt-3 text-[11.5px] text-muted-foreground">
+      Auth handled entirely on the agent host via <code className="font-mono">claude login</code>.
+      Credentials live at <code className="font-mono">~/.claude/.credentials.json</code>.
+    </div>
+  );
+}
+
+function GeminiApiKeyBlock() {
+  return (
+    <div className="mt-3 border-t border-border pt-3 text-[11.5px] text-muted-foreground">
+      Set <code className="font-mono">GEMINI_API_KEY</code> (or <code>GOOGLE_API_KEY</code>) in
+      the agent host environment, or run <code className="font-mono">gcloud auth application-default login</code>.
     </div>
   );
 }

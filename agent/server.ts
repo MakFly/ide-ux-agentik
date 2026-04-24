@@ -285,6 +285,51 @@ const methods: Record<string, Handler> = {
     }));
     return { sessions };
   },
+
+  /**
+   * One-shot non-interactive command. Captures stdout+stderr up to `timeoutMs`
+   * (default 10s), then returns { exitCode, stdout, stderr }. Useful for
+   * provider checks like `codex --version`.
+   */
+  async "exec.run"({ cmd, args, cwd, env, timeoutMs }, _ctx) {
+    if (!cmd) throw new Error("exec.run: cmd is required");
+    let resolvedCwd: string;
+    try {
+      resolvedCwd = cwd ? safeResolve(String(cwd)) : root;
+    } catch {
+      resolvedCwd = root;
+    }
+    const mergedEnv: Record<string, string> = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([, v]) => v !== undefined) as [string, string][],
+      ),
+      ...(env as Record<string, string> | undefined ?? {}),
+    };
+    const proc = Bun.spawn([String(cmd), ...(Array.isArray(args) ? (args as string[]) : [])], {
+      cwd: resolvedCwd,
+      env: mergedEnv,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const limit = typeof timeoutMs === "number" ? timeoutMs : 10_000;
+    const killer = setTimeout(() => {
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+    }, limit);
+
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text().catch(() => ""),
+      new Response(proc.stderr).text().catch(() => ""),
+      proc.exited,
+    ]);
+    clearTimeout(killer);
+    return { exitCode: code, stdout, stderr };
+  },
 };
 
 Bun.serve({
