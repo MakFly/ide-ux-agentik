@@ -38,3 +38,9 @@ dist-ssr
 test-results/
 playwright-report/
 playwright/.cache/
+
+# Codex runtime (contains auth.json — never commit)
+.codex-home/
+
+# Local scratch
+hello.py
