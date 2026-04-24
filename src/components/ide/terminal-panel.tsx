@@ -78,6 +78,7 @@ export function TerminalPanel() {
   const workspaces = useIDE((s) => s.workspaces);
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
   const codexApiKey = useIDE((s) => s.codexApiKey);
+  const codexAuth = useIDE((s) => s.codexAuth);
   const hostRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
 
@@ -228,6 +229,27 @@ export function TerminalPanel() {
 
       const env: Record<string, string> = {};
       if (codexApiKey) env.OPENAI_API_KEY = codexApiKey;
+      if (codexAuth) {
+        // Write auth.json so `codex` on the agent picks up the browser-side login.
+        // CODEX_HOME is relative to the PTY cwd (= --root of the agent).
+        try {
+          const { buildAuthDotJson } = await import("@/lib/codex-auth");
+          await provider.mkdir(".codex-home").catch(() => {});
+          await provider.writeFile(
+            ".codex-home/auth.json",
+            buildAuthDotJson({
+              idToken: codexAuth.idToken,
+              accessToken: codexAuth.accessToken,
+              refreshToken: codexAuth.refreshToken,
+            }),
+          );
+          env.CODEX_HOME = ".codex-home";
+        } catch (err) {
+          instance.writeln(
+            `\x1b[33m[codex auth.json write failed: ${err instanceof Error ? err.message : String(err)}]\x1b[0m`,
+          );
+        }
+      }
 
       try {
         ptyHandle = await provider.ptySpawn({

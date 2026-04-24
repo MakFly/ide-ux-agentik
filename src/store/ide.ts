@@ -205,6 +205,15 @@ type State = {
   thinking: boolean;
   webSearch: boolean;
   codexApiKey?: string;
+  codexAuth?: {
+    idToken: string;
+    accessToken: string;
+    refreshToken: string;
+    lastRefresh: string; // ISO
+    email?: string;
+    chatgptPlanType?: string;
+    chatgptAccountId?: string;
+  };
 
   branchesLoading: boolean;
   worktreesLoading: boolean;
@@ -244,6 +253,7 @@ type State = {
   addAgentSession: (kind: TerminalKind) => void;
   closeAgentSession: (sessionId: string) => void;
   setCodexApiKey: (key: string) => void;
+  setCodexAuth: (auth: State["codexAuth"] | null) => void;
   togglePreview: () => void;
   setTheme: (t: Theme) => void;
   setFilesTab: (t: "files" | "changes" | "checks") => void;
@@ -710,7 +720,19 @@ export const useIDE = create<State>((set, get) => ({
   filesTab: "files",
   thinking: true,
   webSearch: false,
-  codexApiKey: undefined,
+  codexApiKey:
+    typeof window !== "undefined" ? window.localStorage.getItem("codex-api-key") ?? undefined : undefined,
+  codexAuth:
+    typeof window !== "undefined"
+      ? (() => {
+          try {
+            const raw = window.localStorage.getItem("codex-auth");
+            return raw ? (JSON.parse(raw) as State["codexAuth"]) : undefined;
+          } catch {
+            return undefined;
+          }
+        })()
+      : undefined,
 
   branchesLoading: true,
   worktreesLoading: true,
@@ -1071,7 +1093,20 @@ export const useIDE = create<State>((set, get) => ({
   setFilesTab: (t) => set({ filesTab: t }),
   toggleThinking: () => set((s) => ({ thinking: !s.thinking })),
   toggleWebSearch: () => set((s) => ({ webSearch: !s.webSearch })),
-  setCodexApiKey: (key) => set({ codexApiKey: key || undefined }),
+  setCodexApiKey: (key) => {
+    if (typeof window !== "undefined") {
+      if (key) window.localStorage.setItem("codex-api-key", key);
+      else window.localStorage.removeItem("codex-api-key");
+    }
+    set({ codexApiKey: key || undefined });
+  },
+  setCodexAuth: (auth) => {
+    if (typeof window !== "undefined") {
+      if (auth) window.localStorage.setItem("codex-auth", JSON.stringify(auth));
+      else window.localStorage.removeItem("codex-auth");
+    }
+    set({ codexAuth: auth ?? undefined });
+  },
 
   sendMessage: (content) =>
     set((s) => {

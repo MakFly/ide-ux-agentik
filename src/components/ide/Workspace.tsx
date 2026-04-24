@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { X, FileCode, Plus, ChevronLeft, ChevronRight, LogIn } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -18,7 +19,6 @@ import {
   type Worktree,
   type FileTab,
 } from "@/store/ide";
-import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import { Thread } from "@/components/assistant-ui/thread";
 import { CodeEditor } from "@/components/ide/code-editor";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
@@ -239,46 +239,6 @@ const AGENT_OPTIONS: { id: TerminalKind; label: string }[] = [
   { id: "gemini", label: "Gemini" },
 ];
 
-async function launchCodexDeviceLogin(
-  workspaces: ReturnType<typeof useIDE.getState>["workspaces"],
-  activeWorkspaceId: string,
-  worktreePath: string | undefined,
-) {
-  const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
-  const source = workspace?.source;
-
-  if (!source || source.kind !== "remote-agent") {
-    toast.error("Codex login requires a remote-agent workspace.");
-    return;
-  }
-
-  toast.info("Codex login starting — follow instructions in terminal");
-
-  const provider = new RemoteAgentProvider(source.label, source.url, source.token);
-  try {
-    await provider.connect();
-    const handle = await provider.ptySpawn({
-      cmd: "codex",
-      args: ["login", "--device-auth"],
-      cwd: worktreePath,
-    });
-    // Output is streamed to the terminal that is currently active; we just
-    // inform the user via toast — the instructions (URL + code) will appear
-    // in the terminal panel.
-    handle.onExit((code) => {
-      if (code === 0) {
-        toast.success("Codex login completed.");
-      } else {
-        toast.error(`Codex login exited with code ${code}.`);
-      }
-    });
-    // We intentionally do not kill the handle here — the device-auth flow
-    // takes several seconds of user interaction in the PTY.
-  } catch (e) {
-    toast.error(`Codex login failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
 function AgentCliTabs() {
   const sessions = useCurrentSessions();
   const activeSession = useActiveSession();
@@ -362,13 +322,11 @@ function AgentCliTabs() {
                 <span>{a.label}</span>
               </DropdownMenuItem>
             ))}
-            <DropdownMenuItem
-              onSelect={() =>
-                void launchCodexDeviceLogin(workspaces, activeWorkspaceId, currentWorktree?.path)
-              }
-            >
-              <LogIn className="h-3.5 w-3.5 shrink-0" />
-              <span>Login Codex (device-code)</span>
+            <DropdownMenuItem asChild>
+              <Link to="/settings" search={{ login: "codex" }} viewTransition>
+                <LogIn className="h-3.5 w-3.5 shrink-0" />
+                <span>Sign in to Codex</span>
+              </Link>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -458,13 +416,11 @@ function AgentCliTabs() {
                   </span>
                 </DropdownMenuItem>
               ))}
-              <DropdownMenuItem
-                onSelect={() =>
-                  void launchCodexDeviceLogin(workspaces, activeWorkspaceId, currentWorktree?.path)
-                }
-              >
-                <LogIn className="h-3.5 w-3.5 shrink-0" />
-                <span>Login Codex (device-code)</span>
+              <DropdownMenuItem asChild>
+                <Link to="/settings" search={{ login: "codex" }} viewTransition>
+                  <LogIn className="h-3.5 w-3.5 shrink-0" />
+                  <span>Sign in to Codex</span>
+                </Link>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

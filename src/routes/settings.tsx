@@ -1,6 +1,7 @@
-import { type ReactNode, useState } from "react";
-import { Link, createFileRoute } from "@tanstack/react-router";
-import { ArrowLeft, Settings as SettingsIcon } from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
+import { z } from "zod";
+import { ArrowLeft, LogOut, Settings as SettingsIcon, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import { useIDE, type Theme } from "@/store/ide";
@@ -8,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import { CodexLoginDialog } from "@/components/ide/codex-login-dialog";
 import {
   Select,
   SelectContent,
@@ -16,8 +18,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+const settingsSearchSchema = z.object({
+  login: z.enum(["codex"]).optional(),
+});
+
 export const Route = createFileRoute("/settings")({
   component: SettingsPage,
+  validateSearch: settingsSearchSchema,
   head: () => ({
     meta: [
       { title: "Settings — Superconductor" },
@@ -77,7 +84,20 @@ function SettingsPage() {
   const setFilesTab = useIDE((s) => s.setFilesTab);
   const codexApiKey = useIDE((s) => s.codexApiKey);
   const setCodexApiKey = useIDE((s) => s.setCodexApiKey);
+  const codexAuth = useIDE((s) => s.codexAuth);
+  const setCodexAuth = useIDE((s) => s.setCodexAuth);
   const [apiKeyDraft, setApiKeyDraft] = useState(codexApiKey ?? "");
+  const { login } = Route.useSearch();
+  const navigate = useNavigate({ from: "/settings" });
+  const [loginOpen, setLoginOpen] = useState(login === "codex");
+
+  useEffect(() => {
+    if (login === "codex") {
+      setLoginOpen(true);
+      // Clear the query param so the dialog can be closed and re-opened cleanly.
+      void navigate({ search: (prev) => ({ ...prev, login: undefined }), replace: true });
+    }
+  }, [login, navigate]);
 
   return (
     <div
@@ -153,14 +173,54 @@ function SettingsPage() {
           <Section
             id="codex"
             title="Codex"
-            description="Bypass the device-auth flow by providing an API key. Injected into the PTY env when spawning `codex`."
+            description="Sign in with ChatGPT to use your Plus / Pro / Team plan, or provide an API key as a bypass."
           >
-            <div className="py-3">
+            <div className="py-4">
+              {codexAuth ? (
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 text-[13.5px] text-foreground">
+                      <Sparkles className="h-3.5 w-3.5 text-status-add" />
+                      <span className="truncate">{codexAuth.email ?? "Signed in with ChatGPT"}</span>
+                    </div>
+                    <div className="mt-0.5 font-mono text-[11.5px] text-muted-foreground">
+                      plan: {codexAuth.chatgptPlanType ?? "unknown"} · last refresh{" "}
+                      {new Date(codexAuth.lastRefresh).toLocaleString()}
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 gap-1.5"
+                    onClick={() => {
+                      setCodexAuth(null);
+                      toast.success("Signed out of Codex.");
+                    }}
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    Sign out
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 text-[12.5px] text-muted-foreground">
+                    Device-code flow via <code className="font-mono">auth.openai.com</code>. Tokens
+                    persisted in localStorage.
+                  </div>
+                  <Button size="sm" className="h-8" onClick={() => setLoginOpen(true)}>
+                    Sign in with ChatGPT
+                  </Button>
+                </div>
+              )}
+            </div>
+            <Separator />
+            <div className="py-4">
               <label className="mb-1.5 block text-[13.5px] text-foreground">
-                OPENAI_API_KEY
+                OPENAI_API_KEY <span className="text-[11.5px] text-muted-foreground">(advanced)</span>
               </label>
               <p className="mb-3 text-[12px] text-muted-foreground">
-                Stored in memory only (not persisted). Leave empty to use <code>codex login --device-auth</code>.
+                Alternative to ChatGPT login. Injected as <code>OPENAI_API_KEY</code> into the PTY env
+                when spawning <code>codex</code>.
               </p>
               <div className="flex gap-2">
                 <Input
@@ -186,6 +246,7 @@ function SettingsPage() {
           </Section>
         </div>
       </main>
+      <CodexLoginDialog open={loginOpen} onOpenChange={setLoginOpen} />
     </div>
   );
 }
