@@ -22,6 +22,7 @@ type Props = {
 
 export function AddWorkspaceDialog({ open, onOpenChange }: Props) {
   const addWorkspace = useIDE((s) => s.addWorkspace);
+  const setActiveWorkspace = useIDE((s) => s.setActiveWorkspace);
   const [tab, setTab] = useState<"local" | "remote" | "mock">(
     isLocalWebSupported() ? "local" : "mock",
   );
@@ -50,7 +51,8 @@ export function AddWorkspaceDialog({ open, onOpenChange }: Props) {
     try {
       const { handleId, name } = await pickDirectory();
       const source: WorkspaceSource = { kind: "local-web", handleId, name };
-      addWorkspace(name, source);
+      const id = addWorkspace(name, source);
+      setActiveWorkspace(id);
       toast.success(`Workspace "${name}" added (local folder)`);
       close();
     } catch (e) {
@@ -76,7 +78,8 @@ export function AddWorkspaceDialog({ open, onOpenChange }: Props) {
     try {
       const provider = await providerFor(source, label);
       await provider.list("");
-      addWorkspace(label, source);
+      const id = addWorkspace(label, source);
+      setActiveWorkspace(id);
       toast.success(`Connected to ${label}`);
       close();
     } catch (e) {
@@ -92,7 +95,8 @@ export function AddWorkspaceDialog({ open, onOpenChange }: Props) {
       toast.error("Name is required");
       return;
     }
-    addWorkspace(name);
+    const id = addWorkspace(name);
+    setActiveWorkspace(id);
     toast.success(`Workspace "${name}" added (demo)`);
     close();
   };

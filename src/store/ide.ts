@@ -263,7 +263,7 @@ type State = {
   sendMessage: (content: string) => void;
   addBranch: (workspaceId: string, name: string) => void;
   toggleStar: (branchId: string) => void;
-  addWorkspace: (name: string, source?: WorkspaceSource) => void;
+  addWorkspace: (name: string, source?: WorkspaceSource) => string;
   addTask: (worktreeId: string, title: string) => void;
   cycleTaskStatus: (worktreeId: string, taskId: string) => void;
   setTaskStatus: (worktreeId: string, taskId: string, status: TaskStatus) => void;
@@ -1199,50 +1199,50 @@ export const useIDE = create<State>((set, get) => ({
       return { branchesByWorkspaceId: next };
     }),
 
-  addWorkspace: (name, source) =>
-    set((s) => {
-      const id = crypto.randomUUID();
-      const branchId = crypto.randomUUID();
-      const worktreeId = crypto.randomUUID();
-      const effectiveSource: WorkspaceSource = source ?? { kind: "mock", id };
-      const color =
-        effectiveSource.kind === "local-web"
-          ? "oklch(0.55 0.15 140)"
-          : effectiveSource.kind === "remote-agent"
-            ? "oklch(0.55 0.15 30)"
-            : "oklch(0.50 0.15 200)";
-      return {
-        workspaces: [
-          ...s.workspaces,
-          { id, letter: name.charAt(0).toUpperCase() || "W", name, color, source: effectiveSource },
+  addWorkspace: (name, source) => {
+    const id = crypto.randomUUID();
+    const branchId = crypto.randomUUID();
+    const worktreeId = crypto.randomUUID();
+    const effectiveSource: WorkspaceSource = source ?? { kind: "mock", id };
+    const color =
+      effectiveSource.kind === "local-web"
+        ? "oklch(0.55 0.15 140)"
+        : effectiveSource.kind === "remote-agent"
+          ? "oklch(0.55 0.15 30)"
+          : "oklch(0.50 0.15 200)";
+    set((s) => ({
+      workspaces: [
+        ...s.workspaces,
+        { id, letter: name.charAt(0).toUpperCase() || "W", name, color, source: effectiveSource },
+      ],
+      branchesByWorkspaceId: {
+        ...s.branchesByWorkspaceId,
+        [id]: [{ id: branchId, name: "main", age: "just now", starred: true, status: "none" }],
+      },
+      activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [id]: branchId },
+      tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
+      worktreesByWorkspaceId: {
+        ...s.worktreesByWorkspaceId,
+        [id]: [
+          {
+            id: worktreeId,
+            workspaceId: id,
+            branchId,
+            name: "main",
+            path: `/worktrees/${id}/main`,
+            baseBranch: "main",
+            status: "ready",
+            terminals: createTerminalSet(worktreeId),
+          },
         ],
-        branchesByWorkspaceId: {
-          ...s.branchesByWorkspaceId,
-          [id]: [{ id: branchId, name: "main", age: "just now", starred: true, status: "none" }],
-        },
-        activeBranchIdByWorkspaceId: { ...s.activeBranchIdByWorkspaceId, [id]: branchId },
-        tasksByWorktreeId: { ...s.tasksByWorktreeId, [worktreeId]: [] },
-        worktreesByWorkspaceId: {
-          ...s.worktreesByWorkspaceId,
-          [id]: [
-            {
-              id: worktreeId,
-              workspaceId: id,
-              branchId,
-              name: "main",
-              path: `/worktrees/${id}/main`,
-              baseBranch: "main",
-              status: "ready",
-              terminals: createTerminalSet(worktreeId),
-            },
-          ],
-        },
-        activeWorktreeIdByScope: {
-          ...s.activeWorktreeIdByScope,
-          [scopeKey(id, branchId)]: worktreeId,
-        },
-      };
-    }),
+      },
+      activeWorktreeIdByScope: {
+        ...s.activeWorktreeIdByScope,
+        [scopeKey(id, branchId)]: worktreeId,
+      },
+    }));
+    return id;
+  },
 
   addTask: (worktreeId, title) =>
     set((s) => ({

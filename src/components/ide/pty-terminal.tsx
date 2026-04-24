@@ -115,7 +115,28 @@ export function PtyTerminal({
 
       if (!source || source.kind !== "remote-agent") {
         instance.writeln(
-          `\x1b[33m[No remote-agent workspace — cannot spawn ${cmd ?? "shell"}. Add a remote workspace to run real CLIs.]\x1b[0m`,
+          `\x1b[33m[No remote-agent workspace — cannot spawn ${cmd ?? "shell"}]\x1b[0m`,
+        );
+        instance.writeln("");
+        instance.writeln(
+          "\x1b[90mTo run real CLIs (codex, claude, opencode, gemini) you need\x1b[0m",
+        );
+        instance.writeln("\x1b[90ma Bun agent on a machine reachable over WebSocket.\x1b[0m");
+        instance.writeln("");
+        instance.writeln("\x1b[36m1.\x1b[0m Start the agent in another terminal:");
+        instance.writeln(
+          "   \x1b[32mbun run agent/server.ts --root ~/yourproject --port 7421 --token hello\x1b[0m",
+        );
+        instance.writeln("");
+        instance.writeln("\x1b[36m2.\x1b[0m In this app:");
+        instance.writeln(
+          "   Sidebar → \x1b[35m+ New project\x1b[0m → \x1b[35mRemote\x1b[0m",
+        );
+        instance.writeln("   URL:   \x1b[32mws://localhost:7421\x1b[0m");
+        instance.writeln("   Token: \x1b[32mhello\x1b[0m");
+        instance.writeln("");
+        instance.writeln(
+          "\x1b[36m3.\x1b[0m The new workspace is auto-selected. Open a CLI tab again.",
         );
         setReady(true);
         ro = new ResizeObserver(() => {
