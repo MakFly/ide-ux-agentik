@@ -19,6 +19,7 @@ import {
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
+  useAssistantRuntime,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -221,12 +222,17 @@ const Composer: FC = () => {
     console.debug("[composer] trigger=", trigger, "query=", q);
   }, [composerText]);
 
-  // Stable slash context derived from the store.
-  const slashCtx = useIDE((s) => ({
-    workspaceSource: s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.source,
-    sessionId: s.activeSessionIdByWorkspaceId[s.activeWorkspaceId],
-    workspaceId: s.activeWorkspaceId,
-  }));
+  // Split into individual primitive/ref selectors so each one is snapshot-stable
+  // (useSyncExternalStore would otherwise loop on a fresh object every call).
+  const workspaceId = useIDE((s) => s.activeWorkspaceId);
+  const workspaceSource = useIDE(
+    (s) => s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.source,
+  );
+  const sessionId = useIDE((s) => s.activeSessionIdByWorkspaceId[s.activeWorkspaceId]);
+  const slashCtx = useMemo(
+    () => ({ workspaceSource, sessionId, workspaceId }),
+    [workspaceSource, sessionId, workspaceId],
+  );
 
   /** Programmatically clear the assistant-ui composer textarea. */
   function clearInput() {
@@ -366,6 +372,51 @@ const TokenBadge: FC<{ used: number; max: number }> = ({ used, max }) => {
   );
 };
 
+const SendOrStopButton: FC = () => {
+  const runtime = useAssistantRuntime();
+  const isRunning = useAuiState((s) => s.thread.isRunning);
+  const composerText = useAuiState((s) => s.composer.text ?? "");
+
+  if (isRunning) {
+    return (
+      <Button
+        type="button"
+        variant="default"
+        size="icon"
+        className="aui-composer-cancel size-8 rounded-full"
+        aria-label="Stop generating"
+        onClick={() => {
+          try {
+            runtime.thread.cancelRun();
+            console.debug("[composer] cancelRun fired");
+          } catch (e) {
+            console.warn("[composer] cancelRun failed:", e);
+          }
+        }}
+      >
+        <SquareIcon className="aui-composer-cancel-icon size-3 fill-current" />
+      </Button>
+    );
+  }
+
+  return (
+    <ComposerPrimitive.Send asChild>
+      <TooltipIconButton
+        tooltip="Send message"
+        side="bottom"
+        type="button"
+        variant="default"
+        size="icon"
+        className="aui-composer-send size-8 rounded-full"
+        aria-label="Send message"
+        disabled={!composerText.trim()}
+      >
+        <ArrowUpIcon className="aui-composer-send-icon size-4" />
+      </TooltipIconButton>
+    </ComposerPrimitive.Send>
+  );
+};
+
 const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
   const activeAgent = useIDE((s) => {
     const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
@@ -392,34 +443,7 @@ const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
       <div className="flex items-center gap-1">
         <SandboxLockButton cli={activeAgent} />
         <VoiceButton />
-        <AuiIf condition={(s) => !s.thread.isRunning}>
-          <ComposerPrimitive.Send asChild>
-            <TooltipIconButton
-              tooltip="Send message"
-              side="bottom"
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-send size-8 rounded-full"
-              aria-label="Send message"
-            >
-              <ArrowUpIcon className="aui-composer-send-icon size-4" />
-            </TooltipIconButton>
-          </ComposerPrimitive.Send>
-        </AuiIf>
-        <AuiIf condition={(s) => s.thread.isRunning}>
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-cancel size-8 rounded-full"
-              aria-label="Stop generating"
-            >
-              <SquareIcon className="aui-composer-cancel-icon size-3 fill-current" />
-            </Button>
-          </ComposerPrimitive.Cancel>
-        </AuiIf>
+        <SendOrStopButton />
       </div>
     </div>
   );
