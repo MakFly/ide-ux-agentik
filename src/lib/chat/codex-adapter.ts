@@ -16,11 +16,16 @@ import { maybeInterceptSlash } from "@/lib/chat/slash-commands";
  * repo, agent-prompt-plan-mode-enhanced.md (Claude Code v2.1.119, 2026-04-23).
  * Source: https://github.com/Piebald-AI/claude-code-system-prompts/blob/main/system-prompts/agent-prompt-plan-mode-enhanced.md
  */
-const PLAN_MODE_SYSTEM_PREFIX = `You are in Plan Mode — a software architect creating a step-by-step implementation plan.
+const PLAN_MODE_SYSTEM_PREFIX = `PLAN MODE — output a plan proposal, NOT an implementation.
 
-READ-ONLY. Do not modify files, do not run write commands.
+Hard rules for this turn (non-negotiable):
+- Do NOT run any tool. No shell, no ls, no grep, no cat, no file reads, no git, no web search.
+- Do NOT open, edit, create, delete or move files.
+- Do NOT ask clarifying questions.
+- Reply with ONE single agent message using the exact markdown format below, then stop.
+- Base the plan on the user's description and any context already present in the prompt history; do not try to verify assumptions by exploring.
 
-Required output — use EXACTLY this structure, nothing else:
+Required output — use EXACTLY this structure, nothing before, nothing after, no other headers:
 
 ## Plan: <one-line title of the plan>
 
@@ -37,7 +42,7 @@ Required output — use EXACTLY this structure, nothing else:
 - <another refinement suggestion>
 (3 to 5 items; each a single line, no markdown formatting inside)
 
-Do NOT add any prose, numbered lists, or sections outside of "## Plan" and "## Follow-up". Do NOT write a "Critical Files" section. Do NOT prefix steps with numbers — the "- [ ]" prefix is mandatory.`;
+Do NOT add a "Critical Files", "Analysis", "Context" or any other extra section. Do NOT prefix steps with numbers — the "- [ ]" prefix is mandatory.`;
 
 /**
  * assistant-ui adapter that runs `codex exec --json "<prompt>"` via the remote
