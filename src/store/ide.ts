@@ -92,11 +92,41 @@ export type FileTab = {
 };
 
 const BINARY_EXT = new Set([
-  "png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "bmp",
-  "pdf", "zip", "tar", "gz", "bz2", "xz", "7z", "rar",
-  "mp3", "mp4", "mov", "avi", "webm", "wav", "flac", "ogg",
-  "woff", "woff2", "ttf", "otf", "eot",
-  "wasm", "bin", "so", "dylib", "dll", "exe",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "avif",
+  "ico",
+  "bmp",
+  "pdf",
+  "zip",
+  "tar",
+  "gz",
+  "bz2",
+  "xz",
+  "7z",
+  "rar",
+  "mp3",
+  "mp4",
+  "mov",
+  "avi",
+  "webm",
+  "wav",
+  "flac",
+  "ogg",
+  "woff",
+  "woff2",
+  "ttf",
+  "otf",
+  "eot",
+  "wasm",
+  "bin",
+  "so",
+  "dylib",
+  "dll",
+  "exe",
 ]);
 
 function isBinaryPath(path: string): boolean {
@@ -174,6 +204,7 @@ type State = {
   filesTab: "files" | "changes" | "checks";
   thinking: boolean;
   webSearch: boolean;
+  codexApiKey?: string;
 
   branchesLoading: boolean;
   worktreesLoading: boolean;
@@ -190,7 +221,12 @@ type State = {
   // Async file/tree actions — kept untouched from previous version.
   loadRoot: (scopeKey: ScopeKey) => Promise<void>;
   loadChildren: (scopeKey: ScopeKey, path: string) => Promise<void>;
-  createEntry: (scopeKey: ScopeKey, parentPath: string, name: string, type: "dir" | "file") => Promise<void>;
+  createEntry: (
+    scopeKey: ScopeKey,
+    parentPath: string,
+    name: string,
+    type: "dir" | "file",
+  ) => Promise<void>;
   removeEntry: (scopeKey: ScopeKey, path: string) => Promise<void>;
 
   setActiveWorkspace: (id: string) => void;
@@ -207,6 +243,7 @@ type State = {
   setActiveSession: (sessionId: string) => void;
   addAgentSession: (kind: TerminalKind) => void;
   closeAgentSession: (sessionId: string) => void;
+  setCodexApiKey: (key: string) => void;
   togglePreview: () => void;
   setTheme: (t: Theme) => void;
   setFilesTab: (t: "files" | "changes" | "checks") => void;
@@ -244,22 +281,106 @@ type State = {
 const initialBranchesByWorkspaceId: Record<string, Branch[]> = {
   "ws-sc": [
     { id: "b1", name: "master", age: "14h ago", starred: true, status: "none" },
-    { id: "b2", name: "feat/meta-chat", age: "5h ago", added: 5518, removed: 169, status: "loading" },
-    { id: "b3", name: "fix/chat-feedback-notifications", age: "3m ago", added: 178, removed: 13, status: "none" },
-    { id: "b4", name: "fix/diff-view-text-selection", age: "3m ago", added: 86, removed: 18, status: "none" },
+    {
+      id: "b2",
+      name: "feat/meta-chat",
+      age: "5h ago",
+      added: 5518,
+      removed: 169,
+      status: "loading",
+    },
+    {
+      id: "b3",
+      name: "fix/chat-feedback-notifications",
+      age: "3m ago",
+      added: 178,
+      removed: 13,
+      status: "none",
+    },
+    {
+      id: "b4",
+      name: "fix/diff-view-text-selection",
+      age: "3m ago",
+      added: 86,
+      removed: 18,
+      status: "none",
+    },
     { id: "b5", name: "fix/right-sidebar-vertical-line", age: "58m ago", status: "warn" },
-    { id: "b6", name: "fix/workspace-sidebar-state", age: "2h ago", added: 109, removed: 23, status: "warn" },
-    { id: "b7", name: "fix/git-diff-highlight-accuracy", age: "2h ago", added: 447, removed: 57, status: "active" },
-    { id: "b8", name: "fix/tab-title-overwrite", age: "14m ago", added: 59, removed: 5, status: "warn" },
-    { id: "b9", name: "feat/git-action-dropdown-menu", age: "14h ago", added: 1136, removed: 184, status: "none" },
-    { id: "b10", name: "fix/shared-context-isolation", age: "3h ago", added: 90, removed: 20, status: "active" },
-    { id: "b11", name: "fix/stear-chat-timeline", age: "14h ago", added: 899, removed: 129, status: "none" },
-    { id: "b12", name: "feat/scrollable-tab-bar", age: "6d ago", added: 147, removed: 86, status: "none" },
-    { id: "b13", name: "feat/shared-context-sorting-dnd", age: "1w ago", added: 2163, removed: 21, status: "none" },
+    {
+      id: "b6",
+      name: "fix/workspace-sidebar-state",
+      age: "2h ago",
+      added: 109,
+      removed: 23,
+      status: "warn",
+    },
+    {
+      id: "b7",
+      name: "fix/git-diff-highlight-accuracy",
+      age: "2h ago",
+      added: 447,
+      removed: 57,
+      status: "active",
+    },
+    {
+      id: "b8",
+      name: "fix/tab-title-overwrite",
+      age: "14m ago",
+      added: 59,
+      removed: 5,
+      status: "warn",
+    },
+    {
+      id: "b9",
+      name: "feat/git-action-dropdown-menu",
+      age: "14h ago",
+      added: 1136,
+      removed: 184,
+      status: "none",
+    },
+    {
+      id: "b10",
+      name: "fix/shared-context-isolation",
+      age: "3h ago",
+      added: 90,
+      removed: 20,
+      status: "active",
+    },
+    {
+      id: "b11",
+      name: "fix/stear-chat-timeline",
+      age: "14h ago",
+      added: 899,
+      removed: 129,
+      status: "none",
+    },
+    {
+      id: "b12",
+      name: "feat/scrollable-tab-bar",
+      age: "6d ago",
+      added: 147,
+      removed: 86,
+      status: "none",
+    },
+    {
+      id: "b13",
+      name: "feat/shared-context-sorting-dnd",
+      age: "1w ago",
+      added: 2163,
+      removed: 21,
+      status: "none",
+    },
   ],
   "ws-landing": [
     { id: "l1", name: "main", age: "4w ago", starred: true, status: "none" },
-    { id: "l2", name: "feat/marketing-landing-page", age: "1d ago", added: 533, removed: 26, status: "none" },
+    {
+      id: "l2",
+      name: "feat/marketing-landing-page",
+      age: "1d ago",
+      added: 533,
+      removed: 26,
+      status: "none",
+    },
   ],
 };
 
@@ -289,19 +410,17 @@ const MOCK_FILE_TREE: Record<string, string[]> = {
   scripts: ["release.sh"],
 };
 
-const MOCK_ROOT_FILES = [
-  "Cargo.toml",
-  "Cargo.lock",
-  "README.md",
-  ".gitignore",
-];
+const MOCK_ROOT_FILES = ["Cargo.toml", "Cargo.lock", "README.md", ".gitignore"];
 
 // Initial in-memory tree provided to MockProvider instances
 const MOCK_PROVIDER_TREE = {
   crates: { sc_app: {}, sc_git: {}, sc_diff: {} },
-  docs: { "ARCHITECTURE.md": "# Architecture\n\nMock doc.\n", "CONTRIBUTING.md": "# Contributing\n\nMock doc.\n" },
+  docs: {
+    "ARCHITECTURE.md": "# Architecture\n\nMock doc.\n",
+    "CONTRIBUTING.md": "# Contributing\n\nMock doc.\n",
+  },
   scripts: { "release.sh": "#!/usr/bin/env bash\nset -euo pipefail\n" },
-  "Cargo.toml": "[package]\nname = \"superconductor\"\nversion = \"0.1.0\"\n",
+  "Cargo.toml": '[package]\nname = "superconductor"\nversion = "0.1.0"\n',
   "Cargo.lock": "# Generated by Cargo\n",
   "README.md": "# Superconductor\n\nMock project.\n",
   ".gitignore": "/target\n",
@@ -353,7 +472,10 @@ function patchNodeChildren(root: TreeNode, path: string, children: TreeNode[]): 
   };
 }
 
-function getCurrentScopeKey(state: { activeWorkspaceId: string; activeBranchId: string }): ScopeKey {
+function getCurrentScopeKey(state: {
+  activeWorkspaceId: string;
+  activeBranchId: string;
+}): ScopeKey {
   return scopeKey(state.activeWorkspaceId, state.activeBranchId);
 }
 
@@ -362,9 +484,10 @@ function workspaceForScope(workspaces: Workspace[], sk: ScopeKey) {
   return workspaces.find((w) => w.id === wsId);
 }
 
-function flatFieldsFromEntries(
-  entries: FsEntry[],
-): { fileTree: Record<string, string[]>; rootFiles: string[] } {
+function flatFieldsFromEntries(entries: FsEntry[]): {
+  fileTree: Record<string, string[]>;
+  rootFiles: string[];
+} {
   const fileTree: Record<string, string[]> = {};
   const rootFiles: string[] = [];
   for (const e of entries) {
@@ -389,9 +512,14 @@ function isMockWorkspace(workspaces: Workspace[], workspaceId: string): boolean 
 const INITIAL_SCOPE = scopeKey("ws-sc", "b1");
 
 let gitDebounceHandle: ReturnType<typeof setTimeout> | null = null;
-function scheduleGitRefresh(sk: ScopeKey, getStore: () => { refreshGitStatus: (sk: ScopeKey) => Promise<void> }) {
+function scheduleGitRefresh(
+  sk: ScopeKey,
+  getStore: () => { refreshGitStatus: (sk: ScopeKey) => Promise<void> },
+) {
   if (gitDebounceHandle) clearTimeout(gitDebounceHandle);
-  gitDebounceHandle = setTimeout(() => { void getStore().refreshGitStatus(sk); }, 300);
+  gitDebounceHandle = setTimeout(() => {
+    void getStore().refreshGitStatus(sk);
+  }, 300);
 }
 
 function createTerminalSet(_worktreeId: string): WorkspaceTerminal[] {
@@ -467,21 +595,66 @@ const initialWorktrees: Record<string, Worktree[]> = {
 
 // Migrate old tasksByBranchId seed → tasksByWorktreeId by matching branchId on worktrees.
 function buildInitialTasksByWorktreeId(): Record<string, WorkTask[]> {
-  const legacy: Record<string, { id: string; title: string; status: TaskStatus; assignee: string; updatedAt: string }[]> = {
+  const legacy: Record<
+    string,
+    { id: string; title: string; status: TaskStatus; assignee: string; updatedAt: string }[]
+  > = {
     b1: [
-      { id: "task-b1-1", title: "Stabilize workspace bootstrap", status: "in_progress", assignee: "Codex", updatedAt: "12m ago" },
-      { id: "task-b1-2", title: "Review multi-worktree session model", status: "todo", assignee: "Claude", updatedAt: "1h ago" },
+      {
+        id: "task-b1-1",
+        title: "Stabilize workspace bootstrap",
+        status: "in_progress",
+        assignee: "Codex",
+        updatedAt: "12m ago",
+      },
+      {
+        id: "task-b1-2",
+        title: "Review multi-worktree session model",
+        status: "todo",
+        assignee: "Claude",
+        updatedAt: "1h ago",
+      },
     ],
     b2: [
-      { id: "task-b2-1", title: "Ship meta chat timeline", status: "blocked", assignee: "Gemini", updatedAt: "4m ago" },
-      { id: "task-b2-2", title: "Rebase worktree on master", status: "todo", assignee: "OpenCode", updatedAt: "18m ago" },
+      {
+        id: "task-b2-1",
+        title: "Ship meta chat timeline",
+        status: "blocked",
+        assignee: "Gemini",
+        updatedAt: "4m ago",
+      },
+      {
+        id: "task-b2-2",
+        title: "Rebase worktree on master",
+        status: "todo",
+        assignee: "OpenCode",
+        updatedAt: "18m ago",
+      },
     ],
     b6: [
-      { id: "task-b6-1", title: "Persist workspace sidebar collapse state", status: "in_progress", assignee: "Codex", updatedAt: "9m ago" },
+      {
+        id: "task-b6-1",
+        title: "Persist workspace sidebar collapse state",
+        status: "in_progress",
+        assignee: "Codex",
+        updatedAt: "9m ago",
+      },
     ],
     l2: [
-      { id: "task-l2-1", title: "Refresh hero copy", status: "done", assignee: "Claude", updatedAt: "1d ago" },
-      { id: "task-l2-2", title: "QA responsive navbar", status: "todo", assignee: "Codex", updatedAt: "39m ago" },
+      {
+        id: "task-l2-1",
+        title: "Refresh hero copy",
+        status: "done",
+        assignee: "Claude",
+        updatedAt: "1d ago",
+      },
+      {
+        id: "task-l2-2",
+        title: "QA responsive navbar",
+        status: "todo",
+        assignee: "Codex",
+        updatedAt: "39m ago",
+      },
     ],
   };
 
@@ -492,7 +665,11 @@ function buildInitialTasksByWorktreeId(): Record<string, WorkTask[]> {
       const tasks = legacy[wt.branchId];
       if (tasks) {
         result[wt.id] = tasks.map(({ id, title, status, assignee, updatedAt }) => ({
-          id, title, status, assignee, updatedAt,
+          id,
+          title,
+          status,
+          assignee,
+          updatedAt,
         }));
       } else {
         result[wt.id] = [];
@@ -533,6 +710,7 @@ export const useIDE = create<State>((set, get) => ({
   filesTab: "files",
   thinking: true,
   webSearch: false,
+  codexApiKey: undefined,
 
   branchesLoading: true,
   worktreesLoading: true,
@@ -565,12 +743,13 @@ export const useIDE = create<State>((set, get) => ({
     if (!ws) return;
 
     try {
-      const provider = ws.source.kind === "mock"
-        ? await (async () => {
-            const { MockProvider } = await import("@/lib/fs/mock");
-            return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-          })()
-        : await providerFor(ws.source, ws.name);
+      const provider =
+        ws.source.kind === "mock"
+          ? await (async () => {
+              const { MockProvider } = await import("@/lib/fs/mock");
+              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+            })()
+          : await providerFor(ws.source, ws.name);
 
       const status = await computeStatus(provider);
       set((s) => ({
@@ -595,15 +774,15 @@ export const useIDE = create<State>((set, get) => ({
     }));
 
     try {
-      const source = ws.source.kind === "mock"
-        ? { kind: "mock" as const, id: ws.source.id }
-        : ws.source;
-      const provider = ws.source.kind === "mock"
-        ? await (async () => {
-            const { MockProvider } = await import("@/lib/fs/mock");
-            return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-          })()
-        : await providerFor(source, ws.name);
+      const source =
+        ws.source.kind === "mock" ? { kind: "mock" as const, id: ws.source.id } : ws.source;
+      const provider =
+        ws.source.kind === "mock"
+          ? await (async () => {
+              const { MockProvider } = await import("@/lib/fs/mock");
+              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+            })()
+          : await providerFor(source, ws.name);
 
       const raw = await provider.list("");
       const entries = sortEntries(raw);
@@ -662,12 +841,13 @@ export const useIDE = create<State>((set, get) => ({
     }));
 
     try {
-      const provider = ws.source.kind === "mock"
-        ? await (async () => {
-            const { MockProvider } = await import("@/lib/fs/mock");
-            return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-          })()
-        : await providerFor(ws.source, ws.name);
+      const provider =
+        ws.source.kind === "mock"
+          ? await (async () => {
+              const { MockProvider } = await import("@/lib/fs/mock");
+              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+            })()
+          : await providerFor(ws.source, ws.name);
 
       const raw = await provider.list(path);
       const entries = sortEntries(raw);
@@ -715,12 +895,13 @@ export const useIDE = create<State>((set, get) => ({
     const fullPath = parentPath ? `${parentPath}/${name}` : name;
 
     try {
-      const provider = ws.source.kind === "mock"
-        ? await (async () => {
-            const { MockProvider } = await import("@/lib/fs/mock");
-            return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-          })()
-        : await providerFor(ws.source, ws.name);
+      const provider =
+        ws.source.kind === "mock"
+          ? await (async () => {
+              const { MockProvider } = await import("@/lib/fs/mock");
+              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+            })()
+          : await providerFor(ws.source, ws.name);
 
       if (type === "dir") {
         await provider.mkdir(fullPath);
@@ -752,12 +933,13 @@ export const useIDE = create<State>((set, get) => ({
     const parentPath = parts.slice(0, -1).join("/");
 
     try {
-      const provider = ws.source.kind === "mock"
-        ? await (async () => {
-            const { MockProvider } = await import("@/lib/fs/mock");
-            return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-          })()
-        : await providerFor(ws.source, ws.name);
+      const provider =
+        ws.source.kind === "mock"
+          ? await (async () => {
+              const { MockProvider } = await import("@/lib/fs/mock");
+              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+            })()
+          : await providerFor(ws.source, ws.name);
 
       await provider.remove(path);
 
@@ -789,9 +971,10 @@ export const useIDE = create<State>((set, get) => ({
     set((s) => {
       const branches = s.branchesByWorkspaceId[id] ?? [];
       const remembered = s.activeBranchIdByWorkspaceId[id];
-      const nextBranchId = (remembered && branches.some((b) => b.id === remembered))
-        ? remembered
-        : (branches[0]?.id ?? s.activeBranchId);
+      const nextBranchId =
+        remembered && branches.some((b) => b.id === remembered)
+          ? remembered
+          : (branches[0]?.id ?? s.activeBranchId);
       const key = scopeKey(id, nextBranchId);
       const nextWorktreeId =
         s.activeWorktreeIdByScope[key] ??
@@ -819,7 +1002,10 @@ export const useIDE = create<State>((set, get) => ({
     set((s) => {
       let wsId = s.activeWorkspaceId;
       for (const [wId, branches] of Object.entries(s.branchesByWorkspaceId)) {
-        if (branches.some((b) => b.id === id)) { wsId = wId; break; }
+        if (branches.some((b) => b.id === id)) {
+          wsId = wId;
+          break;
+        }
       }
       const key = scopeKey(wsId, id);
       const nextWorktreeId =
@@ -885,6 +1071,7 @@ export const useIDE = create<State>((set, get) => ({
   setFilesTab: (t) => set({ filesTab: t }),
   toggleThinking: () => set((s) => ({ thinking: !s.thinking })),
   toggleWebSearch: () => set((s) => ({ webSearch: !s.webSearch })),
+  setCodexApiKey: (key) => set({ codexApiKey: key || undefined }),
 
   sendMessage: (content) =>
     set((s) => {
@@ -903,7 +1090,10 @@ export const useIDE = create<State>((set, get) => ({
       };
       const prev = s.messagesBySessionId[activeSessionId] ?? [];
       return {
-        messagesBySessionId: { ...s.messagesBySessionId, [activeSessionId]: [...prev, userMsg, assistantMsg] },
+        messagesBySessionId: {
+          ...s.messagesBySessionId,
+          [activeSessionId]: [...prev, userMsg, assistantMsg],
+        },
       };
     }),
 
@@ -946,7 +1136,7 @@ export const useIDE = create<State>((set, get) => ({
     set((s) => {
       const next: Record<string, Branch[]> = {};
       for (const [wsId, branches] of Object.entries(s.branchesByWorkspaceId)) {
-        next[wsId] = branches.map((b) => b.id === branchId ? { ...b, starred: !b.starred } : b);
+        next[wsId] = branches.map((b) => (b.id === branchId ? { ...b, starred: !b.starred } : b));
       }
       return { branchesByWorkspaceId: next };
     }),
@@ -1047,7 +1237,8 @@ export const useIDE = create<State>((set, get) => ({
     set((s) => {
       const worktreeId = crypto.randomUUID();
       const branchName =
-        (s.branchesByWorkspaceId[workspaceId] ?? []).find((b) => b.id === branchId)?.name ?? "branch";
+        (s.branchesByWorkspaceId[workspaceId] ?? []).find((b) => b.id === branchId)?.name ??
+        "branch";
       const displayName = name?.trim() || branchName.split("/").pop() || branchName;
       const key = scopeKey(workspaceId, branchId);
       return {
@@ -1128,9 +1319,7 @@ export const useIDE = create<State>((set, get) => ({
       const next: Record<string, WorkspaceTerminal[]> = {};
       for (const [wsId, sessions] of Object.entries(s.sessionsByWorkspaceId)) {
         next[wsId] = sessions.map((sess) =>
-          sess.id === sessionId
-            ? { ...sess, worktreeId: worktreeId ?? undefined }
-            : sess,
+          sess.id === sessionId ? { ...sess, worktreeId: worktreeId ?? undefined } : sess,
         );
       }
       return { sessionsByWorkspaceId: next };
@@ -1240,7 +1429,9 @@ export const useIDE = create<State>((set, get) => ({
     set((cur) => ({
       branchesByWorkspaceId: {
         ...cur.branchesByWorkspaceId,
-        [workspaceId]: (cur.branchesByWorkspaceId[workspaceId] ?? []).filter((b) => b.id !== branchId),
+        [workspaceId]: (cur.branchesByWorkspaceId[workspaceId] ?? []).filter(
+          (b) => b.id !== branchId,
+        ),
       },
     }));
   },
@@ -1324,12 +1515,13 @@ export const useIDE = create<State>((set, get) => ({
 
     (async () => {
       try {
-        const provider = ws.source.kind === "mock"
-          ? await (async () => {
-              const { MockProvider } = await import("@/lib/fs/mock");
-              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-            })()
-          : await providerFor(ws.source, ws.name);
+        const provider =
+          ws.source.kind === "mock"
+            ? await (async () => {
+                const { MockProvider } = await import("@/lib/fs/mock");
+                return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+              })()
+            : await providerFor(ws.source, ws.name);
 
         const text = await provider.readFile(path);
 
@@ -1338,9 +1530,7 @@ export const useIDE = create<State>((set, get) => ({
           return {
             openFilesByScope: {
               ...s.openFilesByScope,
-              [key]: files.map((f) =>
-                f.id === id ? { ...f, content: text, loading: false } : f,
-              ),
+              [key]: files.map((f) => (f.id === id ? { ...f, content: text, loading: false } : f)),
             },
           };
         });
@@ -1376,12 +1566,13 @@ export const useIDE = create<State>((set, get) => ({
     if (!ws) return;
 
     try {
-      const provider = ws.source.kind === "mock"
-        ? await (async () => {
-            const { MockProvider } = await import("@/lib/fs/mock");
-            return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-          })()
-        : await providerFor(ws.source, ws.name);
+      const provider =
+        ws.source.kind === "mock"
+          ? await (async () => {
+              const { MockProvider } = await import("@/lib/fs/mock");
+              return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
+            })()
+          : await providerFor(ws.source, ws.name);
 
       await provider.writeFile(tab.path, tab.content);
 
@@ -1390,9 +1581,7 @@ export const useIDE = create<State>((set, get) => ({
         return {
           openFilesByScope: {
             ...s.openFilesByScope,
-            [key]: f.map((t) =>
-              t.id === activeId ? { ...t, isDirty: false } : t,
-            ),
+            [key]: f.map((t) => (t.id === activeId ? { ...t, isDirty: false } : t)),
           },
         };
       });
@@ -1411,9 +1600,7 @@ export const useIDE = create<State>((set, get) => ({
       return {
         openFilesByScope: {
           ...s.openFilesByScope,
-          [key]: files.map((f) =>
-            f.id === tabId ? { ...f, content, isDirty: true } : f,
-          ),
+          [key]: files.map((f) => (f.id === tabId ? { ...f, content, isDirty: true } : f)),
         },
       };
     }),
@@ -1460,7 +1647,9 @@ export function useCurrentExpandedFolders(): Record<string, boolean> {
 export function useCurrentMessages(): ChatMessage[] {
   const workspaceId = useIDE((s) => s.activeWorkspaceId);
   const activeSessionId = useIDE((s) => s.activeSessionIdByWorkspaceId[workspaceId]);
-  return useIDE((s) => (activeSessionId ? s.messagesBySessionId[activeSessionId] : undefined) ?? EMPTY_MESSAGES);
+  return useIDE(
+    (s) => (activeSessionId ? s.messagesBySessionId[activeSessionId] : undefined) ?? EMPTY_MESSAGES,
+  );
 }
 
 export const TOKEN_CONTEXT_MAX = 200_000;

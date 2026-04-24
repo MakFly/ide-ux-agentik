@@ -61,14 +61,32 @@ SSH connection from inside the app.
 | `--host`    | `AGENT_HOST`     | `0.0.0.0` | Bind address (use `127.0.0.1` + tunnel) |
 | `--token`   | `AGENT_TOKEN`    | —         | Shared secret (required)                |
 
+## Codex login (device-code flow)
+
+To authenticate Codex from the webapp, use **`codex login --device-auth`** exclusively.
+Never use plain `codex login` — it opens an interactive browser redirect that does not
+work reliably inside a PTY.
+
+The device-code flow prints a URL and a short code into the PTY. The user opens the
+URL in their browser, enters the code, and the CLI receives an OAuth token.
+
+The webapp exposes this as a menu entry: **CLI tab bar → + → Login Codex (device-code)**.
+A Sonner toast confirms the flow started; instructions appear directly in the terminal panel.
+
+### OPENAI_API_KEY bypass
+
+If an `OPENAI_API_KEY` is configured in **Settings → Codex**, the webapp injects it as
+`env.OPENAI_API_KEY` when spawning any PTY session. This bypasses the OAuth flow
+entirely — useful for CI or when you already have a key.
+
 ## Security notes
 
 - The token is sent in the first WS message. If a caller fails to `auth`
   within 5 s, the socket is closed with code `4401`.
 - Every path is resolved and asserted to stay inside `--root`. `..` is
   stripped defensively.
-- No execution — the agent is read/write filesystem only. Terminal & git
-  are not exposed here (deliberate, separate concern).
+- The `OPENAI_API_KEY` is passed as a PTY env var and is never logged by the agent.
+  Rotate it in the webapp Settings panel if compromised.
 
 ## Protocol
 

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import {
   Sheet,
   SheetContent,
@@ -9,6 +9,8 @@ import {
 } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -17,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useIDE, type Theme } from "@/store/ide";
+import { toast } from "sonner";
 
 function Row({ label, hint, control }: { label: string; hint?: string; control: ReactNode }) {
   return (
@@ -41,6 +44,9 @@ export function SettingsSheet({ children }: { children: ReactNode }) {
   const toggleThinking = useIDE((s) => s.toggleThinking);
   const filesTab = useIDE((s) => s.filesTab);
   const setFilesTab = useIDE((s) => s.setFilesTab);
+  const codexApiKey = useIDE((s) => s.codexApiKey);
+  const setCodexApiKey = useIDE((s) => s.setCodexApiKey);
+  const [apiKeyDraft, setApiKeyDraft] = useState(codexApiKey ?? "");
 
   return (
     <Sheet>
@@ -109,6 +115,39 @@ export function SettingsSheet({ children }: { children: ReactNode }) {
               hint="Show internal reasoning in chat"
               control={<Switch checked={thinking} onCheckedChange={() => toggleThinking()} />}
             />
+          </section>
+
+          <Separator />
+
+          <section>
+            <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+              Codex
+            </h3>
+            <div className="py-2">
+              <div className="mb-1.5 text-[13px] text-foreground">OPENAI_API_KEY</div>
+              <div className="mb-2 text-[11.5px] text-muted-foreground">
+                Bypasses device-auth flow. Injected into PTY env when spawning Codex.
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  type="password"
+                  placeholder="sk-..."
+                  value={apiKeyDraft}
+                  onChange={(e) => setApiKeyDraft(e.target.value)}
+                  className="h-8 flex-1 font-mono text-[12px]"
+                />
+                <Button
+                  size="sm"
+                  className="h-8"
+                  onClick={() => {
+                    setCodexApiKey(apiKeyDraft);
+                    toast.success(apiKeyDraft ? "API key saved." : "API key cleared.");
+                  }}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
           </section>
         </div>
       </SheetContent>

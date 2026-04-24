@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { useIDE, useCurrentScopeKey, useCurrentWorktree, type ScopeKey } from "@/store/ide";
+import { RemoteAgentProvider, type PtyHandle } from "@/lib/fs/remote-agent";
 
 /**
  * xterm.js must stay client-only — it touches DOM at import time and the
@@ -14,7 +15,7 @@ function prompt(scope: ScopeKey, worktreePath?: string): string {
   return `\x1b[36m${ws}\x1b[0m:\x1b[33m${br}\x1b[0m${suffix}$ `;
 }
 
-function runCommand(line: string, term: XtermLike, scope: ScopeKey, worktreePath?: string) {
+function runMockCommand(line: string, term: XtermLike, scope: ScopeKey, worktreePath?: string) {
   const [cmd, ...args] = line.split(/\s+/);
   switch (cmd) {
     case "help":
@@ -53,9 +54,11 @@ type XtermLike = {
   write(d: string): void;
   writeln(d: string): void;
   clear(): void;
-  onData(cb: (d: string) => void): void;
+  onData(cb: (d: string) => void): { dispose(): void } | void;
   loadAddon(a: unknown): void;
   dispose(): void;
+  cols: number;
+  rows: number;
 };
 type FitLike = { fit(): void };
 
@@ -72,6 +75,9 @@ export function TerminalPanel() {
   const worktreePath = currentWorktree?.path;
   const worktreeName = currentWorktree?.name;
   const toggleTerminal = useIDE((s) => s.toggleTerminal);
+  const workspaces = useIDE((s) => s.workspaces);
+  const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
+  const codexApiKey = useIDE((s) => s.codexApiKey);
   const hostRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
 
@@ -79,6 +85,7 @@ export function TerminalPanel() {
     let ro: ResizeObserver | null = null;
     let cancelled = false;
     let term: XtermLike | null = null;
+    let ptyHandle: PtyHandle | null = null;
 
     (async () => {
       const host = hostRef.current;
@@ -103,43 +110,11 @@ export function TerminalPanel() {
       }) as unknown as XtermLike;
       const fit = new FitAddon() as unknown as FitLike;
       term = instance;
-      let input = "";
 
       instance.loadAddon(fit);
       instance.loadAddon(new WebLinksAddon());
       host.replaceChildren();
       instance.open(host);
-      instance.writeln(`\x1b[90m# terminal — scope ${scope}\x1b[0m`);
-      if (worktreePath) {
-        instance.writeln(`\x1b[90m# attached worktree — ${worktreePath}\x1b[0m`);
-      }
-      instance.writeln("\x1b[90m# mock shell — try `help`, `ls`, `clear`, `echo`\x1b[0m");
-      instance.write(prompt(scope, worktreePath));
-
-      instance.onData((data) => {
-        const code = data.charCodeAt(0);
-        if (data === "\r") {
-          const line = input.trim();
-          instance.write("\r\n");
-          if (line) {
-            runCommand(line, instance, scope, worktreePath);
-          }
-          input = "";
-          instance.write(prompt(scope, worktreePath));
-        } else if (code === 127) {
-          if (input.length > 0) {
-            input = input.slice(0, -1);
-            instance.write("\b \b");
-          }
-        } else if (code === 3) {
-          instance.write("^C\r\n");
-          input = "";
-          instance.write(prompt(scope, worktreePath));
-        } else if (code >= 32) {
-          input += data;
-          instance.write(data);
-        }
-      });
 
       try {
         fit.fit();
@@ -147,11 +122,185 @@ export function TerminalPanel() {
         /* ignore */
       }
       instance.focus();
+
+      const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
+      const source = workspace?.source;
+
+      if (!source || source.kind !== "remote-agent") {
+        instance.writeln(`\x1b[90m# terminal — scope ${scope}\x1b[0m`);
+        if (worktreePath) {
+          instance.writeln(`\x1b[90m# attached worktree — ${worktreePath}\x1b[0m`);
+        }
+        instance.writeln(
+          "\x1b[33m[Terminal only available on remote workspaces — using mock shell]\x1b[0m",
+        );
+        instance.writeln("\x1b[90m# mock shell — try `help`, `ls`, `clear`, `echo`\x1b[0m");
+        instance.write(prompt(scope, worktreePath));
+
+        let input = "";
+        instance.onData((data) => {
+          const code = data.charCodeAt(0);
+          if (data === "\r") {
+            const line = input.trim();
+            instance.write("\r\n");
+            if (line) runMockCommand(line, instance, scope, worktreePath);
+            input = "";
+            instance.write(prompt(scope, worktreePath));
+          } else if (code === 127) {
+            if (input.length > 0) {
+              input = input.slice(0, -1);
+              instance.write("\b \b");
+            }
+          } else if (code === 3) {
+            instance.write("^C\r\n");
+            input = "";
+            instance.write(prompt(scope, worktreePath));
+          } else if (code >= 32) {
+            input += data;
+            instance.write(data);
+          }
+        });
+
+        setReady(true);
+        ro = new ResizeObserver(() => {
+          try {
+            fit.fit();
+          } catch {
+            /* ignore */
+          }
+        });
+        ro.observe(host);
+        return;
+      }
+
+      // Real PTY path via remote-agent
+      const provider = new RemoteAgentProvider(source.label, source.url, source.token);
+      try {
+        await provider.connect();
+      } catch (e) {
+        instance.writeln(
+          `\x1b[31m[agent connection failed: ${e instanceof Error ? e.message : String(e)}]\x1b[0m`,
+        );
+        instance.writeln("\x1b[33m[falling back to mock shell]\x1b[0m");
+        instance.writeln("\x1b[90m# mock shell — try `help`, `ls`, `clear`, `echo`\x1b[0m");
+        instance.write(prompt(scope, worktreePath));
+
+        let input = "";
+        instance.onData((data) => {
+          const code = data.charCodeAt(0);
+          if (data === "\r") {
+            const line = input.trim();
+            instance.write("\r\n");
+            if (line) runMockCommand(line, instance, scope, worktreePath);
+            input = "";
+            instance.write(prompt(scope, worktreePath));
+          } else if (code === 127) {
+            if (input.length > 0) {
+              input = input.slice(0, -1);
+              instance.write("\b \b");
+            }
+          } else if (code === 3) {
+            instance.write("^C\r\n");
+            input = "";
+            instance.write(prompt(scope, worktreePath));
+          } else if (code >= 32) {
+            input += data;
+            instance.write(data);
+          }
+        });
+
+        setReady(true);
+        ro = new ResizeObserver(() => {
+          try {
+            fit.fit();
+          } catch {
+            /* ignore */
+          }
+        });
+        ro.observe(host);
+        return;
+      }
+
+      if (cancelled) {
+        void provider.disconnect();
+        return;
+      }
+
+      const env: Record<string, string> = {};
+      if (codexApiKey) env.OPENAI_API_KEY = codexApiKey;
+
+      try {
+        ptyHandle = await provider.ptySpawn({
+          cwd: worktreePath,
+          cols: instance.cols,
+          rows: instance.rows,
+          env,
+        });
+      } catch (e) {
+        instance.writeln(
+          `\x1b[31m[PTY spawn failed: ${e instanceof Error ? e.message : String(e)}]\x1b[0m`,
+        );
+        instance.writeln("\x1b[33m[falling back to mock shell]\x1b[0m");
+        instance.writeln("\x1b[90m# mock shell — try `help`, `ls`, `clear`, `echo`\x1b[0m");
+        instance.write(prompt(scope, worktreePath));
+
+        let input = "";
+        instance.onData((data) => {
+          const code = data.charCodeAt(0);
+          if (data === "\r") {
+            const line = input.trim();
+            instance.write("\r\n");
+            if (line) runMockCommand(line, instance, scope, worktreePath);
+            input = "";
+            instance.write(prompt(scope, worktreePath));
+          } else if (code === 127) {
+            if (input.length > 0) {
+              input = input.slice(0, -1);
+              instance.write("\b \b");
+            }
+          } else if (code === 3) {
+            instance.write("^C\r\n");
+            input = "";
+            instance.write(prompt(scope, worktreePath));
+          } else if (code >= 32) {
+            input += data;
+            instance.write(data);
+          }
+        });
+
+        setReady(true);
+        ro = new ResizeObserver(() => {
+          try {
+            fit.fit();
+          } catch {
+            /* ignore */
+          }
+        });
+        ro.observe(host);
+        return;
+      }
+
+      if (cancelled) {
+        ptyHandle.kill();
+        void provider.disconnect();
+        return;
+      }
+
+      // Wire xterm ↔ PTY
+      instance.onData((data) => ptyHandle?.write(data));
+      ptyHandle.onData((data) => instance.write(data));
+      ptyHandle.onExit((code, signal) => {
+        instance.writeln(
+          `\x1b[90m[exited code=${code ?? "null"} signal=${signal ?? "null"}]\x1b[0m`,
+        );
+      });
+
       setReady(true);
 
       ro = new ResizeObserver(() => {
         try {
           fit.fit();
+          ptyHandle?.resize(instance.cols, instance.rows);
         } catch {
           /* ignore */
         }
@@ -162,9 +311,11 @@ export function TerminalPanel() {
     return () => {
       cancelled = true;
       ro?.disconnect();
+      ptyHandle?.kill();
       term?.dispose();
     };
-  }, [scope, worktreePath]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, worktreePath, activeWorkspaceId]);
 
   return (
     <div className="flex h-[240px] shrink-0 flex-col border-t border-border bg-black">

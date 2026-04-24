@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { X, FileCode, Plus, ChevronLeft, ChevronRight } from "lucide-react";
+import { X, FileCode, Plus, ChevronLeft, ChevronRight, LogIn } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import {
   useIDE,
   useCurrentActiveTab,
@@ -17,6 +18,7 @@ import {
   type Worktree,
   type FileTab,
 } from "@/store/ide";
+import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import { Thread } from "@/components/assistant-ui/thread";
 import { CodeEditor } from "@/components/ide/code-editor";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
@@ -237,6 +239,46 @@ const AGENT_OPTIONS: { id: TerminalKind; label: string }[] = [
   { id: "gemini", label: "Gemini" },
 ];
 
+async function launchCodexDeviceLogin(
+  workspaces: ReturnType<typeof useIDE.getState>["workspaces"],
+  activeWorkspaceId: string,
+  worktreePath: string | undefined,
+) {
+  const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
+  const source = workspace?.source;
+
+  if (!source || source.kind !== "remote-agent") {
+    toast.error("Codex login requires a remote-agent workspace.");
+    return;
+  }
+
+  toast.info("Codex login starting — follow instructions in terminal");
+
+  const provider = new RemoteAgentProvider(source.label, source.url, source.token);
+  try {
+    await provider.connect();
+    const handle = await provider.ptySpawn({
+      cmd: "codex",
+      args: ["login", "--device-auth"],
+      cwd: worktreePath,
+    });
+    // Output is streamed to the terminal that is currently active; we just
+    // inform the user via toast — the instructions (URL + code) will appear
+    // in the terminal panel.
+    handle.onExit((code) => {
+      if (code === 0) {
+        toast.success("Codex login completed.");
+      } else {
+        toast.error(`Codex login exited with code ${code}.`);
+      }
+    });
+    // We intentionally do not kill the handle here — the device-auth flow
+    // takes several seconds of user interaction in the PTY.
+  } catch (e) {
+    toast.error(`Codex login failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 function AgentCliTabs() {
   const sessions = useCurrentSessions();
   const activeSession = useActiveSession();
@@ -246,8 +288,7 @@ function AgentCliTabs() {
   const currentWorktree = useCurrentWorktree();
   const workspaces = useIDE((s) => s.workspaces);
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
-  const workspaceName =
-    workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? "—";
+  const workspaceName = workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? "—";
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -275,7 +316,9 @@ function AgentCliTabs() {
 
   useEffect(() => {
     if (!activeSession) return;
-    const el = scrollRef.current?.querySelector<HTMLElement>(`[data-session-id="${activeSession.id}"]`);
+    const el = scrollRef.current?.querySelector<HTMLElement>(
+      `[data-session-id="${activeSession.id}"]`,
+    );
     el?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
   }, [activeSession?.id]);
 
@@ -319,6 +362,14 @@ function AgentCliTabs() {
                 <span>{a.label}</span>
               </DropdownMenuItem>
             ))}
+            <DropdownMenuItem
+              onSelect={() =>
+                void launchCodexDeviceLogin(workspaces, activeWorkspaceId, currentWorktree?.path)
+              }
+            >
+              <LogIn className="h-3.5 w-3.5 shrink-0" />
+              <span>Login Codex (device-code)</span>
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
         <span className="font-mono text-[10.5px] uppercase tracking-wide text-muted-foreground">
@@ -330,97 +381,107 @@ function AgentCliTabs() {
 
   return (
     <div className="flex flex-col border-b border-border bg-code-bg/40">
-    <div className="flex items-center">
-      {canScrollLeft && (
-        <button
-          onClick={() => scrollBy(-1)}
-          className="flex h-full shrink-0 items-center border-r border-border px-1.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-          title="Scroll left"
+      <div className="flex items-center">
+        {canScrollLeft && (
+          <button
+            onClick={() => scrollBy(-1)}
+            className="flex h-full shrink-0 items-center border-r border-border px-1.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+            title="Scroll left"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" />
+          </button>
+        )}
+        <div
+          ref={scrollRef}
+          className="scrollbar-none flex flex-1 items-center overflow-x-auto scroll-smooth snap-x snap-mandatory"
         >
-          <ChevronLeft className="h-3.5 w-3.5" />
-        </button>
-      )}
-      <div
-        ref={scrollRef}
-        className="scrollbar-none flex flex-1 items-center overflow-x-auto scroll-smooth snap-x snap-mandatory"
-      >
-        {sessions.map((s) => {
-          const active = s.id === activeSession?.id;
-          return (
-            <div
-              key={s.id}
-              data-session-id={s.id}
-              onMouseDown={(e) => {
-                if (e.button === 1) {
-                  e.preventDefault();
-                  closeAgentSession(s.id);
-                }
-              }}
-              className={cn(
-                "group flex shrink-0 snap-start items-center gap-1.5 border-r border-border px-3 py-1.5 text-[11.5px]",
-                active
-                  ? "bg-background text-foreground"
-                  : "text-muted-foreground hover:bg-accent/30 hover:text-foreground",
-              )}
-            >
-              <button
-                onClick={() => setActiveSession(s.id)}
-                className="flex items-center gap-1.5 font-medium"
-                title={`${s.title} · ${currentWorktree?.name ?? ""} · middle-click to close`}
-              >
-                <ProductFavicon agent={s.kind} label={s.title} />
-                <span className="whitespace-nowrap">{s.title}</span>
-                <span className="hidden font-mono text-[10px] text-muted-foreground sm:inline">
-                  @{workspaceName}
-                </span>
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  closeAgentSession(s.id);
+          {sessions.map((s) => {
+            const active = s.id === activeSession?.id;
+            return (
+              <div
+                key={s.id}
+                data-session-id={s.id}
+                onMouseDown={(e) => {
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    closeAgentSession(s.id);
+                  }
                 }}
-                className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
-                title="Close CLI"
+                className={cn(
+                  "group flex shrink-0 snap-start items-center gap-1.5 border-r border-border px-3 py-1.5 text-[11.5px]",
+                  active
+                    ? "bg-background text-foreground"
+                    : "text-muted-foreground hover:bg-accent/30 hover:text-foreground",
+                )}
               >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-          );
-        })}
+                <button
+                  onClick={() => setActiveSession(s.id)}
+                  className="flex items-center gap-1.5 font-medium"
+                  title={`${s.title} · ${currentWorktree?.name ?? ""} · middle-click to close`}
+                >
+                  <ProductFavicon agent={s.kind} label={s.title} />
+                  <span className="whitespace-nowrap">{s.title}</span>
+                  <span className="hidden font-mono text-[10px] text-muted-foreground sm:inline">
+                    @{workspaceName}
+                  </span>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeAgentSession(s.id);
+                  }}
+                  className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
+                  title="Close CLI"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            );
+          })}
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              className="flex shrink-0 snap-start items-center gap-1 px-3 py-1.5 text-[11.5px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-              title="Add CLI"
-            >
-              <Plus className="h-3.5 w-3.5" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-48">
-            {AGENT_OPTIONS.map((a) => (
-              <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
-                <ProductFavicon agent={a.id} label={a.label} />
-                <span>{a.label}</span>
-                <span className="ml-auto font-mono text-[10px] text-muted-foreground">@{workspaceName}</span>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                className="flex shrink-0 snap-start items-center gap-1 px-3 py-1.5 text-[11.5px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+                title="Add CLI"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-48">
+              {AGENT_OPTIONS.map((a) => (
+                <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
+                  <ProductFavicon agent={a.id} label={a.label} />
+                  <span>{a.label}</span>
+                  <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+                    @{workspaceName}
+                  </span>
+                </DropdownMenuItem>
+              ))}
+              <DropdownMenuItem
+                onSelect={() =>
+                  void launchCodexDeviceLogin(workspaces, activeWorkspaceId, currentWorktree?.path)
+                }
+              >
+                <LogIn className="h-3.5 w-3.5 shrink-0" />
+                <span>Login Codex (device-code)</span>
               </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+        {canScrollRight && (
+          <button
+            onClick={() => scrollBy(1)}
+            className="flex h-full shrink-0 items-center border-l border-border px-1.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+            title="Scroll right"
+          >
+            <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+        )}
+        <span className="shrink-0 px-3 font-mono text-[10.5px] uppercase tracking-wide text-muted-foreground">
+          CLI
+        </span>
       </div>
-      {canScrollRight && (
-        <button
-          onClick={() => scrollBy(1)}
-          className="flex h-full shrink-0 items-center border-l border-border px-1.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-          title="Scroll right"
-        >
-          <ChevronRight className="h-3.5 w-3.5" />
-        </button>
-      )}
-      <span className="shrink-0 px-3 font-mono text-[10.5px] uppercase tracking-wide text-muted-foreground">
-        CLI
-      </span>
-    </div>
       {sessions.length > 1 && (
         <div className="flex items-center justify-center gap-1 py-1">
           {sessions.map((s) => {
@@ -431,7 +492,9 @@ function AgentCliTabs() {
                 onClick={() => setActiveSession(s.id)}
                 className={cn(
                   "h-1.5 rounded-full transition-all",
-                  active ? "w-4 bg-primary" : "w-1.5 bg-muted-foreground/30 hover:bg-muted-foreground/60",
+                  active
+                    ? "w-4 bg-primary"
+                    : "w-1.5 bg-muted-foreground/30 hover:bg-muted-foreground/60",
                 )}
                 title={`${s.title} @${workspaceName}`}
               />
@@ -454,7 +517,8 @@ export function Workspace() {
           <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
             <div className="text-[13px] font-medium text-foreground">No CLI running</div>
             <p className="max-w-sm text-[12.5px] text-muted-foreground">
-              Start a new CLI session from the <span className="font-mono">+ New CLI</span> button above. Each session is bound to the current workspace.
+              Start a new CLI session from the <span className="font-mono">+ New CLI</span> button
+              above. Each session is bound to the current workspace.
             </p>
           </div>
         ) : (
@@ -667,7 +731,6 @@ function WorkspaceLegacy() {
           </Panel>
         </PanelGroup>
       </div>
-
     </main>
   );
 }
