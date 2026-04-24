@@ -4,9 +4,13 @@ import {
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import { TypingDots } from "@/components/assistant-ui/typing-dots";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Reasoning, ReasoningGroup } from "@/components/assistant-ui/reasoning";
+import { ThinkingIndicator } from "@/components/assistant-ui/thinking-indicator";
+import { ThoughtSummaryForCurrentMessage } from "@/components/assistant-ui/thought-summary";
+import { useRunTracker, useRegisterThreadStateRef } from "@/hooks/use-message-summary";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -30,7 +34,6 @@ import {
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
-  LoaderIcon,
   MoreHorizontalIcon,
   PencilIcon,
   RefreshCwIcon,
@@ -70,6 +73,10 @@ function messageTextLength(m: MessageLike): number {
 }
 
 export const Thread: FC = () => {
+  // Track run timing and tool counts for "Thought for Xs" summaries.
+  useRunTracker();
+  useRegisterThreadStateRef();
+
   return (
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container flex h-full flex-col bg-background"
@@ -429,7 +436,7 @@ const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
   const composerChars = useAuiState((s) => (s.composer.text ?? "").length);
   const used = Math.round((messagesChars + composerChars) / 4);
   return (
-    <div className="aui-composer-action-wrapper relative flex items-center justify-between gap-2">
+    <div className="aui-composer-action-wrapper flex items-center justify-between gap-2">
       <div className="flex items-center gap-1">
         <ComposerAddAttachment />
         <ModelPill cli={activeAgent} />
@@ -437,12 +444,12 @@ const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
         <PlanToggle cli={activeAgent} />
         <SkillsTrigger />
       </div>
-      <div className="pointer-events-auto absolute left-1/2 -translate-x-1/2">
-        <TokenBadge used={used} max={TOKEN_CONTEXT_MAX} />
-      </div>
       <div className="flex items-center gap-1">
         <SandboxLockButton cli={activeAgent} />
         <VoiceButton />
+        <span className="ml-2 mr-1 hidden sm:inline">
+          <TokenBadge used={used} max={TOKEN_CONTEXT_MAX} />
+        </span>
         <SendOrStopButton />
       </div>
     </div>
@@ -466,6 +473,15 @@ const AssistantMessage: FC = () => {
   const ACTION_BAR_PT = "pt-1.5";
   const ACTION_BAR_HEIGHT = `-mb-7.5 min-h-7.5 ${ACTION_BAR_PT}`;
 
+  // Show typing dots when streaming text (last part is text, no pending tool call)
+  const showTypingDots = useAuiState((s) => {
+    if (!s.thread.isRunning) return false;
+    const parts = s.message.content;
+    if (!parts || parts.length === 0) return false;
+    const last = parts[parts.length - 1] as PartLike;
+    return last?.type === "text";
+  });
+
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
@@ -476,6 +492,7 @@ const AssistantMessage: FC = () => {
         data-slot="aui_assistant-message-content"
         className="wrap-break-word px-2 text-foreground leading-relaxed"
       >
+        <ThoughtSummaryForCurrentMessage />
         <MessagePrimitive.Parts
           components={{
             Text: MarkdownText,
@@ -484,11 +501,9 @@ const AssistantMessage: FC = () => {
             tools: { Fallback: ToolFallback },
           }}
         />
-        <AuiIf condition={(s) => s.thread.isRunning && s.message.content.length === 0}>
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <LoaderIcon className="size-4 animate-spin" />
-            <span className="text-sm">Thinking…</span>
-          </div>
+        {showTypingDots && <TypingDots />}
+        <AuiIf condition={(s) => s.thread.isRunning}>
+          <ThinkingIndicator />
         </AuiIf>
         <MessageError />
       </div>
