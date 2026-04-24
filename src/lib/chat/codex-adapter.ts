@@ -16,22 +16,28 @@ import { maybeInterceptSlash } from "@/lib/chat/slash-commands";
  * repo, agent-prompt-plan-mode-enhanced.md (Claude Code v2.1.119, 2026-04-23).
  * Source: https://github.com/Piebald-AI/claude-code-system-prompts/blob/main/system-prompts/agent-prompt-plan-mode-enhanced.md
  */
-const PLAN_MODE_SYSTEM_PREFIX = `You are a software architect and planning specialist. Your role is EXCLUSIVELY to explore the codebase and design implementation plans.
+const PLAN_MODE_SYSTEM_PREFIX = `You are in Plan Mode — a software architect creating a step-by-step implementation plan.
 
-READ-ONLY MODE — NO FILE MODIFICATIONS.
-STRICTLY PROHIBITED: Creating new files, editing files, deleting files, moving files, running write commands.
+READ-ONLY. Do not modify files, do not run write commands.
 
-Process:
-1. Understand Requirements — analyze the task with the assigned perspective.
-2. Explore Thoroughly — read files, trace code paths (ls, grep, cat, git status only).
-3. Design Solution — follow existing patterns, consider architectural trade-offs.
-4. Detail the Plan — step-by-step with dependency analysis.
+Required output — use EXACTLY this structure, nothing else:
 
-Use the update_plan tool to stream a structured list of steps with statuses (pending / in_progress / completed). At most ONE step should be in_progress at any time.
+## Plan: <one-line title of the plan>
 
-End every response with a "Critical Files for Implementation" section identifying 3-5 files essential for the next phase.
+<optional 1-2 sentence context about what you will do>
 
-Plan mode is active. The user indicated that they do not want you to execute yet — you MUST NOT make any edits.`;
+- [ ] Step 1: <imperative step title> — <short rationale>
+- [ ] Step 2: <imperative step title> — <short rationale>
+- [ ] Step 3: <imperative step title> — <short rationale>
+(aim for 3 to 8 steps; each must start with "- [ ] " and be a single line)
+
+## Follow-up
+- <short refinement suggestion the user could ask for>
+- <another refinement suggestion>
+- <another refinement suggestion>
+(3 to 5 items; each a single line, no markdown formatting inside)
+
+Do NOT add any prose, numbered lists, or sections outside of "## Plan" and "## Follow-up". Do NOT write a "Critical Files" section. Do NOT prefix steps with numbers — the "- [ ]" prefix is mandatory.`;
 
 /**
  * assistant-ui adapter that runs `codex exec --json "<prompt>"` via the remote
@@ -95,6 +101,87 @@ function getActiveRemoteAgent() {
  *  (user + assistant pairs) and further cap total characters. */
 const MAX_HISTORY_TURNS = 6;
 const MAX_PROMPT_CHARS = 40_000;
+
+/**
+ * Parse a Plan-Mode markdown response into a structured `update_plan`-like
+ * shape so PlanStepList can render the same UI whether or not Codex emits
+ * native plan_update events. Expected format (enforced by
+ * PLAN_MODE_SYSTEM_PREFIX):
+ *
+ *   ## Plan: <title>
+ *   <optional explanation>
+ *   - [ ] step 1
+ *   - [ ] step 2
+ *
+ *   ## Follow-up
+ *   - suggestion 1
+ *   - suggestion 2
+ */
+type ParsedPlan = {
+  title?: string;
+  explanation?: string;
+  steps: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>;
+  followUps: string[];
+};
+
+function parsePlanMarkdown(text: string): ParsedPlan | null {
+  if (!text) return null;
+  const planMatch = text.match(/##\s*Plan(?::\s*(.+?))?\s*\n([\s\S]*?)(?=\n##\s|$)/i);
+  if (!planMatch) return null;
+  const title = planMatch[1]?.trim() || undefined;
+  const planBody = planMatch[2] ?? "";
+
+  const steps: ParsedPlan["steps"] = [];
+  const explanationLines: string[] = [];
+  let sawStep = false;
+  for (const raw of planBody.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const checkbox = line.match(/^[-*]\s*\[( |x|X|~)\]\s*(.+)$/);
+    if (checkbox) {
+      sawStep = true;
+      const marker = checkbox[1];
+      const status =
+        marker === "x" || marker === "X"
+          ? ("completed" as const)
+          : marker === "~"
+            ? ("in_progress" as const)
+            : ("pending" as const);
+      steps.push({ step: checkbox[2].trim(), status });
+    } else if (!sawStep) {
+      explanationLines.push(line);
+    }
+  }
+  if (steps.length === 0) return null;
+
+  const followMatch = text.match(/##\s*Follow[-\s]?up[^\n]*\n([\s\S]*?)(?=\n##\s|$)/i);
+  const followUps: string[] = [];
+  if (followMatch) {
+    for (const raw of followMatch[1].split(/\r?\n/)) {
+      const m = raw.match(/^\s*[-*]\s+(.+)$/);
+      if (m) followUps.push(m[1].trim());
+    }
+  }
+
+  return {
+    title,
+    explanation: explanationLines.length ? explanationLines.join(" ") : undefined,
+    steps,
+    followUps,
+  };
+}
+
+function isPlanModeOn(cli: "codex" | "claude" | "opencode" | "gemini"): boolean {
+  try {
+    const m = JSON.parse(localStorage.getItem("plan-mode-by-cli") ?? "{}") as Record<
+      string,
+      boolean
+    >;
+    return m[cli] === true;
+  } catch {
+    return false;
+  }
+}
 
 function flattenMessages(options: ChatModelRunOptions): string {
   // A "turn" = 1 user + 1 assistant message. Slice from the tail.
@@ -197,19 +284,13 @@ export const codexAdapter: ChatModelAdapter = {
     let prompt = flattenMessages(options);
     if (!prompt.trim()) return;
 
-    // Plan Mode: read localStorage directly (can't call hooks from a generator).
-    // Source: Piebald-AI/claude-code-system-prompts — agent-prompt-plan-mode-enhanced.md
-    // https://github.com/Piebald-AI/claude-code-system-prompts
-    try {
-      const planMap = JSON.parse(localStorage.getItem("plan-mode-by-cli") ?? "{}") as Record<
-        string,
-        boolean
-      >;
-      if (planMap.codex === true) {
-        prompt = `${PLAN_MODE_SYSTEM_PREFIX}\n\n---\n\n${prompt}`;
-      }
-    } catch {
-      /* no-op — no localStorage or malformed JSON */
+    // Plan Mode: prefix the prompt with our hardened system prefix when the
+    // per-cli toggle is on. The parser below (agent_message handler) promotes
+    // the markdown response into a structured plan tool-call when Codex doesn't
+    // emit a native update_plan event.
+    const planModeOn = isPlanModeOn("codex");
+    if (planModeOn) {
+      prompt = `${PLAN_MODE_SYSTEM_PREFIX}\n\n---\n\n${prompt}`;
     }
 
     const provider = (await providerFor(source, source.label)) as RemoteAgentProvider;
@@ -259,6 +340,9 @@ export const codexAdapter: ChatModelAdapter = {
     // Async queue of events.
     const buffer: CodexEvent[] = [];
     let ended = false;
+    // Plan Mode: when Codex emits a native update_plan event, the markdown
+    // fallback is disabled for the rest of the turn to avoid double-rendering.
+    let hasNativePlanEvent = false;
     type ExitInfo = { code: number | null; signal: string | null };
     let exitInfo: ExitInfo | null = null as ExitInfo | null;
     let notify: (() => void) | null = null;
@@ -337,8 +421,37 @@ export const codexAdapter: ChatModelAdapter = {
           if (itemType === "agent_message") {
             const t = typeof evt.item?.text === "string" ? evt.item.text : "";
             if (t) {
-              const key = itemId ? `msg:${itemId}` : nextAnon();
-              upsert(key, { kind: "text", text: t });
+              // Plan Mode fallback: if Codex didn't emit a native
+              // update_plan event and the text parses as our hardened
+              // markdown plan, promote it into a structured plan tool
+              // entry so PlanStepList renders instead of a wall of text.
+              let promoted = false;
+              if (planModeOn && !hasNativePlanEvent) {
+                const parsed = parsePlanMarkdown(t);
+                if (parsed) {
+                  const planKey = itemId ? `plan:msg:${itemId}` : `plan:${nextAnon()}`;
+                  upsert(planKey, {
+                    kind: "tool",
+                    id: itemId ?? planKey,
+                    name: "plan",
+                    args: {
+                      title: parsed.title,
+                      explanation: parsed.explanation,
+                      steps: parsed.steps,
+                      followUps: parsed.followUps,
+                    } as Record<string, unknown>,
+                    result: "ok",
+                  });
+                  console.debug(
+                    `[plan] promoted agent_message → ${parsed.steps.length} steps, ${parsed.followUps.length} follow-ups`,
+                  );
+                  promoted = true;
+                }
+              }
+              if (!promoted) {
+                const key = itemId ? `msg:${itemId}` : nextAnon();
+                upsert(key, { kind: "text", text: t });
+              }
             }
           } else if (itemType === "reasoning") {
             const t = typeof evt.item?.text === "string" ? evt.item.text : "";
@@ -407,12 +520,14 @@ export const codexAdapter: ChatModelAdapter = {
               : [];
             const key = itemId ? `plan:${itemId}` : nextAnon();
             if (steps.length > 0) {
+              hasNativePlanEvent = true;
+              const allDone = steps.every((s) => s.status === "completed");
               upsert(key, {
                 kind: "tool",
                 id: itemId ?? key,
                 name: "plan",
                 args: { explanation, steps } as Record<string, unknown>,
-                result: undefined,
+                result: allDone ? "ok" : undefined,
               });
             } else {
               // Fallback: stringified plan (non-standard payload) — keep as a note.
