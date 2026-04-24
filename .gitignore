@@ -33,3 +33,8 @@ dist-ssr
 
 # instant-grep index
 .ig/
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
