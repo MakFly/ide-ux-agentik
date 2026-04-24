@@ -183,9 +183,6 @@ const Composer: FC = () => {
   useEffect(() => {
     const shell = shellRef.current;
     if (!shell) return;
-    const ta = shell.querySelector("textarea");
-    if (!ta) return;
-    inputRef.current = ta as HTMLTextAreaElement;
 
     const detect = () => {
       const el = inputRef.current;
@@ -202,13 +199,38 @@ const Composer: FC = () => {
       setPopover(m[1] === "@" ? "files" : "slash");
     };
 
-    ta.addEventListener("input", detect);
-    ta.addEventListener("click", detect);
-    ta.addEventListener("keyup", detect);
+    let current: HTMLTextAreaElement | null = null;
+    const attach = (el: HTMLTextAreaElement) => {
+      if (current === el) return;
+      if (current) {
+        current.removeEventListener("input", detect);
+        current.removeEventListener("click", detect);
+        current.removeEventListener("keyup", detect);
+      }
+      current = el;
+      inputRef.current = el;
+      el.addEventListener("input", detect);
+      el.addEventListener("click", detect);
+      el.addEventListener("keyup", detect);
+      console.debug("[composer] @/slash detector attached to textarea");
+    };
+
+    const tryAttach = () => {
+      const found = shell.querySelector("textarea");
+      if (found) attach(found as HTMLTextAreaElement);
+    };
+
+    tryAttach();
+    const observer = new MutationObserver(tryAttach);
+    observer.observe(shell, { childList: true, subtree: true });
+
     return () => {
-      ta.removeEventListener("input", detect);
-      ta.removeEventListener("click", detect);
-      ta.removeEventListener("keyup", detect);
+      observer.disconnect();
+      if (current) {
+        current.removeEventListener("input", detect);
+        current.removeEventListener("click", detect);
+        current.removeEventListener("keyup", detect);
+      }
     };
   }, []);
 
