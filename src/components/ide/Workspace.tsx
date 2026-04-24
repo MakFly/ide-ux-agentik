@@ -22,6 +22,7 @@ import {
 } from "@/store/ide";
 import { Thread } from "@/components/assistant-ui/thread";
 import { AgentSessionView } from "@/components/ide/agent-session-view";
+import { KillSessionDialog } from "@/components/ide/kill-session-dialog";
 import { CodeEditor } from "@/components/ide/code-editor";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import ReactMarkdown from "react-markdown";
@@ -388,23 +389,27 @@ function AgentCliTabs() {
                   className="flex items-center gap-1.5 font-medium"
                   title={`${s.title} · ${currentWorktree?.name ?? ""} · middle-click to close`}
                 >
-                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", sessionDotClass(s.status))} />
+                  <span
+                    className={cn("h-1.5 w-1.5 shrink-0 rounded-full", sessionDotClass(s.status))}
+                  />
                   <ProductFavicon agent={s.kind} label={s.title} />
                   <span className="whitespace-nowrap">{s.title}</span>
                   <span className="hidden font-mono text-[10px] text-muted-foreground sm:inline">
                     @{workspaceName}
                   </span>
                 </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeAgentSession(s.id);
-                  }}
-                  className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
-                  title="Close CLI"
-                >
-                  <X className="h-3 w-3" />
-                </button>
+                <KillSessionDialog
+                  session={s}
+                  trigger={
+                    <button
+                      onClick={(e) => e.stopPropagation()}
+                      className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
+                      title="Close CLI"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  }
+                />
                 {s.id !== activeSession?.id && (
                   <button
                     onClick={(e) => {
@@ -503,7 +508,10 @@ export function Workspace() {
   const allSessions = useCurrentSessions();
 
   const pinnedSessions = useMemo(
-    () => pinnedIds.map((id) => allSessions.find((s) => s.id === id)).filter(Boolean) as WorkspaceTerminal[],
+    () =>
+      pinnedIds
+        .map((id) => allSessions.find((s) => s.id === id))
+        .filter(Boolean) as WorkspaceTerminal[],
     [pinnedIds, allSessions],
   );
 

@@ -1,8 +1,9 @@
-import { Bot } from "lucide-react";
+import { Bot, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useIDE, useCurrentSessions, useActiveSession, type WorkspaceTerminal } from "@/store/ide";
 import { AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { KillSessionDialog } from "@/components/ide/kill-session-dialog";
 
 const CLI_LABELS: Record<WorkspaceTerminal["kind"], string> = {
   codex: "Codex",
@@ -13,9 +14,7 @@ const CLI_LABELS: Record<WorkspaceTerminal["kind"], string> = {
 
 function SessionStatusDot({ status }: { status: WorkspaceTerminal["status"] }) {
   if (status === "busy") {
-    return (
-      <span className="block h-2 w-2 shrink-0 animate-pulse rounded-full bg-status-warn" />
-    );
+    return <span className="block h-2 w-2 shrink-0 animate-pulse rounded-full bg-status-warn" />;
   }
   if (status === "idle") {
     return <span className="block h-2 w-2 shrink-0 rounded-full bg-status-add" />;
@@ -33,31 +32,44 @@ function SessionRow({
   onSelect: () => void;
 }) {
   return (
-    <button
-      onClick={onSelect}
+    <div
       className={cn(
-        "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
+        "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 transition-colors",
         active ? "bg-branch-active" : "hover:bg-accent/50",
       )}
     >
-      <Bot className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate font-mono text-[12.5px] text-foreground">
-            {session.title || CLI_LABELS[session.kind]}
-          </span>
-          <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground/70">
-            {CLI_LABELS[session.kind]}
-          </span>
-        </div>
-        {session.lastCommand && (
-          <div className="mt-0.5 truncate pr-1 font-mono text-[11px] text-muted-foreground">
-            {session.lastCommand}
+      <button onClick={onSelect} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+        <Bot className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate font-mono text-[12.5px] text-foreground">
+              {session.title || CLI_LABELS[session.kind]}
+            </span>
+            <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground/70">
+              {CLI_LABELS[session.kind]}
+            </span>
           </div>
-        )}
-      </div>
+          {session.lastCommand && (
+            <div className="mt-0.5 truncate pr-1 font-mono text-[11px] text-muted-foreground">
+              {session.lastCommand}
+            </div>
+          )}
+        </div>
+      </button>
       <SessionStatusDot status={session.status} />
-    </button>
+      <KillSessionDialog
+        session={session}
+        trigger={
+          <button
+            onClick={(e) => e.stopPropagation()}
+            className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
+            title="Kill session"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        }
+      />
+    </div>
   );
 }
 
