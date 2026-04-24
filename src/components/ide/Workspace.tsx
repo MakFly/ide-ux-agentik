@@ -20,6 +20,7 @@ import {
   type FileTab,
 } from "@/store/ide";
 import { Thread } from "@/components/assistant-ui/thread";
+import { AgentSessionView } from "@/components/ide/agent-session-view";
 import { CodeEditor } from "@/components/ide/code-editor";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import ReactMarkdown from "react-markdown";
@@ -469,7 +470,7 @@ export function Workspace() {
     <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background shadow-sm">
       <AgentCliTabs />
       <div key={activeSession?.id ?? "no-session"} className="min-h-0 flex-1 overflow-hidden">
-        {sessions.length === 0 ? (
+        {sessions.length === 0 || !activeSession ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
             <div className="text-[13px] font-medium text-foreground">No CLI running</div>
             <p className="max-w-sm text-[12.5px] text-muted-foreground">
@@ -478,7 +479,7 @@ export function Workspace() {
             </p>
           </div>
         ) : (
-          <Thread />
+          <AgentSessionView session={activeSession} />
         )}
       </div>
     </main>
