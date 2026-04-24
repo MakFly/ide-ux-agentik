@@ -14,6 +14,7 @@ import {
 import { AddWorkspaceDialog } from "@/components/ide/add-workspace-dialog";
 import { PromptDialog } from "@/components/ide/prompt-dialog";
 import { TasksSection } from "@/components/ide/sidebar/tasks-section";
+import { SessionsSection } from "@/components/ide/sidebar/sessions-section";
 import { WorktreesSection } from "@/components/ide/sidebar/worktrees-section";
 import { BranchesSkeleton } from "@/components/ide/skeletons/sidebar-skeletons";
 
@@ -102,7 +103,7 @@ export function Sidebar() {
 
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
   const activeBranch = currentBranches.find((b) => b.id === activeBranchId);
-  const defaultOpen = ["branches", "worktrees"];
+  const defaultOpen = ["sessions", "branches", "worktrees"];
 
   return (
     <aside className="flex h-full w-full min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-sidebar shadow-sm">
@@ -163,6 +164,9 @@ export function Sidebar() {
               </div>
             </AccordionContent>
           </AccordionItem>
+
+          {/* Agent sessions of active project */}
+          <SessionsSection />
 
           {/* Worktrees of active project */}
           <WorktreesSection />

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { X, FileCode, Plus, ChevronLeft, ChevronRight, LogIn } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { X, FileCode, Plus, ChevronLeft, ChevronRight, LogIn, Pin, PinOff } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -12,6 +12,7 @@ import {
   useCurrentWorktree,
   useCurrentSessions,
   useActiveSession,
+  usePinnedSessionIds,
   type AgentTabId,
   type TabId,
   type TerminalKind,
@@ -133,6 +134,12 @@ function terminalStatusClass(status: WorkspaceTerminal["status"]) {
   return "bg-status-add/15 text-status-add";
 }
 
+function sessionDotClass(status: WorkspaceTerminal["status"]) {
+  if (status === "busy") return "bg-status-warn animate-pulse";
+  if (status === "idle") return "bg-muted-foreground/50";
+  return "bg-status-add";
+}
+
 function TerminalView({
   terminal,
   workspaceName,
@@ -243,9 +250,12 @@ const AGENT_OPTIONS: { id: TerminalKind; label: string }[] = [
 function AgentCliTabs() {
   const sessions = useCurrentSessions();
   const activeSession = useActiveSession();
+  const pinnedIds = usePinnedSessionIds();
   const setActiveSession = useIDE((s) => s.setActiveSession);
   const closeAgentSession = useIDE((s) => s.closeAgentSession);
   const addAgentSession = useIDE((s) => s.addAgentSession);
+  const pinSession = useIDE((s) => s.pinSession);
+  const unpinSession = useIDE((s) => s.unpinSession);
   const currentWorktree = useCurrentWorktree();
   const workspaces = useIDE((s) => s.workspaces);
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
@@ -378,6 +388,7 @@ function AgentCliTabs() {
                   className="flex items-center gap-1.5 font-medium"
                   title={`${s.title} · ${currentWorktree?.name ?? ""} · middle-click to close`}
                 >
+                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", sessionDotClass(s.status))} />
                   <ProductFavicon agent={s.kind} label={s.title} />
                   <span className="whitespace-nowrap">{s.title}</span>
                   <span className="hidden font-mono text-[10px] text-muted-foreground sm:inline">
@@ -394,6 +405,28 @@ function AgentCliTabs() {
                 >
                   <X className="h-3 w-3" />
                 </button>
+                {s.id !== activeSession?.id && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (pinnedIds.includes(s.id)) unpinSession(s.id);
+                      else pinSession(s.id);
+                    }}
+                    className={cn(
+                      "rounded p-0.5 transition-opacity hover:bg-accent hover:text-foreground",
+                      pinnedIds.includes(s.id)
+                        ? "text-primary opacity-100"
+                        : "text-muted-foreground opacity-0 group-hover:opacity-100",
+                    )}
+                    title={pinnedIds.includes(s.id) ? "Unpin panel" : "Pin side by side"}
+                  >
+                    {pinnedIds.includes(s.id) ? (
+                      <PinOff className="h-3 w-3" />
+                    ) : (
+                      <Pin className="h-3 w-3" />
+                    )}
+                  </button>
+                )}
               </div>
             );
           })}
@@ -466,10 +499,20 @@ function AgentCliTabs() {
 export function Workspace() {
   const activeSession = useActiveSession();
   const sessions = useCurrentSessions();
+  const pinnedIds = usePinnedSessionIds();
+  const allSessions = useCurrentSessions();
+
+  const pinnedSessions = useMemo(
+    () => pinnedIds.map((id) => allSessions.find((s) => s.id === id)).filter(Boolean) as WorkspaceTerminal[],
+    [pinnedIds, allSessions],
+  );
+
+  const hasPinned = pinnedSessions.length > 0;
+
   return (
     <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background shadow-sm">
       <AgentCliTabs />
-      <div key={activeSession?.id ?? "no-session"} className="min-h-0 flex-1 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden">
         {sessions.length === 0 || !activeSession ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
             <div className="text-[13px] font-medium text-foreground">No CLI running</div>
@@ -478,6 +521,22 @@ export function Workspace() {
               above. Each session is bound to the current workspace.
             </p>
           </div>
+        ) : hasPinned ? (
+          <PanelGroup orientation="horizontal" className="h-full">
+            <Panel minSize={20} defaultSize={Math.round(100 / (pinnedSessions.length + 1))}>
+              <AgentSessionView session={activeSession} />
+            </Panel>
+            {pinnedSessions.map((session) => (
+              <Fragment key={session.id}>
+                <PanelResizeHandle className="group relative w-1.5 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-primary/40">
+                  <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border group-hover:bg-primary/60" />
+                </PanelResizeHandle>
+                <Panel minSize={20} defaultSize={Math.round(100 / (pinnedSessions.length + 1))}>
+                  <AgentSessionView session={session} />
+                </Panel>
+              </Fragment>
+            ))}
+          </PanelGroup>
         ) : (
           <AgentSessionView session={activeSession} />
         )}

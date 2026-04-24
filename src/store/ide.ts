@@ -22,6 +22,7 @@ export type TaskStatus = "todo" | "in_progress" | "blocked" | "done";
 export type WorkTask = {
   id: string;
   title: string;
+  description?: string;
   status: TaskStatus;
   assignee: string;
   updatedAt: string;
@@ -191,6 +192,7 @@ type State = {
   worktreesByWorkspaceId: Record<string, Worktree[]>;
   sessionsByWorkspaceId: Record<string, WorkspaceTerminal[]>;
   activeSessionIdByWorkspaceId: Record<string, string>;
+  pinnedSessionIdsByWorkspaceId: Record<string, string[]>;
 
   // Global prefs
   theme: Theme;
@@ -205,6 +207,12 @@ type State = {
   thinking: boolean;
   webSearch: boolean;
   codexApiKey?: string;
+  /** Codex --model override. `undefined` = use codex's own default. */
+  codexModel?: string;
+  /** Per-CLI selected model. Key = TerminalKind, value = model id. */
+  selectedModelByCli: Record<string, string>;
+  /** Per-CLI approval mode. Key = TerminalKind, value = ApprovalMode. Default "confirm". */
+  approvalModeByCli: Record<string, "auto" | "confirm" | "sandbox">;
   codexAuth?: {
     idToken: string;
     accessToken: string;
@@ -252,7 +260,12 @@ type State = {
   setActiveSession: (sessionId: string) => void;
   addAgentSession: (kind: TerminalKind) => void;
   closeAgentSession: (sessionId: string) => void;
+  pinSession: (sessionId: string) => void;
+  unpinSession: (sessionId: string) => void;
   setCodexApiKey: (key: string) => void;
+  setCodexModel: (model: string | undefined) => void;
+  setModelForCli: (cli: string, model: string) => void;
+  setApprovalMode: (cli: string, mode: "auto" | "confirm" | "sandbox") => void;
   setCodexAuth: (auth: State["codexAuth"] | null) => void;
   refreshCodexTokens: () => Promise<boolean>;
   togglePreview: () => void;
@@ -264,7 +277,13 @@ type State = {
   addBranch: (workspaceId: string, name: string) => void;
   toggleStar: (branchId: string) => void;
   addWorkspace: (name: string, source?: WorkspaceSource) => string;
-  addTask: (worktreeId: string, title: string) => void;
+  addTask: (worktreeId: string, title: string, description?: string) => void;
+  updateTask: (
+    worktreeId: string,
+    taskId: string,
+    patch: { title?: string; description?: string },
+  ) => void;
+  removeTask: (worktreeId: string, taskId: string) => void;
   cycleTaskStatus: (worktreeId: string, taskId: string) => void;
   setTaskStatus: (worktreeId: string, taskId: string, status: TaskStatus) => void;
   addWorktree: (workspaceId: string, branchId: string, name?: string) => void;
@@ -709,6 +728,7 @@ export const useIDE = create<State>((set, get) => ({
   worktreesByWorkspaceId: initialWorktrees,
   sessionsByWorkspaceId: {},
   activeSessionIdByWorkspaceId: {},
+  pinnedSessionIdsByWorkspaceId: {},
 
   theme: readStoredTheme(),
   showFiles: true,
@@ -723,6 +743,16 @@ export const useIDE = create<State>((set, get) => ({
   webSearch: false,
   codexApiKey:
     typeof window !== "undefined" ? window.localStorage.getItem("codex-api-key") ?? undefined : undefined,
+  codexModel:
+    typeof window !== "undefined" ? window.localStorage.getItem("codex-model") ?? undefined : undefined,
+  selectedModelByCli:
+    typeof window !== "undefined"
+      ? (() => { try { const raw = window.localStorage.getItem("selected-model-by-cli"); return raw ? (JSON.parse(raw) as Record<string, string>) : {}; } catch { return {}; } })()
+      : {},
+  approvalModeByCli:
+    typeof window !== "undefined"
+      ? (() => { try { const raw = window.localStorage.getItem("approval-mode-by-cli"); return raw ? (JSON.parse(raw) as Record<string, "auto" | "confirm" | "sandbox">) : {}; } catch { return {}; } })()
+      : {},
   codexAuth:
     typeof window !== "undefined"
       ? (() => {
@@ -1101,6 +1131,23 @@ export const useIDE = create<State>((set, get) => ({
     }
     set({ codexApiKey: key || undefined });
   },
+  setCodexModel: (model) => {
+    if (typeof window !== "undefined") {
+      if (model) window.localStorage.setItem("codex-model", model);
+      else window.localStorage.removeItem("codex-model");
+    }
+    set({ codexModel: model || undefined });
+  },
+  setModelForCli: (cli, model) => {
+    const next = { ...get().selectedModelByCli, [cli]: model };
+    if (typeof window !== "undefined") window.localStorage.setItem("selected-model-by-cli", JSON.stringify(next));
+    set({ selectedModelByCli: next });
+  },
+  setApprovalMode: (cli, mode) => {
+    const next = { ...get().approvalModeByCli, [cli]: mode };
+    if (typeof window !== "undefined") window.localStorage.setItem("approval-mode-by-cli", JSON.stringify(next));
+    set({ approvalModeByCli: next });
+  },
   setCodexAuth: (auth) => {
     if (typeof window !== "undefined") {
       if (auth) window.localStorage.setItem("codex-auth", JSON.stringify(auth));
@@ -1244,7 +1291,7 @@ export const useIDE = create<State>((set, get) => ({
     return id;
   },
 
-  addTask: (worktreeId, title) =>
+  addTask: (worktreeId, title, description) =>
     set((s) => ({
       tasksByWorktreeId: {
         ...s.tasksByWorktreeId,
@@ -1253,11 +1300,43 @@ export const useIDE = create<State>((set, get) => ({
           {
             id: crypto.randomUUID(),
             title,
+            description: description?.trim() ? description.trim() : undefined,
             status: "todo",
             assignee: "Codex",
             updatedAt: "just now",
           },
         ],
+      },
+    })),
+
+  updateTask: (worktreeId, taskId, patch) =>
+    set((s) => ({
+      tasksByWorktreeId: {
+        ...s.tasksByWorktreeId,
+        [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).map((task) => {
+          if (task.id !== taskId) return task;
+          const nextTitle = patch.title !== undefined ? patch.title.trim() : task.title;
+          const nextDescription =
+            patch.description !== undefined
+              ? patch.description.trim() || undefined
+              : task.description;
+          return {
+            ...task,
+            title: nextTitle || task.title,
+            description: nextDescription,
+            updatedAt: "just now",
+          };
+        }),
+      },
+    })),
+
+  removeTask: (worktreeId, taskId) =>
+    set((s) => ({
+      tasksByWorktreeId: {
+        ...s.tasksByWorktreeId,
+        [worktreeId]: (s.tasksByWorktreeId[worktreeId] ?? []).filter(
+          (task) => task.id !== taskId,
+        ),
       },
     })),
 
@@ -1445,10 +1524,44 @@ export const useIDE = create<State>((set, get) => ({
       }
       // Drop messages for the closed session.
       const { [sessionId]: _dropped, ...restMessages } = s.messagesBySessionId;
+      // Remove from pinned lists.
+      const nextPinned: Record<string, string[]> = {};
+      for (const [wsId, pins] of Object.entries(s.pinnedSessionIdsByWorkspaceId)) {
+        nextPinned[wsId] = pins.filter((id) => id !== sessionId);
+      }
       return {
         sessionsByWorkspaceId: nextSessions,
         activeSessionIdByWorkspaceId: nextActive,
         messagesBySessionId: restMessages,
+        pinnedSessionIdsByWorkspaceId: nextPinned,
+      };
+    }),
+
+  pinSession: (sessionId) =>
+    set((s) => {
+      const workspaceId = s.activeWorkspaceId;
+      const activeId = s.activeSessionIdByWorkspaceId[workspaceId];
+      if (sessionId === activeId) return {};
+      const current = s.pinnedSessionIdsByWorkspaceId[workspaceId] ?? [];
+      if (current.includes(sessionId)) return {};
+      if (current.length >= 3) return {};
+      return {
+        pinnedSessionIdsByWorkspaceId: {
+          ...s.pinnedSessionIdsByWorkspaceId,
+          [workspaceId]: [...current, sessionId],
+        },
+      };
+    }),
+
+  unpinSession: (sessionId) =>
+    set((s) => {
+      const workspaceId = s.activeWorkspaceId;
+      const current = s.pinnedSessionIdsByWorkspaceId[workspaceId] ?? [];
+      return {
+        pinnedSessionIdsByWorkspaceId: {
+          ...s.pinnedSessionIdsByWorkspaceId,
+          [workspaceId]: current.filter((id) => id !== sessionId),
+        },
       };
     }),
 
@@ -1773,6 +1886,13 @@ export function useActiveSession(): WorkspaceTerminal | undefined {
     () => sessions.find((s) => s.id === activeId) ?? sessions[0],
     [sessions, activeId],
   );
+}
+
+const EMPTY_PINS: string[] = [];
+
+export function usePinnedSessionIds(): string[] {
+  const workspaceId = useIDE((s) => s.activeWorkspaceId);
+  return useIDE((s) => s.pinnedSessionIdsByWorkspaceId[workspaceId] ?? EMPTY_PINS);
 }
 
 const EMPTY_FILES: FileTab[] = [];
