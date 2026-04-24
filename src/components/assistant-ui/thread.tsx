@@ -180,77 +180,54 @@ const Composer: FC = () => {
   const [popover, setPopover] = useState<"files" | "slash" | null>(null);
   const [query, setQuery] = useState("");
 
+  // Reactive detection: watch composer.text directly from the assistant-ui
+  // runtime. More reliable than attaching DOM listeners — React re-runs this
+  // effect on every keystroke.
+  const composerText = useAuiState((s) => s.composer.text ?? "");
+
   useEffect(() => {
-    const shell = shellRef.current;
-    if (!shell) return;
-
-    const detect = () => {
-      const el = inputRef.current;
-      if (!el) return;
-      const caret = el.selectionStart ?? 0;
-      const before = el.value.slice(0, caret);
-      const m = before.match(/(?:^|\s)([@/])([^\s]*)$/);
-      if (!m) {
-        setPopover(null);
-        setQuery("");
-        return;
+    // Cache the textarea node so replaceTriggerWith can still reach it.
+    if (!inputRef.current) {
+      const shell = shellRef.current;
+      if (shell) {
+        const found = shell.querySelector("textarea");
+        if (found) inputRef.current = found as HTMLTextAreaElement;
       }
-      setQuery(m[2]);
-      setPopover(m[1] === "@" ? "files" : "slash");
-    };
+    }
 
-    let current: HTMLTextAreaElement | null = null;
-    const attach = (el: HTMLTextAreaElement) => {
-      if (current === el) return;
-      if (current) {
-        current.removeEventListener("input", detect);
-        current.removeEventListener("click", detect);
-        current.removeEventListener("keyup", detect);
-      }
-      current = el;
-      inputRef.current = el;
-      el.addEventListener("input", detect);
-      el.addEventListener("click", detect);
-      el.addEventListener("keyup", detect);
-      console.debug("[composer] @/slash detector attached to textarea");
-    };
+    const text = composerText;
+    if (!text) {
+      setPopover(null);
+      setQuery("");
+      return;
+    }
 
-    const tryAttach = () => {
-      const found = shell.querySelector("textarea");
-      if (found) attach(found as HTMLTextAreaElement);
-    };
+    // Extract last whitespace-separated token.
+    const match = text.match(/(?:^|\s)([@/])([^\s]*)$/);
+    if (!match) {
+      setPopover(null);
+      setQuery("");
+      return;
+    }
 
-    tryAttach();
-    const observer = new MutationObserver(tryAttach);
-    observer.observe(shell, { childList: true, subtree: true });
-
-    return () => {
-      observer.disconnect();
-      if (current) {
-        current.removeEventListener("input", detect);
-        current.removeEventListener("click", detect);
-        current.removeEventListener("keyup", detect);
-      }
-    };
-  }, []);
+    const trigger = match[1];
+    const q = match[2];
+    setQuery(q);
+    setPopover(trigger === "@" ? "files" : "slash");
+    console.debug("[composer] trigger=", trigger, "query=", q);
+  }, [composerText]);
 
   function replaceTriggerWith(replacement: string) {
     const el = inputRef.current;
     if (!el) return;
-    const caret = el.selectionStart ?? el.value.length;
-    const before = el.value.slice(0, caret);
-    const after = el.value.slice(caret);
-    const m = before.match(/((?:^|\s)[@/])[^\s]*$/);
-    if (!m) return;
-    const startIdx = before.lastIndexOf(m[0]);
-    const keepPrefix = before.slice(0, startIdx);
-    const lead = m[0].startsWith(" ") ? " " : "";
-    const next = keepPrefix + lead + replacement + " " + after;
-    const newCaret = (keepPrefix + lead + replacement + " ").length;
+    // Replace the last @-token or /-token with `replacement ` (replacement
+    // already carries its @/ prefix). Preserves leading whitespace so
+    // "ask @fo" → "ask @src/foo.ts ".
+    const next = el.value.replace(/((?:^|\s))[@/][^\s]*$/, `$1${replacement} `);
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
     setter?.call(el, next);
     el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.selectionStart = el.selectionEnd = newCaret;
+    el.selectionStart = el.selectionEnd = next.length;
     setPopover(null);
     setQuery("");
     el.focus();
