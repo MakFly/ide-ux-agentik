@@ -1,27 +1,51 @@
-import { ChevronDown, Plus, Star, GitBranch, Settings, FolderPlus, HelpCircle } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { useIDE, type Branch, type Workspace } from "@/store/ide";
+import { FolderPlus, HelpCircle, Plus, Settings, Star, GitBranch } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { useNavigate } from "@tanstack/react-router";
+
+import { cn } from "@/lib/utils";
+import { useIDE, type Branch } from "@/store/ide";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import { AddWorkspaceDialog } from "@/components/ide/add-workspace-dialog";
+import { PromptDialog } from "@/components/ide/prompt-dialog";
+import { SettingsSheet } from "@/components/ide/settings-sheet";
+import { TasksSection } from "@/components/ide/sidebar/tasks-section";
+import { WorktreesSection } from "@/components/ide/sidebar/worktrees-section";
+import { BranchesSkeleton } from "@/components/ide/skeletons/sidebar-skeletons";
+
+const SIDEBAR_SECTION_SCROLL_AREA_CLASS =
+  "scrollbar-visible max-h-[min(20rem,40vh)] overflow-y-auto pb-1 pr-1";
 
 function StatusDot({ status }: { status?: Branch["status"] }) {
   if (!status || status === "none") {
     return <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />;
   }
   if (status === "loading") {
-    return <span className="block h-2.5 w-2.5 shrink-0 animate-pulse rounded-full border border-muted-foreground/60" />;
+    return (
+      <span className="block h-2.5 w-2.5 shrink-0 animate-pulse rounded-full border border-muted-foreground/60" />
+    );
   }
   if (status === "warn") {
     return <span className="block h-2 w-2 shrink-0 rounded-full bg-status-warn" />;
   }
   if (status === "active") {
-    return <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-status-warn/15 text-[9px] font-bold text-status-warn">?</span>;
+    return (
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-status-warn/15 text-[9px] font-bold text-status-warn">
+        ?
+      </span>
+    );
   }
   return <span className="block h-2 w-2 shrink-0 rounded-full bg-primary" />;
 }
 
 function BranchRow({ branch, active }: { branch: Branch; active: boolean }) {
-  const { setActiveBranch, toggleStar } = useIDE();
+  const setActiveBranch = useIDE((s) => s.setActiveBranch);
+  const toggleStar = useIDE((s) => s.toggleStar);
 
   return (
     <div
@@ -39,9 +63,17 @@ function BranchRow({ branch, active }: { branch: Branch; active: boolean }) {
             e.stopPropagation();
             toggleStar(branch.id);
           }}
-          className={cn("transition-opacity", branch.starred ? "opacity-100" : "opacity-0 group-hover:opacity-60 hover:!opacity-100")}
+          className={cn(
+            "transition-opacity",
+            branch.starred ? "opacity-100" : "opacity-0 group-hover:opacity-60 hover:!opacity-100",
+          )}
         >
-          <Star className={cn("h-3 w-3", branch.starred ? "fill-status-warn text-status-warn" : "text-muted-foreground")} />
+          <Star
+            className={cn(
+              "h-3 w-3",
+              branch.starred ? "fill-status-warn text-status-warn" : "text-muted-foreground",
+            )}
+          />
         </button>
         <div className="ml-auto flex items-center gap-1.5 font-mono text-[11px]">
           {!!branch.added && <span className="text-status-add">+{branch.added}</span>}
@@ -53,116 +85,161 @@ function BranchRow({ branch, active }: { branch: Branch; active: boolean }) {
   );
 }
 
-function WorkspaceHeader({ ws, onAdd }: { ws: Workspace; onAdd: () => void }) {
-  return (
-    <div className="flex items-center gap-2 px-3 py-2">
-      <div
-        className="flex h-5 w-5 items-center justify-center rounded text-[11px] font-semibold text-white"
-        style={{ background: ws.color }}
-      >
-        {ws.letter}
-      </div>
-      <span className="text-[13px] font-medium text-foreground">{ws.name}</span>
-      <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-      <button
-        onClick={onAdd}
-        className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-        title="New branch"
-      >
-        <Plus className="h-3.5 w-3.5" />
-      </button>
-    </div>
-  );
-}
-
 export function Sidebar() {
-  const { workspaces, activeBranchId, showSidebar, addBranch, addWorkspace } = useIDE();
-  const [newBranchFor, setNewBranchFor] = useState<string | null>(null);
-  const [branchName, setBranchName] = useState("");
+  const navigate = useNavigate();
+  const workspaces = useIDE((s) => s.workspaces);
+  const activeBranchId = useIDE((s) => s.activeBranchId);
+  const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
+  const showSidebar = useIDE((s) => s.showSidebar);
+  const addBranch = useIDE((s) => s.addBranch);
+  const setActiveWorkspace = useIDE((s) => s.setActiveWorkspace);
+  const branchesLoading = useIDE((s) => s.branchesLoading);
+
+  const [branchDialogOpen, setBranchDialogOpen] = useState(false);
+  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
 
   if (!showSidebar) return null;
 
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
+  const activeBranch = activeWorkspace?.branches.find((b) => b.id === activeBranchId);
+  const defaultOpen = ["branches", "worktrees"];
+
   return (
-    <aside className="flex w-[260px] shrink-0 flex-col border-r border-border bg-sidebar">
-      <div className="px-3 pt-3 pb-1">
+    <aside className="flex h-full w-full min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-sidebar shadow-sm">
+      <div className="flex items-center justify-between px-3 pt-3 pb-2">
         <span className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
-          SUPERCONDUCTOR
+          GIT STATE
+        </span>
+        <span className="truncate rounded bg-accent/50 px-1.5 py-0.5 font-mono text-[10px] text-foreground">
+          {activeWorkspace?.name ?? "—"} project
         </span>
       </div>
 
-      <div className="flex-1 overflow-y-auto py-1">
-        {workspaces.map((ws) => (
-          <div key={ws.id} className="mb-1">
-            <WorkspaceHeader ws={ws} onAdd={() => setNewBranchFor(ws.id)} />
-            {newBranchFor === ws.id && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (branchName.trim()) {
-                    addBranch(ws.id, branchName.trim());
-                    toast.success(`Branch "${branchName.trim()}" created`);
-                    setBranchName("");
-                    setNewBranchFor(null);
-                  }
+      <div className="flex-1 overflow-y-auto">
+        <Accordion type="multiple" defaultValue={defaultOpen} className="flex flex-col gap-0">
+          {/* Branches of active project */}
+          <AccordionItem value="branches" className="border-b-0">
+            <div className="flex items-center pr-2">
+              <AccordionTrigger className="flex-1 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground hover:no-underline hover:text-foreground">
+                <span className="flex items-center gap-2">
+                  Branches
+                  {activeWorkspace && (
+                    <span className="font-mono text-[10px] normal-case tracking-normal text-muted-foreground/70">
+                      · {activeWorkspace.name} project
+                    </span>
+                  )}
+                  <span className="rounded bg-accent/60 px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-foreground">
+                    {activeWorkspace?.branches.length ?? 0}
+                  </span>
+                </span>
+              </AccordionTrigger>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setBranchDialogOpen(true);
                 }}
-                className="mx-1.5 mb-1"
+                className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                title="New branch"
               >
-                <input
-                  autoFocus
-                  value={branchName}
-                  onChange={(e) => setBranchName(e.target.value)}
-                  onBlur={() => {
-                    setNewBranchFor(null);
-                    setBranchName("");
-                  }}
-                  placeholder="branch name…"
-                  className="w-full rounded-md border border-primary/50 bg-input px-2 py-1.5 text-[12px] font-mono text-foreground focus:outline-none"
-                />
-              </form>
-            )}
-            {ws.branches.map((b) => (
-              <BranchRow key={b.id} branch={b} active={b.id === activeBranchId} />
-            ))}
-          </div>
-        ))}
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <AccordionContent className="pb-1 pt-0">
+              <div className={SIDEBAR_SECTION_SCROLL_AREA_CLASS}>
+                {branchesLoading ? (
+                  <BranchesSkeleton />
+                ) : (
+                  <>
+                    {activeWorkspace?.branches.map((b) => (
+                      <BranchRow key={b.id} branch={b} active={b.id === activeBranchId} />
+                    ))}
+                    {(!activeWorkspace || activeWorkspace.branches.length === 0) && (
+                      <div className="mx-3 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
+                        No branches.
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+
+          {/* Worktrees of active project */}
+          <WorktreesSection />
+
+          {/* Tasks of active branch */}
+          <TasksSection branchName={activeBranch?.name} />
+        </Accordion>
       </div>
 
       <div className="flex items-center gap-2 border-t border-border px-3 py-2">
+        <SettingsSheet>
+          <button
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="Settings"
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+        </SettingsSheet>
         <button
-          onClick={() => toast("Settings")}
+          onClick={() => setWorkspaceDialogOpen(true)}
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-        >
-          <Settings className="h-4 w-4" />
-        </button>
-        <button
-          onClick={() => {
-            const name = prompt("New workspace name:");
-            if (name?.trim()) {
-              addWorkspace(name.trim());
-              toast.success(`Workspace "${name.trim()}" added`);
-            }
-          }}
-          className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-          title="New workspace"
+          title="New project"
         >
           <FolderPlus className="h-4 w-4" />
         </button>
         <div className="mx-auto flex items-center gap-1">
-          {[0, 1, 2, 3].map((i) => (
-            <span
-              key={i}
-              className={cn("h-1.5 w-1.5 rounded-full", i === 0 ? "bg-foreground" : "bg-muted-foreground/40")}
+          {workspaces.map((ws) => (
+            <button
+              key={ws.id}
+              onClick={() => setActiveWorkspace(ws.id)}
+              title={ws.name}
+              className={cn(
+                "h-2 w-2 rounded-full transition-all hover:scale-125",
+                ws.id === activeWorkspaceId ? "ring-1 ring-offset-1 ring-offset-sidebar" : "opacity-60",
+              )}
+              style={{
+                background:
+                  ws.id === activeWorkspaceId
+                    ? ws.color
+                    : "var(--color-muted-foreground)",
+              }}
             />
           ))}
-          <Plus className="ml-1 h-3 w-3 text-muted-foreground" />
+          <button
+            onClick={() => setWorkspaceDialogOpen(true)}
+            className="ml-1 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            title="New project"
+          >
+            <Plus className="h-3 w-3" />
+          </button>
         </div>
         <button
-          onClick={() => toast("Need help? Check the docs.")}
+          onClick={() => navigate({ to: "/docs" })}
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+          title="Documentation"
         >
           <HelpCircle className="h-4 w-4" />
         </button>
       </div>
+
+      <PromptDialog
+        open={branchDialogOpen}
+        onOpenChange={setBranchDialogOpen}
+        title="New branch"
+        description={`Create a new branch in ${activeWorkspace?.name ?? "this project"}.`}
+        label="Branch name"
+        placeholder="feat/new-awesome-thing"
+        confirmLabel="Create branch"
+        onSubmit={(name) => {
+          if (activeWorkspaceId) {
+            addBranch(activeWorkspaceId, name);
+            toast.success(`Branch "${name}" created`);
+          }
+        }}
+      />
+
+      <AddWorkspaceDialog open={workspaceDialogOpen} onOpenChange={setWorkspaceDialogOpen} />
     </aside>
   );
 }
