@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { DDL } from "./schema.js";
+import { DDL } from "./schema.ts";
 
 export type Session = {
   id: string;
@@ -150,6 +150,7 @@ export const writeQueue = new WriteQueue();
 // ─── Sessions ─────────────────────────────────────────────────────────────────
 
 type CreateSessionParams = {
+  id?: string;
   workspaceId: string;
   cli: string;
   title?: string;
@@ -168,9 +169,9 @@ export const sessionsRepo = {
   create(params: CreateSessionParams): Session {
     const db = openDb();
     const now = Date.now();
-    const id = randomUUID();
+    const id = params.id ?? randomUUID();
     db.prepare<[string, string, string, string | null, string | null, string | null, number, number]>(
-      `INSERT INTO sessions (id, workspace_id, cli, title, model, approval_mode, created_at, updated_at)
+      `INSERT OR IGNORE INTO sessions (id, workspace_id, cli, title, model, approval_mode, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,

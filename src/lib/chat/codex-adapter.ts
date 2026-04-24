@@ -125,12 +125,14 @@ async function ensureSessionInDb(
 ): Promise<void> {
   try {
     await persistence.sessions.create(provider, {
+      id: sessionId,
       workspaceId,
       cli: "codex",
       title: "Codex session",
     });
-  } catch {
-    // session.create may fail if the session already exists — that is fine.
+    console.debug("[persistence] session ensured", sessionId);
+  } catch (e) {
+    console.warn("[persistence] sessions.create failed", sessionId, e);
   }
 }
 
@@ -159,17 +161,23 @@ export const codexAdapter: ChatModelAdapter = {
     const sessionId = activeSessionIdByWorkspaceId[activeWorkspaceId];
 
     if (sessionId) {
-      void ensureSessionInDb(provider, sessionId, activeWorkspaceId);
-      void persistence.messages
-        .append(provider, {
+      await ensureSessionInDb(provider, sessionId, activeWorkspaceId);
+      try {
+        const userParts = options.messages
+          .slice(-1)[0]
+          ?.content.filter((p) => p.type === "text")
+          .map((p) => ({ type: "text" as const, text: (p as { type: "text"; text: string }).text })) ?? [];
+        await persistence.messages.append(provider, {
           sessionId,
           role: "user",
-          parts: options.messages
-            .slice(-1)[0]
-            ?.content.filter((p) => p.type === "text")
-            .map((p) => ({ type: "text", text: (p as { type: "text"; text: string }).text })) ?? [],
-        })
-        .catch(() => {});
+          parts: userParts,
+        });
+        console.debug("[persistence] user message persisted", sessionId, userParts.length, "parts");
+      } catch (e) {
+        console.warn("[persistence] messages.append (user) failed", sessionId, e);
+      }
+    } else {
+      console.warn("[persistence] skipped user message persist — no sessionId");
     }
 
     // Ordered keys + entries by key. `agent_message` and `reasoning` items get
@@ -346,8 +354,8 @@ export const codexAdapter: ChatModelAdapter = {
       options.abortSignal.removeEventListener("abort", abortListener);
 
       if (sessionId && collectedParts.length > 0) {
-        void persistence.messages
-          .append(provider, {
+        try {
+          await persistence.messages.append(provider, {
             sessionId,
             role: "assistant",
             parts: collectedParts.map((p) => {
@@ -363,8 +371,11 @@ export const codexAdapter: ChatModelAdapter = {
                 };
               return { type: "text", text: JSON.stringify(p) };
             }),
-          })
-          .catch(() => {});
+          });
+          console.debug("[persistence] assistant message persisted", sessionId, collectedParts.length, "parts");
+        } catch (e) {
+          console.warn("[persistence] messages.append (assistant) failed", sessionId, e);
+        }
       }
     }
   },

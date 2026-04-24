@@ -84,18 +84,16 @@ export function useSessionHistory(
         const rows = await persistence.messages.list(provider, sessionId);
         if (cancelled) return;
 
-        // Keep only the last MAX_HISTORY_MESSAGES, ordered chronologically.
         const tail = rows.length > MAX_HISTORY_MESSAGES ? rows.slice(-MAX_HISTORY_MESSAGES) : rows;
-        // TODO: if tail.length === MAX_HISTORY_MESSAGES and rows.length > MAX_HISTORY_MESSAGES,
-        //       consider adding a "history truncated" indicator in the Thread.
-
         const mapped: ThreadMessageLike[] = [];
         for (const row of tail) {
           const msg = dbMessageToThreadMessage(row);
           if (msg) mapped.push(msg);
         }
+        console.debug("[persistence] session history loaded", sessionId, `${rows.length} rows → ${mapped.length} messages`);
         setMessages(mapped);
       } catch (err) {
+        console.warn("[persistence] messages.list failed", sessionId, err);
         if (!cancelled) setError(err instanceof Error ? err : new Error(String(err)));
       } finally {
         if (!cancelled) setLoading(false);

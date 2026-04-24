@@ -50,6 +50,7 @@ export type DbFileBlob = {
 };
 
 export type CreateSessionInput = {
+  id?: string;
   workspaceId: string;
   cli: string;
   title?: string;
