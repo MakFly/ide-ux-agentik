@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useIDE } from "@/store/ide";
 import { RemoteAgentProvider, type PtyHandle } from "@/lib/fs/remote-agent";
+import { NoAgentBanner } from "@/components/ide/no-agent-banner";
 
 /**
  * Reusable xterm + PTY pipe. Client-only — xterm touches DOM at import time,
@@ -21,6 +22,11 @@ type XtermLike = {
   dispose(): void;
   cols: number;
   rows: number;
+  hasSelection(): boolean;
+  getSelection(): string;
+  clearSelection(): void;
+  attachCustomKeyEventHandler(h: (e: KeyboardEvent) => boolean): void;
+  paste(data: string): void;
 };
 type FitLike = { fit(): void };
 
@@ -64,9 +70,18 @@ export function PtyTerminal({
   const codexApiKey = useIDE((s) => s.codexApiKey);
   const codexAuth = useIDE((s) => s.codexAuth);
   const hostRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<XtermLike | null>(null);
   const [ready, setReady] = useState(false);
 
+  const source = workspaces.find((w) => w.id === activeWorkspaceId)?.source;
+  const isRemote = source?.kind === "remote-agent";
+
   useEffect(() => {
+    // Skip xterm mount when there's no agent — the NoAgentBanner takes over.
+    if (!isRemote) {
+      setReady(true);
+      return;
+    }
     let ro: ResizeObserver | null = null;
     let cancelled = false;
     let term: XtermLike | null = null;
@@ -96,6 +111,31 @@ export function PtyTerminal({
       }) as unknown as XtermLike;
       const fit = new FitAddon() as unknown as FitLike;
       term = instance;
+      termRef.current = instance;
+
+      // Clipboard bindings: Ctrl+Shift+C copies selection, Ctrl+Shift+V pastes.
+      // Returning `false` from the handler tells xterm to skip its default
+      // action (so the browser's clipboard API takes over).
+      instance.attachCustomKeyEventHandler((e) => {
+        if (e.type !== "keydown") return true;
+        const ctrlShift = (e.ctrlKey || e.metaKey) && e.shiftKey;
+        if (ctrlShift && e.code === "KeyC") {
+          if (instance.hasSelection()) {
+            void navigator.clipboard.writeText(instance.getSelection()).catch(() => {});
+          }
+          return false;
+        }
+        if (ctrlShift && e.code === "KeyV") {
+          void navigator.clipboard
+            .readText()
+            .then((txt) => {
+              if (txt) instance.paste(txt);
+            })
+            .catch(() => {});
+          return false;
+        }
+        return true;
+      });
 
       instance.loadAddon(fit);
       instance.loadAddon(new WebLinksAddon());
@@ -110,46 +150,10 @@ export function PtyTerminal({
 
       for (const line of banner ?? []) instance.writeln(line);
 
-      const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
-      const source = workspace?.source;
-
       if (!source || source.kind !== "remote-agent") {
-        instance.writeln(
-          `\x1b[33m[No remote-agent workspace — cannot spawn ${cmd ?? "shell"}]\x1b[0m`,
-        );
-        instance.writeln("");
-        instance.writeln(
-          "\x1b[90mTo run real CLIs (codex, claude, opencode, gemini) you need\x1b[0m",
-        );
-        instance.writeln("\x1b[90ma Bun agent on a machine reachable over WebSocket.\x1b[0m");
-        instance.writeln("");
-        instance.writeln("\x1b[36m1.\x1b[0m Start the agent in another terminal:");
-        instance.writeln(
-          "   \x1b[32mbun run agent/server.ts --root ~/yourproject --port 7421 --token hello\x1b[0m",
-        );
-        instance.writeln("");
-        instance.writeln("\x1b[36m2.\x1b[0m In this app:");
-        instance.writeln(
-          "   Sidebar → \x1b[35m+ New project\x1b[0m → \x1b[35mRemote\x1b[0m",
-        );
-        instance.writeln("   URL:   \x1b[32mws://localhost:7421\x1b[0m");
-        instance.writeln("   Token: \x1b[32mhello\x1b[0m");
-        instance.writeln("");
-        instance.writeln(
-          "\x1b[36m3.\x1b[0m The new workspace is auto-selected. Open a CLI tab again.",
-        );
-        setReady(true);
-        ro = new ResizeObserver(() => {
-          try {
-            fit.fit();
-          } catch {
-            /* ignore */
-          }
-        });
-        ro.observe(host);
+        // Guarded above, should not reach here.
         return;
       }
-
       provider = new RemoteAgentProvider(source.label, source.url, source.token);
       try {
         await provider.connect();
@@ -241,14 +245,37 @@ export function PtyTerminal({
       ro?.disconnect();
       ptyHandle?.kill();
       term?.dispose();
+      termRef.current = null;
       void provider?.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWorkspaceId, cmd, JSON.stringify(args), resetKey]);
 
+  if (!isRemote) {
+    return (
+      <div className={`relative h-full w-full ${className ?? ""}`}>
+        <NoAgentBanner cmd={cmd} />
+      </div>
+    );
+  }
+
   return (
     <div className={`relative h-full w-full bg-black ${className ?? ""}`}>
-      <div ref={hostRef} className="h-full w-full px-2 py-1" />
+      <div
+        ref={hostRef}
+        className="h-full w-full px-2 py-1"
+        onContextMenu={(e) => {
+          // Right-click paste — works without leaving the PTY focus.
+          if (e.shiftKey) return; // Shift+right-click → browser native menu
+          e.preventDefault();
+          void navigator.clipboard
+            .readText()
+            .then((txt) => {
+              if (txt) termRef.current?.paste(txt);
+            })
+            .catch(() => {});
+        }}
+      />
       {!ready && (
         <div className="pointer-events-none absolute inset-0 px-3 py-2 text-[11px] text-muted-foreground">
           loading terminal…
