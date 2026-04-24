@@ -1,4 +1,4 @@
-import { AssistantRuntimeProvider, useLocalRuntime } from "@assistant-ui/react";
+import { AssistantRuntimeProvider, useLocalRuntime, type ThreadMessageLike } from "@assistant-ui/react";
 import { FlaskConical } from "lucide-react";
 import { Thread } from "@/components/assistant-ui/thread";
 import { codexAdapter } from "@/lib/chat/codex-adapter";
@@ -15,28 +15,43 @@ export function ChatView({
   sessionId?: string;
   workspaceSource?: WorkspaceSource;
 }) {
-  return <CodexChat kind={kind} sessionId={sessionId} workspaceSource={workspaceSource} />;
+  const { messages, loading, error } = useSessionHistory(sessionId, workspaceSource);
+
+  // Mount the runtime only once history has loaded. useLocalRuntime consumes
+  // initialMessages at creation time only; mounting earlier with an empty
+  // array freezes the thread as blank even after the async fetch resolves.
+  if (loading) {
+    return (
+      <div className="flex h-full min-h-0 w-full flex-col">
+        {kind !== "codex" && <ExperimentalBanner kind={kind} />}
+        <div className="flex-1 min-h-0 flex items-center justify-center text-[11px] text-muted-foreground">
+          Loading history…
+        </div>
+      </div>
+    );
+  }
+
+  return <CodexChat kind={kind} initialMessages={messages} error={error} />;
 }
 
 function CodexChat({
   kind,
-  sessionId,
-  workspaceSource,
+  initialMessages,
+  error,
 }: {
   kind: TerminalKind;
-  sessionId?: string;
-  workspaceSource?: WorkspaceSource;
+  initialMessages: ThreadMessageLike[];
+  error: Error | null;
 }) {
-  const { messages: initialMessages, loading } = useSessionHistory(sessionId, workspaceSource);
   const runtime = useLocalRuntime(codexAdapter, { initialMessages });
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <div className="flex h-full min-h-0 w-full flex-col">
         {kind !== "codex" && <ExperimentalBanner kind={kind} />}
-        {loading && (
-          <div className="border-b border-border bg-muted/30 px-3 py-1 text-[11px] text-muted-foreground">
-            Loading history…
+        {error && (
+          <div className="border-b border-destructive/30 bg-destructive/10 px-3 py-1 text-[11px] text-destructive">
+            Failed to load history: {error.message}
           </div>
         )}
         <div className="flex-1 min-h-0">
