@@ -13,6 +13,7 @@ import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as DocsRouteImport } from './routes/docs'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as DevDiffRouteImport } from './routes/_dev.diff'
 
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
@@ -34,18 +35,25 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DevDiffRoute = DevDiffRouteImport.update({
+  id: '/_dev/diff',
+  path: '/diff',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/docs': typeof DocsRoute
   '/settings': typeof SettingsRoute
+  '/diff': typeof DevDiffRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/docs': typeof DocsRoute
   '/settings': typeof SettingsRoute
+  '/diff': typeof DevDiffRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -53,13 +61,14 @@ export interface FileRoutesById {
   '/dashboard': typeof DashboardRoute
   '/docs': typeof DocsRoute
   '/settings': typeof SettingsRoute
+  '/_dev/diff': typeof DevDiffRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/dashboard' | '/docs' | '/settings'
+  fullPaths: '/' | '/dashboard' | '/docs' | '/settings' | '/diff'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/dashboard' | '/docs' | '/settings'
-  id: '__root__' | '/' | '/dashboard' | '/docs' | '/settings'
+  to: '/' | '/dashboard' | '/docs' | '/settings' | '/diff'
+  id: '__root__' | '/' | '/dashboard' | '/docs' | '/settings' | '/_dev/diff'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -67,6 +76,7 @@ export interface RootRouteChildren {
   DashboardRoute: typeof DashboardRoute
   DocsRoute: typeof DocsRoute
   SettingsRoute: typeof SettingsRoute
+  DevDiffRoute: typeof DevDiffRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -99,6 +109,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_dev/diff': {
+      id: '/_dev/diff'
+      path: '/diff'
+      fullPath: '/diff'
+      preLoaderRoute: typeof DevDiffRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -107,6 +124,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRoute: DashboardRoute,
   DocsRoute: DocsRoute,
   SettingsRoute: SettingsRoute,
+  DevDiffRoute: DevDiffRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

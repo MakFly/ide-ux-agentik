@@ -18,6 +18,23 @@ export type PtyHandle = {
   onExit(cb: (code: number | null, signal: string | null) => void): () => void;
 };
 
+/** A non-interactive chat subprocess (codex exec --json, claude -p). */
+export type ChatCli = "codex" | "claude";
+export type ChatEvent = Record<string, unknown>;
+export type ChatSpawnParams = {
+  cli: ChatCli;
+  prompt: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  extraArgs?: string[];
+};
+export type ChatHandle = {
+  id: string;
+  kill(signal?: string): void;
+  onEvent(cb: (event: ChatEvent) => void): () => void;
+  onEnd(cb: (code: number | null, signal: string | null) => void): () => void;
+};
+
 /**
  * Remote-agent provider.
  *
@@ -76,6 +93,8 @@ export class RemoteAgentProvider implements FsProvider {
   private watchers = new Map<string, (ev: FsWatchEvent) => void>();
   private ptyDataListeners = new Map<string, Set<(data: string) => void>>();
   private ptyExitListeners = new Map<string, Set<(code: number | null, signal: string | null) => void>>();
+  private chatEventListeners = new Map<string, Set<(event: ChatEvent) => void>>();
+  private chatEndListeners = new Map<string, Set<(code: number | null, signal: string | null) => void>>();
   private connecting: Promise<void> | null = null;
 
   constructor(
@@ -103,8 +122,25 @@ export class RemoteAgentProvider implements FsProvider {
         reject(new FsError(`Cannot reach agent at ${this.url}`, "io"));
       });
       ws.addEventListener("close", () => {
+        // 1. Reject any outstanding RPC call so awaiters fail fast.
         for (const p of this.pending.values()) p.reject(new FsError("Agent connection closed", "io"));
         this.pending.clear();
+        // 2. Synthesize terminal events for every in-flight stream so async
+        //    consumers (codex-adapter generator, xterm PTY loop) can unblock.
+        for (const [, listeners] of this.chatEndListeners) {
+          for (const cb of listeners) {
+            try { cb(null, "closed"); } catch { /* consumer threw — still clear */ }
+          }
+        }
+        for (const [, listeners] of this.ptyExitListeners) {
+          for (const cb of listeners) {
+            try { cb(null, "closed"); } catch { /* ignore */ }
+          }
+        }
+        this.chatEventListeners.clear();
+        this.chatEndListeners.clear();
+        this.ptyDataListeners.clear();
+        this.ptyExitListeners.clear();
       });
       ws.addEventListener("open", async () => {
         try {
@@ -160,6 +196,18 @@ export class RemoteAgentProvider implements FsProvider {
       for (const cb of this.ptyExitListeners.get(id) ?? []) cb(code, signal);
       this.ptyDataListeners.delete(id);
       this.ptyExitListeners.delete(id);
+      return;
+    }
+    if ("method" in msg && msg.method === "chat.event") {
+      const { id, event } = msg.params as { id: string; event: ChatEvent };
+      for (const cb of this.chatEventListeners.get(id) ?? []) cb(event);
+      return;
+    }
+    if ("method" in msg && msg.method === "chat.end") {
+      const { id, code, signal } = msg.params as { id: string; code: number | null; signal: string | null };
+      for (const cb of this.chatEndListeners.get(id) ?? []) cb(code, signal);
+      this.chatEventListeners.delete(id);
+      this.chatEndListeners.delete(id);
     }
   }
 
@@ -250,6 +298,44 @@ export class RemoteAgentProvider implements FsProvider {
 
   async ptyList(): Promise<{ sessions: Array<{ id: string; cmd: string; cwd: string; alive: boolean }> }> {
     return this.call("pty.list", {});
+  }
+
+  private onChatEvent(id: string, cb: (event: ChatEvent) => void): () => void {
+    if (!this.chatEventListeners.has(id)) this.chatEventListeners.set(id, new Set());
+    this.chatEventListeners.get(id)!.add(cb);
+    return () => this.chatEventListeners.get(id)?.delete(cb);
+  }
+
+  private onChatEnd(id: string, cb: (code: number | null, signal: string | null) => void): () => void {
+    if (!this.chatEndListeners.has(id)) this.chatEndListeners.set(id, new Set());
+    this.chatEndListeners.get(id)!.add(cb);
+    return () => this.chatEndListeners.get(id)?.delete(cb);
+  }
+
+  async chatSpawn(params: ChatSpawnParams): Promise<ChatHandle> {
+    const { id } = await this.call<{ id: string }>("chat.spawn", params);
+    return {
+      id,
+      kill: (signal) => { this.call<void>("chat.kill", { id, signal }).catch(() => {}); },
+      onEvent: (cb) => this.onChatEvent(id, cb),
+      onEnd: (cb) => this.onChatEnd(id, cb),
+    };
+  }
+
+  async gitStatus(workspacePath: string): Promise<{ branch: string; files: Array<{ path: string; staged: boolean; unstaged: boolean; kind: string }> }> {
+    return this.call("git.status", { workspacePath });
+  }
+
+  async gitStage(workspacePath: string, paths: string[]): Promise<{ ok: boolean }> {
+    return this.call("git.stage", { workspacePath, paths });
+  }
+
+  async gitCommit(workspacePath: string, message: string): Promise<{ sha: string | null; message: string }> {
+    return this.call("git.commit", { workspacePath, message });
+  }
+
+  async gitDiff(workspacePath: string, staged?: boolean): Promise<{ patch: string }> {
+    return this.call("git.diff", { workspacePath, staged: staged ?? false });
   }
 
   watch(path: string, cb: (ev: FsWatchEvent) => void): FsUnsubscribe {

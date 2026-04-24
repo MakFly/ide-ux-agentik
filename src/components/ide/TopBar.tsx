@@ -11,6 +11,8 @@ import {
 } from "lucide-react";
 import { useIDE } from "@/store/ide";
 import { toast } from "sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { GitActions } from "@/components/ide/topbar/git-actions";
 import {
   Select,
   SelectContent,
@@ -33,6 +35,7 @@ export function TopBar() {
   const { toggleSidebar, toggleFiles, workspaces, activeWorkspaceId, setActiveWorkspace } =
     useIDE();
   const activeBranchId = useIDE((s) => s.activeBranchId);
+  const hasWorkspace = !!activeWorkspaceId;
   const navigate = useNavigate();
 
   const copyWorkspaceLink = async () => {
@@ -48,6 +51,7 @@ export function TopBar() {
   };
 
   return (
+    <TooltipProvider delayDuration={400}>
     <header className="flex h-11 shrink-0 items-center justify-between border-b border-border bg-titlebar px-3 select-none">
       <div className="flex items-center gap-2">
         <button
@@ -99,6 +103,8 @@ export function TopBar() {
       </div>
 
       <div className="flex items-center gap-1">
+        <GitActions disabled={!hasWorkspace} />
+        <div className="mx-1 h-4 w-px bg-border/60" />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -148,5 +154,6 @@ export function TopBar() {
         </button>
       </div>
     </header>
+    </TooltipProvider>
   );
 }

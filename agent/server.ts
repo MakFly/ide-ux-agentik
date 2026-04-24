@@ -18,23 +18,68 @@
  *     for real-world use (wss://) or bind to 127.0.0.1 + SSH port-forward
  */
 
+import { spawn as cpSpawn, execFile as cpExecFile, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import fs from "node:fs/promises";
+import { createServer, type IncomingMessage } from "node:http";
 import path from "node:path";
+import { WebSocketServer, type WebSocket } from "ws";
 
-// node-pty provides a real PTY (pseudo-terminal); required for interactive CLI tools
-// (codex, claude, vim, etc.). Bun.spawn() is non-TTY so interactive apps misbehave.
+// node-pty provides a real PTY. Required for interactive CLIs (codex, claude, vim).
+// The agent runs under Node because Bun's spawn path breaks PTY IO for some CLIs.
 import type { IPty } from "node-pty";
 let nodePty: typeof import("node-pty") | null = null;
 try {
   nodePty = await import("node-pty");
 } catch {
-  // node-pty failed to load (missing native build). Falling back to Bun.spawn pipes.
-  // WARNING: Without a real PTY, interactive CLI tools (codex, claude, vim, etc.)
-  // will misbehave — they'll see a pipe, not a terminal, and may disable colors,
-  // readline, and interactive prompts. Basic commands (ls, cat, etc.) still work.
-  console.warn("[agent] node-pty unavailable — using Bun.spawn fallback (no real TTY)");
+  console.warn("[agent] node-pty unavailable — interactive CLIs will not work");
+}
+
+/** Host env vars safe to inherit in child processes. Secrets (AWS_*, GITHUB_TOKEN,
+ * OPENAI_API_KEY, etc.) are intentionally NOT in this list — clients must pass
+ * them explicitly via the `env` param. */
+const SAFE_ENV_KEYS = [
+  "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
+  "LOGNAME", "PWD", "HOSTNAME",
+] as const;
+
+function safeEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const base: Record<string, string> = {};
+  for (const k of SAFE_ENV_KEYS) {
+    const v = process.env[k];
+    if (typeof v === "string") base[k] = v;
+  }
+  return { ...base, ...extra };
+}
+
+const ALLOWED_CHAT_FLAGS: Record<string, ReadonlySet<string>> = {
+  codex: new Set(["--model", "-m", "--effort", "--profile", "-c"]),
+  claude: new Set(["--model", "--effort", "-p", "--output-format", "--verbose"]),
+};
+
+function validateExtraArgs(cli: string, args: string[]): string[] {
+  const allow = ALLOWED_CHAT_FLAGS[cli];
+  if (!allow) return [];
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i] ?? "");
+    // A flag token starts with `-`. Value tokens that follow are passed through as-is.
+    if (a.startsWith("-")) {
+      if (!allow.has(a)) {
+        throw new Error(`chat.spawn: forbidden flag "${a}" for cli "${cli}"`);
+      }
+      out.push(a);
+      // If the next token does not start with `-`, treat as value.
+      if (i + 1 < args.length && !String(args[i + 1] ?? "").startsWith("-")) {
+        out.push(String(args[++i]));
+      }
+    } else {
+      // Bare value without preceding flag — reject.
+      throw new Error(`chat.spawn: unexpected positional arg "${a}"`);
+    }
+  }
+  return out;
 }
 
 type ServerOpts = { root: string; port: number; token: string; host: string };
@@ -70,19 +115,86 @@ type PtySession = {
   cmd: string;
   cwd: string;
   alive: boolean;
-  // one of these is set depending on whether node-pty is available
   pty?: IPty;
-  proc?: ReturnType<typeof Bun.spawn>;
+};
+
+type ChatSession = {
+  id: string;
+  proc: ChildProcess;
+  alive: boolean;
 };
 
 type Ctx = {
   authed: boolean;
   watchers: Map<string, FSWatcher>;
   ptySessions: Map<string, PtySession>;
+  chatSessions: Map<string, ChatSession>;
   ws: { send: (d: string) => void };
 };
 
 type Handler = (params: Record<string, unknown>, ctx: Ctx) => Promise<unknown>;
+
+async function validateGitRepo(workspacePath: unknown): Promise<string> {
+  const wp = String(workspacePath ?? "").trim();
+  if (!wp) throw new Error("workspacePath is required");
+  try {
+    const stat = await fs.stat(wp);
+    if (!stat.isDirectory()) throw new Error(`not a directory: ${wp}`);
+  } catch (e) {
+    throw new Error(`workspacePath does not exist or is not accessible: ${wp}`);
+  }
+  try {
+    const gitStat = await fs.stat(path.join(wp, ".git"));
+    if (!gitStat.isDirectory() && !gitStat.isFile()) throw new Error();
+  } catch {
+    throw new Error(`not a git repository (no .git found): ${wp}`);
+  }
+  return wp;
+}
+
+function gitExec(args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    cpExecFile("git", args, { cwd, encoding: "utf8", env: safeEnv() }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(`git ${args[0]} failed: ${stderr || err.message}`));
+        return;
+      }
+      resolve({ stdout: stdout as string, stderr: stderr as string });
+    });
+  });
+}
+
+type GitEntry = { path: string; staged: boolean; unstaged: boolean; kind: string };
+
+function parseGitStatus(output: string): { branch: string; files: GitEntry[] } {
+  const lines = output.split("\n");
+  let branch = "HEAD";
+  const files: GitEntry[] = [];
+  for (const line of lines) {
+    if (line.startsWith("## ")) {
+      const branchPart = line.slice(3).split("...")[0];
+      branch = branchPart || "HEAD";
+      continue;
+    }
+    if (line.length < 2) continue;
+    const x = line[0]; // index (staged)
+    const y = line[1]; // worktree (unstaged)
+    const filePath = line.slice(3);
+    if (!filePath) continue;
+    let kind = "modified";
+    if (x === "?" && y === "?") kind = "untracked";
+    else if (x === "A" || y === "A") kind = "added";
+    else if (x === "D" || y === "D") kind = "deleted";
+    else if (x === "R" || y === "R") kind = "renamed";
+    files.push({
+      path: filePath,
+      staged: x !== " " && x !== "?" && x !== "!",
+      unstaged: y !== " " && y !== "?" && y !== "!",
+      kind,
+    });
+  }
+  return { branch, files };
+}
 
 const methods: Record<string, Handler> = {
   async auth({ token: t }, ctx) {
@@ -179,11 +291,7 @@ const methods: Record<string, Handler> = {
     }
 
     const id = randomUUID();
-    const mergedEnv: Record<string, string> = {
-      ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined) as [string, string][]),
-      TERM: "xterm-256color",
-      ...(env as Record<string, string> | undefined ?? {}),
-    };
+    const mergedEnv = safeEnv({ TERM: "xterm-256color", ...(env as Record<string, string> | undefined ?? {}) });
 
     if (nodePty) {
       const ptyProc = nodePty.spawn(spawnCmd, spawnArgs, {
@@ -206,37 +314,7 @@ const methods: Record<string, Handler> = {
         ctx.ptySessions.delete(id);
       });
     } else {
-      // Fallback: Bun.spawn with pipes (no real TTY — interactive apps will misbehave)
-      const proc = Bun.spawn([spawnCmd, ...spawnArgs], {
-        cwd: resolvedCwd,
-        env: mergedEnv,
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-
-      const session: PtySession = { id, cmd: spawnCmd, cwd: resolvedCwd, alive: true, proc };
-      ctx.ptySessions.set(id, session);
-
-      (async () => {
-        const decoder = new TextDecoder();
-        for await (const chunk of proc.stdout) {
-          ctx.ws.send(JSON.stringify({ jsonrpc: "2.0", method: "pty.data", params: { id, data: decoder.decode(chunk) } }));
-        }
-      })().catch(() => {});
-
-      (async () => {
-        const decoder = new TextDecoder();
-        for await (const chunk of proc.stderr) {
-          ctx.ws.send(JSON.stringify({ jsonrpc: "2.0", method: "pty.data", params: { id, data: decoder.decode(chunk) } }));
-        }
-      })().catch(() => {});
-
-      proc.exited.then((code) => {
-        session.alive = false;
-        ctx.ws.send(JSON.stringify({ jsonrpc: "2.0", method: "pty.exit", params: { id, code, signal: null } }));
-        ctx.ptySessions.delete(id);
-      }).catch(() => {});
+      throw new Error("node-pty unavailable: cannot spawn PTY sessions");
     }
 
     return { id };
@@ -247,8 +325,6 @@ const methods: Record<string, Handler> = {
     if (!session || !session.alive) throw new Error(`PTY session not found: ${id}`);
     if (session.pty) {
       session.pty.write(String(data));
-    } else if (session.proc?.stdin) {
-      session.proc.stdin.write(String(data));
     }
     return { ok: true };
   },
@@ -259,7 +335,6 @@ const methods: Record<string, Handler> = {
     if (session.pty) {
       session.pty.resize(Number(cols), Number(rows));
     }
-    // Fallback proc has no resize support
     return { ok: true };
   },
 
@@ -268,8 +343,6 @@ const methods: Record<string, Handler> = {
     if (!session) throw new Error(`PTY session not found: ${id}`);
     if (session.pty) {
       session.pty.kill(signal ? String(signal) : "SIGTERM");
-    } else if (session.proc) {
-      session.proc.kill(signal ? String(signal) : "SIGTERM");
     }
     session.alive = false;
     ctx.ptySessions.delete(String(id));
@@ -287,6 +360,189 @@ const methods: Record<string, Handler> = {
   },
 
   /**
+   * Spawn a non-interactive chat-CLI subprocess (no PTY). Meant for
+   * `codex exec --json` / `claude -p --output-format stream-json`: the child
+   * prints newline-delimited JSON events to stdout; each line is forwarded to
+   * the client as a `chat.event` notification. On process exit, `chat.end` is
+   * sent once with `{ id, code, signal }`.
+   *
+   * Params: { cli: "codex" | "claude", prompt: string, cwd?: string,
+   *          env?: Record<string,string>, extraArgs?: string[] }
+   */
+  async "chat.spawn"({ cli, prompt, cwd, env, extraArgs }, ctx) {
+    const cliKind = String(cli ?? "codex");
+    const text = String(prompt ?? "");
+    if (!text.trim()) throw new Error("chat.spawn: prompt is required");
+
+    let resolvedCwd: string;
+    try {
+      resolvedCwd = cwd ? safeResolve(String(cwd)) : root;
+    } catch {
+      resolvedCwd = root;
+    }
+
+    const safeExtra = Array.isArray(extraArgs) ? validateExtraArgs(cliKind, extraArgs as string[]) : [];
+
+    let execCmd: string;
+    let execArgs: string[];
+    if (cliKind === "codex") {
+      execCmd = "codex";
+      execArgs = ["exec", "--json", ...safeExtra, text];
+    } else if (cliKind === "claude") {
+      execCmd = "claude";
+      execArgs = [
+        "-p", text,
+        "--output-format", "stream-json",
+        "--verbose",
+        ...safeExtra,
+      ];
+    } else {
+      throw new Error(`chat.spawn: unsupported cli "${cliKind}"`);
+    }
+
+    const mergedEnv = safeEnv(env as Record<string, string> | undefined ?? {});
+
+    const id = randomUUID();
+    const proc = cpSpawn(execCmd, execArgs, {
+      cwd: resolvedCwd,
+      env: mergedEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const session: ChatSession = { id, proc, alive: true };
+    ctx.chatSessions.set(id, session);
+
+    // Buffer stdout, split on newlines, parse each as JSON, forward as event.
+    let buf = "";
+    proc.stdout?.setEncoding("utf8");
+    proc.stdout?.on("data", (chunk: string) => {
+      buf += chunk;
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let evt: unknown;
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          evt = { type: "raw", text: line };
+        }
+        ctx.ws.send(
+          JSON.stringify({ jsonrpc: "2.0", method: "chat.event", params: { id, event: evt } }),
+        );
+      }
+    });
+
+    // stderr is forwarded as a synthetic stderr event so the UI can surface it.
+    proc.stderr?.setEncoding("utf8");
+    proc.stderr?.on("data", (chunk: string) => {
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "chat.event",
+          params: { id, event: { type: "stderr", text: chunk } },
+        }),
+      );
+    });
+
+    proc.on("exit", (code, signal) => {
+      if (!session.alive) return; // error handler already ended this session
+      session.alive = false;
+      // Flush any trailing line that did not end with \n.
+      if (buf.trim()) {
+        try {
+          const evt = JSON.parse(buf.trim());
+          ctx.ws.send(
+            JSON.stringify({ jsonrpc: "2.0", method: "chat.event", params: { id, event: evt } }),
+          );
+        } catch {
+          /* ignore malformed trailing line */
+        }
+        buf = "";
+      }
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "chat.end",
+          params: { id, code, signal: signal ?? null },
+        }),
+      );
+      ctx.chatSessions.delete(id);
+    });
+
+    proc.on("error", (err) => {
+      if (!session.alive) return; // already ended
+      session.alive = false;
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "chat.event",
+          params: { id, event: { type: "error", message: err.message } },
+        }),
+      );
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "chat.end",
+          params: { id, code: null, signal: "error" },
+        }),
+      );
+      ctx.chatSessions.delete(id);
+    });
+
+    return { id };
+  },
+
+  async "chat.kill"({ id, signal }, ctx) {
+    const session = ctx.chatSessions.get(String(id));
+    if (!session) throw new Error(`chat session not found: ${id}`);
+    try {
+      session.proc.kill((signal ? String(signal) : "SIGTERM") as NodeJS.Signals);
+    } catch {
+      /* ignore */
+    }
+    session.alive = false;
+    return { ok: true };
+  },
+
+  /**
+   * Git helpers. Each RPC validates that `workspacePath` exists and contains
+   * a `.git/` directory. All git invocations use `execFile` — no shell, no
+   * string interpolation.
+   */
+  async "git.status"({ workspacePath }) {
+    const cwd = await validateGitRepo(workspacePath);
+    const { stdout } = await gitExec(["status", "--porcelain=v1", "-b"], cwd);
+    return parseGitStatus(stdout);
+  },
+
+  async "git.stage"({ workspacePath, paths }) {
+    const cwd = await validateGitRepo(workspacePath);
+    if (!Array.isArray(paths) || paths.length === 0) throw new Error("git.stage: paths must be a non-empty array");
+    const safePaths = (paths as unknown[]).map((p) => String(p));
+    await gitExec(["add", "--", ...safePaths], cwd);
+    return { ok: true };
+  },
+
+  async "git.commit"({ workspacePath, message }) {
+    const cwd = await validateGitRepo(workspacePath);
+    const msg = String(message ?? "").trim();
+    if (!msg) throw new Error("git.commit: message must not be empty");
+    const { stdout } = await gitExec(["commit", "-m", msg], cwd);
+    // Parse the sha from the first line: [branch abc1234] message
+    const match = stdout.match(/\[[\w/\-.]+ ([a-f0-9]+)\]/);
+    return { sha: match?.[1] ?? null, message: msg };
+  },
+
+  async "git.diff"({ workspacePath, staged }) {
+    const cwd = await validateGitRepo(workspacePath);
+    const args = staged ? ["diff", "--cached"] : ["diff"];
+    const { stdout } = await gitExec(args, cwd);
+    return { patch: stdout };
+  },
+
+  /**
    * One-shot non-interactive command. Captures stdout+stderr up to `timeoutMs`
    * (default 10s), then returns { exitCode, stdout, stderr }. Useful for
    * provider checks like `codex --version`.
@@ -299,111 +555,150 @@ const methods: Record<string, Handler> = {
     } catch {
       resolvedCwd = root;
     }
-    const mergedEnv: Record<string, string> = {
-      ...Object.fromEntries(
-        Object.entries(process.env).filter(([, v]) => v !== undefined) as [string, string][],
-      ),
-      ...(env as Record<string, string> | undefined ?? {}),
-    };
-    const proc = Bun.spawn([String(cmd), ...(Array.isArray(args) ? (args as string[]) : [])], {
-      cwd: resolvedCwd,
-      env: mergedEnv,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const mergedEnv = safeEnv(env as Record<string, string> | undefined ?? {});
+    const proc = cpSpawn(
+      String(cmd),
+      Array.isArray(args) ? (args as string[]) : [],
+      { cwd: resolvedCwd, env: mergedEnv, stdio: ["ignore", "pipe", "pipe"] },
+    );
 
     const limit = typeof timeoutMs === "number" ? timeoutMs : 10_000;
     const killer = setTimeout(() => {
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        /* ignore */
-      }
+      try { proc.kill("SIGTERM"); } catch { /* ignore */ }
     }, limit);
 
+    const collect = (stream: NodeJS.ReadableStream | null): Promise<string> =>
+      new Promise((resolve) => {
+        if (!stream) return resolve("");
+        const chunks: Buffer[] = [];
+        stream.on("data", (c: Buffer) => chunks.push(c));
+        stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        stream.on("error", () => resolve(""));
+      });
+
     const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text().catch(() => ""),
-      new Response(proc.stderr).text().catch(() => ""),
-      proc.exited,
+      collect(proc.stdout),
+      collect(proc.stderr),
+      new Promise<number | null>((resolve) => proc.on("exit", (c) => resolve(c))),
     ]);
     clearTimeout(killer);
     return { exitCode: code, stdout, stderr };
   },
 };
 
-Bun.serve({
-  hostname: host,
-  port,
-  fetch(req, srv) {
-    const upgraded = srv.upgrade(req, {
-      data: { authed: false, watchers: new Map<string, FSWatcher>(), ptySessions: new Map<string, PtySession>(), ws: null },
+// Node HTTP server: serves the health probe and upgrades to WebSocket.
+const httpServer = createServer((req, res) => {
+  // Health probe used by the webapp footer (different origin in dev). CORS
+  // intentionally open: the payload reveals only {service, root, ready} and
+  // all authenticated work goes through the WebSocket + token.
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET, OPTIONS",
+      "access-control-allow-headers": "*",
     });
-    if (upgraded) return;
-    return new Response(
-      JSON.stringify({ service: "ide-ux-agentik-agent", root, ready: true }),
-      { headers: { "content-type": "application/json" } },
-    );
-  },
-  websocket: {
-    open(ws) {
-      (ws.data as Ctx).ws = { send: (d: string) => ws.send(d) };
-      const authTimeout = setTimeout(() => {
-        if (!(ws.data as Ctx).authed) {
-          ws.close(4401, "auth timeout");
-        }
-      }, 5000);
-      (ws.data as unknown as { authTimeout: NodeJS.Timeout }).authTimeout = authTimeout;
-    },
-    async message(ws, raw) {
-      const ctx = ws.data as Ctx;
-      let msg: { jsonrpc?: string; id?: string | number; method?: string; params?: Record<string, unknown> };
-      try {
-        msg = JSON.parse(String(raw));
-      } catch {
-        return;
-      }
-      if (!msg.method || typeof msg.id !== "number" && typeof msg.id !== "string") return;
-
-      const handler = methods[msg.method];
-      if (!handler) {
-        ws.send(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } }));
-        return;
-      }
-      if (!ctx.authed && msg.method !== "auth") {
-        ws.send(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32001, message: "unauthenticated" } }));
-        return;
-      }
-      try {
-        const result = await handler(msg.params ?? {}, ctx);
-        if (msg.method === "auth") {
-          clearTimeout((ws.data as unknown as { authTimeout: NodeJS.Timeout }).authTimeout);
-        }
-        ws.send(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }));
-      } catch (e) {
-        ws.send(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: msg.id,
-            error: { code: -32000, message: e instanceof Error ? e.message : String(e) },
-          }),
-        );
-      }
-    },
-    close(ws) {
-      const ctx = ws.data as Ctx;
-      for (const w of ctx.watchers.values()) w.close();
-      ctx.watchers.clear();
-      for (const session of ctx.ptySessions.values()) {
-        try {
-          if (session.pty) session.pty.kill("SIGTERM");
-          else if (session.proc) session.proc.kill("SIGTERM");
-        } catch {}
-      }
-      ctx.ptySessions.clear();
-    },
-  },
+    res.end();
+    return;
+  }
+  res.writeHead(200, {
+    "content-type": "application/json",
+    "access-control-allow-origin": "*",
+  });
+  res.end(JSON.stringify({ service: "ide-ux-agentik-agent", root, ready: true }));
 });
+
+const wss = new WebSocketServer({ server: httpServer });
+
+type WsContext = Ctx & { authTimeout?: NodeJS.Timeout };
+const contexts = new WeakMap<WebSocket, WsContext>();
+
+wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
+  const ctx: WsContext = {
+    authed: false,
+    watchers: new Map<string, FSWatcher>(),
+    ptySessions: new Map<string, PtySession>(),
+    chatSessions: new Map<string, ChatSession>(),
+    ws: { send: (d: string) => ws.send(d) },
+  };
+  contexts.set(ws, ctx);
+  ctx.authTimeout = setTimeout(() => {
+    if (!ctx.authed) ws.close(4401, "auth timeout");
+  }, 5000);
+
+  ws.on("message", async (raw) => {
+    let msg: {
+      jsonrpc?: string;
+      id?: string | number;
+      method?: string;
+      params?: Record<string, unknown>;
+    };
+    try {
+      msg = JSON.parse(raw.toString("utf8"));
+    } catch {
+      return;
+    }
+    if (!msg.method || (typeof msg.id !== "number" && typeof msg.id !== "string")) return;
+
+    const handler = methods[msg.method];
+    if (!handler) {
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: msg.id,
+          error: { code: -32601, message: "method not found" },
+        }),
+      );
+      return;
+    }
+    if (!ctx.authed && msg.method !== "auth") {
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: msg.id,
+          error: { code: -32001, message: "unauthenticated" },
+        }),
+      );
+      return;
+    }
+    try {
+      const result = await handler(msg.params ?? {}, ctx);
+      if (msg.method === "auth" && ctx.authTimeout) clearTimeout(ctx.authTimeout);
+      ws.send(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }));
+    } catch (e) {
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: msg.id,
+          error: { code: -32000, message: e instanceof Error ? e.message : String(e) },
+        }),
+      );
+    }
+  });
+
+  ws.on("close", () => {
+    for (const w of ctx.watchers.values()) w.close();
+    ctx.watchers.clear();
+    for (const session of ctx.ptySessions.values()) {
+      try {
+        if (session.pty) session.pty.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+    }
+    ctx.ptySessions.clear();
+    for (const session of ctx.chatSessions.values()) {
+      try {
+        session.proc.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+    }
+    ctx.chatSessions.clear();
+    if (ctx.authTimeout) clearTimeout(ctx.authTimeout);
+  });
+});
+
+httpServer.listen(port, host);
 
 console.log(`[agent] listening on ws://${host}:${port}  root=${root}  token=${token.slice(0, 6)}…`);
 console.log(`[agent] connect from the webapp: wss://<public-host>:${port}  + token`);
