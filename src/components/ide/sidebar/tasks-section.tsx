@@ -10,7 +10,7 @@ import {
 import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
-import { useIDE, useCurrentTasks, type BranchTask, type TaskStatus } from "@/store/ide";
+import { useIDE, useCurrentTasks, useCurrentWorktree, type BranchTask, type TaskStatus } from "@/store/ide";
 import {
   AccordionContent,
   AccordionItem,
@@ -49,7 +49,7 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
 };
 const STATUSES: TaskStatus[] = ["todo", "in_progress", "blocked", "done"];
 
-function TaskRow({ task, branchId }: { task: BranchTask; branchId: string }) {
+function TaskRow({ task, worktreeId }: { task: BranchTask; worktreeId: string }) {
   const setTaskStatus = useIDE((s) => s.setTaskStatus);
 
   return (
@@ -71,7 +71,7 @@ function TaskRow({ task, branchId }: { task: BranchTask; branchId: string }) {
           {STATUSES.map((s) => (
             <DropdownMenuItem
               key={s}
-              onSelect={() => setTaskStatus(branchId, task.id, s)}
+              onSelect={() => setTaskStatus(worktreeId, task.id, s)}
               className={cn("gap-2 text-[12.5px]", task.status === s && "font-medium")}
             >
               <span className={cn("rounded p-0.5", taskStatusClass(s))}>
@@ -102,7 +102,8 @@ function TaskRow({ task, branchId }: { task: BranchTask; branchId: string }) {
 
 export function TasksSection({ branchName }: { branchName: string | undefined }) {
   const tasks = useCurrentTasks();
-  const activeBranchId = useIDE((s) => s.activeBranchId);
+  const currentWorktree = useCurrentWorktree();
+  const activeWorktreeId = currentWorktree?.id ?? "";
   const addTask = useIDE((s) => s.addTask);
   const tasksLoading = useIDE((s) => s.tasksLoading);
 
@@ -151,7 +152,7 @@ export function TasksSection({ branchName }: { branchName: string | undefined })
           ) : (
             <>
               {tasks.map((task) => (
-                <TaskRow key={task.id} task={task} branchId={activeBranchId} />
+                <TaskRow key={task.id} task={task} worktreeId={activeWorktreeId} />
               ))}
               {tasks.length === 0 && (
                 <div className="mx-3 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
@@ -172,7 +173,7 @@ export function TasksSection({ branchName }: { branchName: string | undefined })
         placeholder="Investigate worktree boot race"
         confirmLabel="Create task"
         onSubmit={(value) => {
-          addTask(activeBranchId, value);
+          addTask(activeWorktreeId, value);
           toast.success(`Task created on ${branchName ?? "branch"}`);
         }}
       />

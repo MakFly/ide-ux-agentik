@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import {
   useIDE,
   useCurrentActiveTab,
+  useCurrentBranches,
   useCurrentOpenFiles,
   useCurrentTasks,
   useCurrentWorktree,
@@ -476,8 +477,9 @@ function WorkspaceLegacy() {
   const previewMode = useIDE((s) => s.previewMode);
   const tasks = useCurrentTasks();
   const currentWorktree = useCurrentWorktree();
+  const currentBranches = useCurrentBranches();
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
-  const branch = workspace?.branches.find((b) => b.id === activeBranchId);
+  const branch = currentBranches.find((b) => b.id === activeBranchId);
   const [closedTabs, setClosedTabs] = useState<string[]>([]);
 
   const terminalTabs = useMemo(

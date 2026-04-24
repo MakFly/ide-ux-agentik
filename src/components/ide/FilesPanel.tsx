@@ -9,7 +9,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { FileTypeIcon } from "@/components/ide/file-icon";
-import { useIDE, useCurrentExpandedFolders, useCurrentGitStatus, type ScopeKey, scopeKey } from "@/store/ide";
+import { useIDE, useCurrentBranches, useCurrentExpandedFolders, useCurrentGitStatus, type ScopeKey, scopeKey } from "@/store/ide";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useState } from "react";
@@ -46,6 +46,7 @@ export function FilesPanel() {
   const loadRoot = useIDE((s) => s.loadRoot);
   const refreshGitStatus = useIDE((s) => s.refreshGitStatus);
   const gitStatus = useCurrentGitStatus();
+  const currentBranches = useCurrentBranches();
 
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [fileDialogFor, setFileDialogFor] = useState<string | null | false>(false);
@@ -54,7 +55,7 @@ export function FilesPanel() {
   if (!showFiles) return null;
 
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
-  const branch = activeWorkspace?.branches.find((b) => b.id === activeBranchId);
+  const branch = currentBranches.find((b) => b.id === activeBranchId);
   const changesCount = gitStatus.size > 0 ? gitStatus.size : ((branch?.added ?? 0) + (branch?.removed ?? 0) > 0 ? 1 : 0);
 
   const activeScopeKey: ScopeKey = scopeKey(activeWorkspaceId, activeBranchId);

@@ -2,6 +2,7 @@ import { CircleDot, Copy, ExternalLink, GitBranch, GitCompare, GitPullRequest } 
 import { toast } from "sonner";
 import {
   useIDE,
+  useCurrentBranches,
   useCurrentTasks,
   useCurrentWorktree,
   useCurrentWorktrees,
@@ -21,8 +22,9 @@ export function BranchDetailsPopover() {
   const workspaces = useIDE((s) => s.workspaces);
   const activeBranchId = useIDE((s) => s.activeBranchId);
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
+  const currentBranches = useCurrentBranches();
   const workspace = workspaces.find((item) => item.id === activeWorkspaceId);
-  const branch = workspace?.branches.find((item) => item.id === activeBranchId);
+  const branch = currentBranches.find((item) => item.id === activeBranchId);
   const worktrees = useCurrentWorktrees();
   const currentWorktree = useCurrentWorktree();
   const tasks = useCurrentTasks();
@@ -172,8 +174,9 @@ export function BranchDetailsPopover() {
 
 export function StatusBar() {
   const { workspaces, activeBranchId, activeWorkspaceId } = useIDE();
+  const currentBranches = useCurrentBranches();
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
-  const branch = workspace?.branches.find((b) => b.id === activeBranchId);
+  const branch = currentBranches.find((b) => b.id === activeBranchId);
   const currentWorktree = useCurrentWorktree();
   const tasks = useCurrentTasks();
 

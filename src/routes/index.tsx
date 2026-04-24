@@ -97,10 +97,10 @@ const MockModelAdapter: ChatModelAdapter = {
       last?.content
         ?.map((p) => (p.type === "text" ? p.text : ""))
         .join(" ") ?? "";
-    const { webSearch, thinking, activeWorkspaceId, activeBranchId, workspaces } =
+    const { webSearch, thinking, activeWorkspaceId, activeBranchId, workspaces, branchesByWorkspaceId } =
       useIDE.getState();
     const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
-    const branch = workspace?.branches.find((b) => b.id === activeBranchId);
+    const branch = (branchesByWorkspaceId[activeWorkspaceId] ?? []).find((b) => b.id === activeBranchId);
     const scope = `\`${workspace?.name ?? "?"}:${branch?.name ?? "?"}\``;
     const kind = getActiveSessionKind();
     await new Promise((r) => setTimeout(r, thinking ? 900 : 400));
@@ -146,7 +146,8 @@ function Index() {
       if (workspaces.some((w) => w.id === workspace)) setActiveWorkspace(workspace);
     }
     if (branch && branch !== activeBranchId) {
-      const exists = workspaces.some((w) => w.branches.some((b) => b.id === branch));
+      const { branchesByWorkspaceId: branchMap } = useIDE.getState();
+      const exists = Object.values(branchMap).some((branches) => branches.some((b) => b.id === branch));
       if (exists) setActiveBranch(branch);
     }
     if (tab) setActiveTab(tab as TabId);

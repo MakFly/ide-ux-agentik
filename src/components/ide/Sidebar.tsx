@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
 
 import { cn } from "@/lib/utils";
-import { useIDE, type Branch } from "@/store/ide";
+import { useIDE, useCurrentBranches, type Branch } from "@/store/ide";
 import {
   Accordion,
   AccordionContent,
@@ -94,6 +94,7 @@ export function Sidebar() {
   const addBranch = useIDE((s) => s.addBranch);
   const setActiveWorkspace = useIDE((s) => s.setActiveWorkspace);
   const branchesLoading = useIDE((s) => s.branchesLoading);
+  const currentBranches = useCurrentBranches();
 
   const [branchDialogOpen, setBranchDialogOpen] = useState(false);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
@@ -101,7 +102,7 @@ export function Sidebar() {
   if (!showSidebar) return null;
 
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
-  const activeBranch = activeWorkspace?.branches.find((b) => b.id === activeBranchId);
+  const activeBranch = currentBranches.find((b) => b.id === activeBranchId);
   const defaultOpen = ["branches", "worktrees"];
 
   return (
@@ -129,7 +130,7 @@ export function Sidebar() {
                     </span>
                   )}
                   <span className="rounded bg-accent/60 px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-foreground">
-                    {activeWorkspace?.branches.length ?? 0}
+                    {currentBranches.length}
                   </span>
                 </span>
               </AccordionTrigger>
@@ -150,10 +151,10 @@ export function Sidebar() {
                   <BranchesSkeleton />
                 ) : (
                   <>
-                    {activeWorkspace?.branches.map((b) => (
+                    {currentBranches.map((b) => (
                       <BranchRow key={b.id} branch={b} active={b.id === activeBranchId} />
                     ))}
-                    {(!activeWorkspace || activeWorkspace.branches.length === 0) && (
+                    {currentBranches.length === 0 && (
                       <div className="mx-3 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
                         No branches.
                       </div>

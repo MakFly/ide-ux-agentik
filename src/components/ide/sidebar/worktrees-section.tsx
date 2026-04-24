@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
   useIDE,
+  useCurrentBranches,
   useProjectWorktrees,
   useCurrentWorktree,
   type TabId,
@@ -34,13 +35,14 @@ export function WorktreesSection() {
   const setActiveTab = useIDE((s) => s.setActiveTab);
   const addWorktree = useIDE((s) => s.addWorktree);
   const worktreesLoading = useIDE((s) => s.worktreesLoading);
+  const currentBranches = useCurrentBranches();
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const project = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
-  const activeBranch = project?.branches.find((branch) => branch.id === activeBranchId);
+  const activeBranch = currentBranches.find((branch) => branch.id === activeBranchId);
 
   const branchNameById = new Map(
-    (project?.branches ?? []).map((branch) => [branch.id, branch.name] as const),
+    currentBranches.map((branch) => [branch.id, branch.name] as const),
   );
 
   return (
