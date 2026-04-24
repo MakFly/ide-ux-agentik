@@ -220,7 +220,15 @@ const ComposerAction: FC = () => {
   const toggleThinking = useIDE((s) => s.toggleThinking);
   const webSearch = useIDE((s) => s.webSearch);
   const toggleWebSearch = useIDE((s) => s.toggleWebSearch);
-  const activeAgent = useIDE((s) => s.activeAgent);
+  // Derive the CLI kind from the active session (not the global activeAgent
+  // setting). Multiple sessions can coexist in a workspace with different
+  // CLIs; the pills must reflect the session currently rendered.
+  const activeAgent = useIDE((s) => {
+    const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
+    const activeId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
+    const session = sessions.find((t) => t.id === activeId);
+    return session?.kind ?? s.activeAgent;
+  });
   const messagesChars = useAuiState((s) =>
     s.thread.messages.reduce((acc, m) => acc + messageTextLength(m as MessageLike), 0),
   );
