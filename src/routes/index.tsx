@@ -93,14 +93,19 @@ function getActiveSessionKind(): AgentKind {
 const MockModelAdapter: ChatModelAdapter = {
   async run({ messages }) {
     const last = messages[messages.length - 1];
-    const text =
-      last?.content
-        ?.map((p) => (p.type === "text" ? p.text : ""))
-        .join(" ") ?? "";
-    const { webSearch, thinking, activeWorkspaceId, activeBranchId, workspaces, branchesByWorkspaceId } =
-      useIDE.getState();
+    const text = last?.content?.map((p) => (p.type === "text" ? p.text : "")).join(" ") ?? "";
+    const {
+      webSearch,
+      thinking,
+      activeWorkspaceId,
+      activeBranchId,
+      workspaces,
+      branchesByWorkspaceId,
+    } = useIDE.getState();
     const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
-    const branch = (branchesByWorkspaceId[activeWorkspaceId] ?? []).find((b) => b.id === activeBranchId);
+    const branch = (branchesByWorkspaceId[activeWorkspaceId] ?? []).find(
+      (b) => b.id === activeBranchId,
+    );
     const scope = `\`${workspace?.name ?? "?"}:${branch?.name ?? "?"}\``;
     const kind = getActiveSessionKind();
     await new Promise((r) => setTimeout(r, thinking ? 900 : 400));
@@ -147,7 +152,9 @@ function Index() {
     }
     if (branch && branch !== activeBranchId) {
       const { branchesByWorkspaceId: branchMap } = useIDE.getState();
-      const exists = Object.values(branchMap).some((branches) => branches.some((b) => b.id === branch));
+      const exists = Object.values(branchMap).some((branches) =>
+        branches.some((b) => b.id === branch),
+      );
       if (exists) setActiveBranch(branch);
     }
     if (tab) setActiveTab(tab as TabId);
@@ -203,6 +210,8 @@ function ResizableLayout() {
   const isMobile = useIsMobile();
   const openFiles = useCurrentOpenFiles();
   const hasOpenFile = openFiles.length > 0;
+  const showSidebar = useIDE((s) => s.showSidebar);
+  const showFiles = useIDE((s) => s.showFiles);
 
   if (isMobile) {
     return (
@@ -212,33 +221,52 @@ function ResizableLayout() {
     );
   }
 
+  const layoutId = `ide-layout-${showSidebar ? "s" : ""}${showFiles ? "f" : ""}${hasOpenFile ? "e" : ""}`;
+  const workspaceDefault = hasOpenFile
+    ? showSidebar && showFiles
+      ? "32%"
+      : "48%"
+    : showSidebar && showFiles
+      ? "66%"
+      : showSidebar || showFiles
+        ? "82%"
+        : "100%";
+
   return (
-    <PanelGroup orientation="horizontal" id="ide-layout" className="flex min-h-0 flex-1">
-      <Panel defaultSize="16%" minSize="180px" maxSize="30%" className="flex min-w-0">
-        <Sidebar />
-      </Panel>
-      <PanelResizeHandle className="group relative w-2 shrink-0 cursor-col-resize transition-colors hover:bg-accent/40">
-        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/60 group-hover:bg-primary/50" />
-      </PanelResizeHandle>
-      <Panel defaultSize={hasOpenFile ? "32%" : "66%"} minSize="320px" className="flex min-w-0">
-        <Workspace />
-      </Panel>
-      <PanelResizeHandle className="group relative w-2 shrink-0 cursor-col-resize transition-colors hover:bg-accent/40">
-        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/60 group-hover:bg-primary/50" />
-      </PanelResizeHandle>
-      {hasOpenFile && (
+    <PanelGroup orientation="horizontal" id={layoutId} className="flex min-h-0 flex-1">
+      {showSidebar && (
         <>
-          <Panel defaultSize="34%" minSize="320px" className="flex min-w-0">
-            <EditorPanel />
+          <Panel defaultSize="16%" minSize="180px" maxSize="30%" className="flex min-w-0">
+            <Sidebar />
           </Panel>
           <PanelResizeHandle className="group relative w-2 shrink-0 cursor-col-resize transition-colors hover:bg-accent/40">
             <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/60 group-hover:bg-primary/50" />
           </PanelResizeHandle>
         </>
       )}
-      <Panel defaultSize="18%" minSize="200px" maxSize="35%" className="flex min-w-0">
-        <FilesPanel />
+      <Panel defaultSize={workspaceDefault} minSize="320px" className="flex min-w-0">
+        <Workspace />
       </Panel>
+      {hasOpenFile && (
+        <>
+          <PanelResizeHandle className="group relative w-2 shrink-0 cursor-col-resize transition-colors hover:bg-accent/40">
+            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/60 group-hover:bg-primary/50" />
+          </PanelResizeHandle>
+          <Panel defaultSize="34%" minSize="320px" className="flex min-w-0">
+            <EditorPanel />
+          </Panel>
+        </>
+      )}
+      {showFiles && (
+        <>
+          <PanelResizeHandle className="group relative w-2 shrink-0 cursor-col-resize transition-colors hover:bg-accent/40">
+            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/60 group-hover:bg-primary/50" />
+          </PanelResizeHandle>
+          <Panel defaultSize="18%" minSize="200px" maxSize="35%" className="flex min-w-0">
+            <FilesPanel />
+          </Panel>
+        </>
+      )}
     </PanelGroup>
   );
 }

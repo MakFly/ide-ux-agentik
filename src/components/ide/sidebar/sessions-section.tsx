@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { useIDE, useCurrentSessions, useActiveSession, type WorkspaceTerminal } from "@/store/ide";
 import { AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { KillSessionDialog } from "@/components/ide/kill-session-dialog";
+import { SessionsSkeleton } from "@/components/ide/skeletons/sidebar-skeletons";
 
 const CLI_LABELS: Record<WorkspaceTerminal["kind"], string> = {
   codex: "Codex",
@@ -77,34 +78,44 @@ export function SessionsSection() {
   const sessions = useCurrentSessions();
   const activeSession = useActiveSession();
   const setActiveSession = useIDE((s) => s.setActiveSession);
+  const sessionsLoading = useIDE((s) => s.sessionsLoading);
+  const showSkeleton = sessionsLoading && sessions.length === 0;
 
   return (
     <AccordionItem value="sessions" className="border-b-0">
       <AccordionTrigger className="flex-1 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground hover:no-underline hover:text-foreground">
         <span className="flex items-center gap-2">
           Sessions
-          <span className="rounded bg-accent/60 px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-foreground">
-            {sessions.length}
-          </span>
+          {showSkeleton ? (
+            <span className="h-3 w-5 animate-pulse rounded bg-accent/60" />
+          ) : (
+            <span className="rounded bg-accent/60 px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-foreground">
+              {sessions.length}
+            </span>
+          )}
         </span>
       </AccordionTrigger>
 
       <AccordionContent className="pb-1 pt-0">
-        <div className="flex flex-col gap-0.5 px-1.5">
-          {sessions.map((session) => (
-            <SessionRow
-              key={session.id}
-              session={session}
-              active={session.id === activeSession?.id}
-              onSelect={() => setActiveSession(session.id)}
-            />
-          ))}
-          {sessions.length === 0 && (
-            <div className="mx-1 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
-              No sessions yet — start one from the CLI picker.
-            </div>
-          )}
-        </div>
+        {showSkeleton ? (
+          <SessionsSkeleton />
+        ) : (
+          <div className="flex flex-col gap-0.5 px-1.5">
+            {sessions.map((session) => (
+              <SessionRow
+                key={session.id}
+                session={session}
+                active={session.id === activeSession?.id}
+                onSelect={() => setActiveSession(session.id)}
+              />
+            ))}
+            {sessions.length === 0 && (
+              <div className="mx-1 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
+                No sessions yet — start one from the CLI picker.
+              </div>
+            )}
+          </div>
+        )}
       </AccordionContent>
     </AccordionItem>
   );

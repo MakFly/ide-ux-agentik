@@ -57,7 +57,7 @@ function ToolFallbackRoot({
       open={isOpen}
       onOpenChange={handleOpenChange}
       className={cn(
-        "aui-tool-fallback-root group/tool-fallback-root w-full rounded-lg border py-3",
+        "aui-tool-fallback-root group/tool-fallback-root mb-3 w-full rounded-lg border py-3",
         className,
       )}
       style={
@@ -81,13 +81,35 @@ const statusIconMap: Record<ToolStatus, React.ElementType> = {
   "requires-action": AlertCircleIcon,
 };
 
+/**
+ * Extract a short, human-readable preview of a tool's first significant
+ * argument so the trigger row says e.g. "Read · package.json" instead of
+ * just "Used tool: Read". Falls back silently when no good candidate exists.
+ */
+function previewFromArgs(toolName: string, args: unknown): string | null {
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  const candidates = ["command", "cmd", "file_path", "path", "pattern", "query", "url"];
+  for (const k of candidates) {
+    const v = a[k];
+    if (typeof v === "string" && v.trim()) {
+      const cleaned = v.replace(/\s+/g, " ").trim();
+      const max = toolName === "Bash" || toolName === "shell" ? 80 : 60;
+      return cleaned.length > max ? cleaned.slice(0, max) + "…" : cleaned;
+    }
+  }
+  return null;
+}
+
 function ToolFallbackTrigger({
   toolName,
+  args,
   status,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
   toolName: string;
+  args?: unknown;
   status?: ToolCallMessagePartStatus;
 }) {
   const statusType = status?.type ?? "complete";
@@ -96,6 +118,7 @@ function ToolFallbackTrigger({
 
   const Icon = statusIconMap[statusType];
   const label = isCancelled ? "Cancelled tool" : "Used tool";
+  const preview = previewFromArgs(toolName, args);
 
   return (
     <CollapsibleTrigger
@@ -123,6 +146,9 @@ function ToolFallbackTrigger({
       >
         <span>
           {label}: <b>{toolName}</b>
+          {preview && (
+            <span className="ml-1.5 font-mono text-muted-foreground text-xs">· {preview}</span>
+          )}
         </span>
         {isRunning && (
           <span
@@ -131,6 +157,7 @@ function ToolFallbackTrigger({
             className="aui-tool-fallback-trigger-shimmer shimmer pointer-events-none absolute inset-0 motion-reduce:animate-none"
           >
             {label}: <b>{toolName}</b>
+            {preview && <span className="ml-1.5 font-mono text-xs">· {preview}</span>}
           </span>
         )}
       </span>
@@ -259,7 +286,7 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = (props) => {
 
   return (
     <ToolFallbackRoot className={cn(isCancelled && "border-muted-foreground/30 bg-muted/30")}>
-      <ToolFallbackTrigger toolName={toolName} status={status} />
+      <ToolFallbackTrigger toolName={toolName} args={args} status={status} />
       <ToolFallbackContent>
         <ToolFallbackError status={status} />
         <ToolFallbackArgs argsText={argsText} className={cn(isCancelled && "opacity-60")} />

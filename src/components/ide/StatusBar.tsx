@@ -1,4 +1,4 @@
-import { CircleDot, Copy, ExternalLink, GitBranch, GitCompare, GitPullRequest } from "lucide-react";
+import { CircleDot, Copy, ExternalLink, GitBranch, GitCompare, GitPullRequest, Server } from "lucide-react";
 import { toast } from "sonner";
 import {
   useIDE,
@@ -9,7 +9,59 @@ import {
   type Branch,
 } from "@/store/ide";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useAgentHealth } from "@/hooks/use-agent-health";
+
+function AgentHealthIndicator() {
+  const health = useAgentHealth();
+  if (health.kind === "none") return null;
+
+  const dotClass =
+    health.kind === "online"
+      ? "bg-status-add"
+      : health.kind === "offline"
+        ? "bg-status-del"
+        : "bg-status-warn animate-pulse";
+
+  const textClass =
+    health.kind === "online"
+      ? "text-status-add"
+      : health.kind === "offline"
+        ? "text-status-del"
+        : "text-status-warn";
+
+  const label =
+    health.kind === "online"
+      ? `Agent · online (${health.latencyMs}ms)`
+      : health.kind === "offline"
+        ? "Agent · offline"
+        : "Agent · checking…";
+
+  const tooltip =
+    health.kind === "online"
+      ? `${health.url} — ${health.latencyMs}ms`
+      : health.kind === "offline"
+        ? `${health.url} — ${health.error}`
+        : health.url;
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className={cn("flex items-center gap-1.5", textClass)}>
+            <span className={cn("h-1.5 w-1.5 rounded-full", dotClass)} />
+            <Server className="h-3 w-3" />
+            <span className="font-mono text-[11px]">{label}</span>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="font-mono text-[11px]">
+          {tooltip}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
 
 function branchStatusClass(status: Branch["status"]) {
   if (status === "active") return "bg-status-add/15 text-status-add";
@@ -226,9 +278,12 @@ export function StatusBar() {
           </span>
         )}
       </div>
-      <div className="flex items-center gap-1.5">
-        <BranchDetailsPopover />
-        <span className="font-mono">{branch?.name ?? "—"}</span>
+      <div className="flex items-center gap-3">
+        <AgentHealthIndicator />
+        <div className="flex items-center gap-1.5">
+          <BranchDetailsPopover />
+          <span className="font-mono">{branch?.name ?? "—"}</span>
+        </div>
       </div>
     </footer>
   );

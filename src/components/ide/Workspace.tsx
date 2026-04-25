@@ -21,7 +21,11 @@ import {
   type FileTab,
 } from "@/store/ide";
 import { Thread } from "@/components/assistant-ui/thread";
-import { AgentSessionView } from "@/components/ide/agent-session-view";
+import {
+  AgentSessionView,
+  SessionModeToggle,
+  type SessionMode,
+} from "@/components/ide/agent-session-view";
 import { KillSessionDialog } from "@/components/ide/kill-session-dialog";
 import { CodeEditor } from "@/components/ide/code-editor";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
@@ -248,7 +252,13 @@ const AGENT_OPTIONS: { id: TerminalKind; label: string }[] = [
   { id: "gemini", label: "Gemini" },
 ];
 
-function AgentCliTabs() {
+function AgentCliTabs({
+  activeMode,
+  onActiveModeChange,
+}: {
+  activeMode?: SessionMode;
+  onActiveModeChange?: (m: SessionMode) => void;
+}) {
   const sessions = useCurrentSessions();
   const activeSession = useActiveSession();
   const pinnedIds = usePinnedSessionIds();
@@ -315,7 +325,7 @@ function AgentCliTabs() {
 
   if (sessions.length === 0) {
     return (
-      <div className="flex items-center justify-between border-b border-border bg-code-bg/40 px-3 py-1.5">
+      <div className="flex items-center justify-between border-b border-border bg-code-bg/40 px-3 py-2">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -350,151 +360,134 @@ function AgentCliTabs() {
   }
 
   return (
-    <div className="flex flex-col border-b border-border bg-code-bg/40">
-      <div className="flex items-center">
-        {canScrollLeft && (
-          <button
-            onClick={() => scrollBy(-1)}
-            className="flex h-full shrink-0 items-center border-r border-border px-1.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-            title="Scroll left"
-          >
-            <ChevronLeft className="h-3.5 w-3.5" />
-          </button>
-        )}
-        <div
-          ref={scrollRef}
-          className="scrollbar-none flex flex-1 items-center overflow-x-auto scroll-smooth snap-x snap-mandatory"
+    <div className="flex items-center border-b border-border bg-code-bg/40">
+      {canScrollLeft && (
+        <button
+          onClick={() => scrollBy(-1)}
+          className="flex h-full shrink-0 items-center border-r border-border px-1.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+          title="Scroll left"
         >
-          {sessions.map((s) => {
-            const active = s.id === activeSession?.id;
-            return (
-              <div
-                key={s.id}
-                data-session-id={s.id}
-                onMouseDown={(e) => {
-                  if (e.button === 1) {
-                    e.preventDefault();
-                    closeAgentSession(s.id);
-                  }
-                }}
-                className={cn(
-                  "group flex shrink-0 snap-start items-center gap-1.5 border-r border-border px-3 py-1.5 text-[11.5px]",
-                  active
-                    ? "bg-background text-foreground"
-                    : "text-muted-foreground hover:bg-accent/30 hover:text-foreground",
-                )}
-              >
-                <button
-                  onClick={() => setActiveSession(s.id)}
-                  className="flex items-center gap-1.5 font-medium"
-                  title={`${s.title} · ${currentWorktree?.name ?? ""} · middle-click to close`}
-                >
-                  <span
-                    className={cn("h-1.5 w-1.5 shrink-0 rounded-full", sessionDotClass(s.status))}
-                  />
-                  <ProductFavicon agent={s.kind} label={s.title} />
-                  <span className="whitespace-nowrap">{s.title}</span>
-                  <span className="hidden font-mono text-[10px] text-muted-foreground sm:inline">
-                    @{workspaceName}
-                  </span>
-                </button>
-                <KillSessionDialog
-                  session={s}
-                  trigger={
-                    <button
-                      onClick={(e) => e.stopPropagation()}
-                      className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
-                      title="Close CLI"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  }
-                />
-                {s.id !== activeSession?.id && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (pinnedIds.includes(s.id)) unpinSession(s.id);
-                      else pinSession(s.id);
-                    }}
-                    className={cn(
-                      "rounded p-0.5 transition-opacity hover:bg-accent hover:text-foreground",
-                      pinnedIds.includes(s.id)
-                        ? "text-primary opacity-100"
-                        : "text-muted-foreground opacity-0 group-hover:opacity-100",
-                    )}
-                    title={pinnedIds.includes(s.id) ? "Unpin panel" : "Pin side by side"}
-                  >
-                    {pinnedIds.includes(s.id) ? (
-                      <PinOff className="h-3 w-3" />
-                    ) : (
-                      <Pin className="h-3 w-3" />
-                    )}
-                  </button>
-                )}
-              </div>
-            );
-          })}
-
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+      )}
+      <div
+        ref={scrollRef}
+        className="scrollbar-none flex flex-1 items-center overflow-x-auto scroll-smooth snap-x snap-mandatory"
+      >
+        {sessions.map((s) => {
+          const active = s.id === activeSession?.id;
+          return (
+            <div
+              key={s.id}
+              data-session-id={s.id}
+              onMouseDown={(e) => {
+                if (e.button === 1) {
+                  e.preventDefault();
+                  closeAgentSession(s.id);
+                }
+              }}
+              className={cn(
+                "group relative flex shrink-0 snap-start items-center gap-1.5 px-3 py-2.5 text-[11.5px] transition-colors",
+                active
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:bg-accent/30 hover:text-foreground",
+              )}
+            >
+              {active && (
+                <span className="pointer-events-none absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-primary" />
+              )}
               <button
-                className="flex shrink-0 snap-start items-center gap-1 px-3 py-1.5 text-[11.5px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-                title="Add CLI"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-48">
-              {AGENT_OPTIONS.map((a) => (
-                <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
-                  <ProductFavicon agent={a.id} label={a.label} />
-                  <span>{a.label}</span>
-                  <span className="ml-auto font-mono text-[10px] text-muted-foreground">
-                    @{workspaceName}
-                  </span>
-                </DropdownMenuItem>
-              ))}
-              <DropdownMenuItem asChild>
-                <Link to="/settings" search={{ login: "codex" }} viewTransition>
-                  <LogIn className="h-3.5 w-3.5 shrink-0" />
-                  <span>Sign in to Codex</span>
-                </Link>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-        {canScrollRight && (
-          <button
-            onClick={() => scrollBy(1)}
-            className="flex h-full shrink-0 items-center border-l border-border px-1.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-            title="Scroll right"
-          >
-            <ChevronRight className="h-3.5 w-3.5" />
-          </button>
-        )}
-        <span className="shrink-0 px-3 font-mono text-[10.5px] uppercase tracking-wide text-muted-foreground">
-          CLI
-        </span>
-      </div>
-      {sessions.length > 1 && (
-        <div className="flex items-center justify-center gap-1 py-1">
-          {sessions.map((s) => {
-            const active = s.id === activeSession?.id;
-            return (
-              <button
-                key={s.id}
                 onClick={() => setActiveSession(s.id)}
-                className={cn(
-                  "h-1.5 rounded-full transition-all",
-                  active
-                    ? "w-4 bg-primary"
-                    : "w-1.5 bg-muted-foreground/30 hover:bg-muted-foreground/60",
-                )}
-                title={`${s.title} @${workspaceName}`}
+                className="flex items-center gap-1.5 font-medium"
+                title={`${s.title} · ${currentWorktree?.name ?? ""} · middle-click to close`}
+              >
+                <span
+                  className={cn("h-1.5 w-1.5 shrink-0 rounded-full", sessionDotClass(s.status))}
+                />
+                <ProductFavicon agent={s.kind} label={s.title} />
+                <span className="whitespace-nowrap">{s.title}</span>
+                <span className="hidden font-mono text-[10px] text-muted-foreground sm:inline">
+                  @{workspaceName}
+                </span>
+              </button>
+              <KillSessionDialog
+                session={s}
+                trigger={
+                  <button
+                    onClick={(e) => e.stopPropagation()}
+                    className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
+                    title="Close CLI"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                }
               />
-            );
-          })}
+              {s.id !== activeSession?.id && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (pinnedIds.includes(s.id)) unpinSession(s.id);
+                    else pinSession(s.id);
+                  }}
+                  className={cn(
+                    "rounded p-0.5 transition-opacity hover:bg-accent hover:text-foreground",
+                    pinnedIds.includes(s.id)
+                      ? "text-primary opacity-100"
+                      : "text-muted-foreground opacity-0 group-hover:opacity-100",
+                  )}
+                  title={pinnedIds.includes(s.id) ? "Unpin panel" : "Pin side by side"}
+                >
+                  {pinnedIds.includes(s.id) ? (
+                    <PinOff className="h-3 w-3" />
+                  ) : (
+                    <Pin className="h-3 w-3" />
+                  )}
+                </button>
+              )}
+            </div>
+          );
+        })}
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              className="flex shrink-0 snap-start items-center gap-1 px-3 py-2.5 text-[11.5px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+              title="Add CLI"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-48">
+            {AGENT_OPTIONS.map((a) => (
+              <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
+                <ProductFavicon agent={a.id} label={a.label} />
+                <span>{a.label}</span>
+                <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+                  @{workspaceName}
+                </span>
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuItem asChild>
+              <Link to="/settings" search={{ login: "codex" }} viewTransition>
+                <LogIn className="h-3.5 w-3.5 shrink-0" />
+                <span>Sign in to Codex</span>
+              </Link>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {canScrollRight && (
+        <button
+          onClick={() => scrollBy(1)}
+          className="flex h-full shrink-0 items-center border-l border-border px-1.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+          title="Scroll right"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
+      )}
+      {activeMode && onActiveModeChange && (
+        <div className="shrink-0 border-l border-border/60 px-1">
+          <SessionModeToggle mode={activeMode} onChange={onActiveModeChange} />
         </div>
       )}
     </div>
@@ -506,6 +499,9 @@ export function Workspace() {
   const sessions = useCurrentSessions();
   const pinnedIds = usePinnedSessionIds();
   const allSessions = useCurrentSessions();
+  const [sessionModes, setSessionModes] = useState<Record<string, SessionMode>>({});
+  const setMode = (id: string, m: SessionMode) => setSessionModes((prev) => ({ ...prev, [id]: m }));
+  const modeOf = (id: string): SessionMode => sessionModes[id] ?? "chat";
 
   const pinnedSessions = useMemo(
     () =>
@@ -519,7 +515,10 @@ export function Workspace() {
 
   return (
     <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background shadow-sm">
-      <AgentCliTabs />
+      <AgentCliTabs
+        activeMode={activeSession ? modeOf(activeSession.id) : undefined}
+        onActiveModeChange={activeSession ? (m) => setMode(activeSession.id, m) : undefined}
+      />
       <div className="min-h-0 flex-1 overflow-hidden">
         {sessions.length === 0 || !activeSession ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
@@ -532,7 +531,7 @@ export function Workspace() {
         ) : hasPinned ? (
           <PanelGroup orientation="horizontal" className="h-full">
             <Panel minSize={20} defaultSize={Math.round(100 / (pinnedSessions.length + 1))}>
-              <AgentSessionView session={activeSession} />
+              <AgentSessionView session={activeSession} mode={modeOf(activeSession.id)} />
             </Panel>
             {pinnedSessions.map((session) => (
               <Fragment key={session.id}>
@@ -540,13 +539,13 @@ export function Workspace() {
                   <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border group-hover:bg-primary/60" />
                 </PanelResizeHandle>
                 <Panel minSize={20} defaultSize={Math.round(100 / (pinnedSessions.length + 1))}>
-                  <AgentSessionView session={session} />
+                  <AgentSessionView session={session} mode={modeOf(session.id)} />
                 </Panel>
               </Fragment>
             ))}
           </PanelGroup>
         ) : (
-          <AgentSessionView session={activeSession} />
+          <AgentSessionView session={activeSession} mode={modeOf(activeSession.id)} />
         )}
       </div>
     </main>

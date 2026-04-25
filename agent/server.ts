@@ -74,7 +74,14 @@ function safeEnv(extra: Record<string, string> = {}): Record<string, string> {
 
 const ALLOWED_CHAT_FLAGS: Record<string, ReadonlySet<string>> = {
   codex: new Set(["--model", "-m", "--effort", "--profile", "-c"]),
-  claude: new Set(["--model", "--effort", "-p", "--output-format", "--verbose"]),
+  claude: new Set([
+    "--model",
+    "--effort",
+    "-p",
+    "--output-format",
+    "--verbose",
+    "--include-partial-messages",
+  ]),
 };
 
 function validateExtraArgs(cli: string, args: string[]): string[] {

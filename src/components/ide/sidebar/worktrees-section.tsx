@@ -75,8 +75,8 @@ export function WorktreesSection() {
 
       <AccordionContent className="pb-1 pt-0">
         <div className={cn("flex flex-col gap-0.5 px-1.5", SIDEBAR_SECTION_SCROLL_AREA_CLASS)}>
-          {worktreesLoading && <WorktreesSkeleton />}
-          {!worktreesLoading && worktrees.map((wt) => {
+          {worktreesLoading && worktrees.length === 0 && <WorktreesSkeleton />}
+          {worktrees.map((wt) => {
             const active = wt.id === current?.id;
             const branchName = branchNameById.get(wt.branchId) ?? "unknown-branch";
             return (

@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 
 /**
- * Integration tests with a real Bun agent.
+ * Integration tests with a real Node agent.
  *
- * Enabled only when PLAYWRIGHT_WITH_AGENT=1. Spawns `bun run agent/server.ts`
- * against a temp project root, wires it into the app via `window.__ideStore`
- * (exposed in dev builds only), then runs provider checks.
+ * Enabled only when PLAYWRIGHT_WITH_AGENT=1. Spawns `node agent/server.ts`
+ * (Node 24 reads TS natively via --experimental-strip-types) against a temp
+ * project root, wires it into the app via `window.__ideStore` (exposed in
+ * dev builds only), then runs provider checks.
  */
 
 const AGENT_PORT = 7591;
@@ -40,9 +41,10 @@ test.beforeAll(async () => {
   writeFileSync(join(tmpRoot, "src", "main.ts"), "console.log('hello');\n");
 
   agent = spawn(
-    "bun",
+    "node",
     [
-      "run",
+      "--experimental-strip-types",
+      "--no-warnings",
       "agent/server.ts",
       "--root",
       tmpRoot,
@@ -75,7 +77,14 @@ test.afterAll(() => {
 });
 
 async function seedRemoteAgentWorkspace(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  // Hard navigations wipe the zustand store, so the seed must run on whichever
+  // page the test is currently on. Wait for hydration (__ideStore is installed
+  // inside a useEffect), then idempotently add + activate the workspace.
+  await page
+    .waitForFunction(() => !!(window as unknown as { __ideStore?: unknown }).__ideStore, null, {
+      timeout: 10_000,
+    })
+    .catch(() => {});
   const ok = await page.evaluate(
     ({ url, token }) => {
       // The dev build exposes a minimal testing handle so we can seed a
@@ -99,10 +108,9 @@ async function seedRemoteAgentWorkspace(page: import("@playwright/test").Page) {
 
 test.describe("integration — real bun agent", () => {
   test("agent check reaches the remote host", async ({ page }) => {
+    await page.goto("/settings?section=providers");
     const seeded = await seedRemoteAgentWorkspace(page);
     test.skip(!seeded, "dev-only __ideStore handle not exposed");
-
-    await page.goto("/settings");
     await page.getByTestId("check-codex").click();
     await expect(page.getByTestId("check-codex-summary")).toBeVisible({ timeout: 20_000 });
     const summary = (await page.getByTestId("check-codex-summary").textContent()) ?? "";
@@ -111,14 +119,14 @@ test.describe("integration — real bun agent", () => {
   });
 
   test("claude check surfaces whether binary is installed", async ({ page }) => {
+    await page.goto("/settings?section=providers");
     const seeded = await seedRemoteAgentWorkspace(page);
     test.skip(!seeded, "dev-only __ideStore handle not exposed");
-    await page.goto("/settings");
     await page.getByTestId("check-claude").click();
-    await expect(page.getByTestId("check-claude-summary")).toBeVisible({ timeout: 20_000 });
-    const summary = (await page.getByTestId("check-claude-summary").textContent()) ?? "";
-    // We don't assume claude IS installed. Just that the check ran and
-    // produced a deterministic message (Ready / Missing binary or auth).
-    expect(summary).toMatch(/Ready|Missing/);
+    const summary = page.getByTestId("check-claude-summary");
+    await expect(summary).toBeVisible({ timeout: 20_000 });
+    // Poll until the running placeholder flips to the final verdict — a cold
+    // `claude` binary (first-run telemetry) can take 10+s on some machines.
+    await expect(summary).toHaveText(/Ready|Missing/, { timeout: 40_000 });
   });
 });

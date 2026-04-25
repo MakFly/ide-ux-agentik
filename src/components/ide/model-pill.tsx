@@ -1,17 +1,24 @@
+import { useState } from "react";
 import { ChevronDown, Cpu } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "@/lib/chat/models";
+import {
+  CLAUDE_MODELS as CLAUDE_MODELS_RAW,
+  CODEX_MODELS,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CLAUDE_MODEL,
+} from "@/lib/chat/models";
 import { cn } from "@/lib/utils";
 import { useIDE } from "@/store/ide";
 import type { TerminalKind } from "@/store/ide";
 
 type ModelEntry = { id: string; label: string; description: string };
 
-const CLAUDE_MODELS: readonly ModelEntry[] = [
-  { id: "claude-opus-4-6", label: "Claude Opus 4.6", description: "Most capable, 1M context" },
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", description: "Balanced speed & quality" },
-  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", description: "Fast & efficient" },
-] as const;
+// Re-label with the "Claude " prefix expected in the picker UI.
+const CLAUDE_MODELS: readonly ModelEntry[] = CLAUDE_MODELS_RAW.map((m) => ({
+  id: m.id,
+  label: m.label.startsWith("Claude ") ? m.label : `Claude ${m.label}`,
+  description: m.description,
+}));
 
 const OPENCODE_MODELS: readonly ModelEntry[] = [
   { id: "default", label: "Default", description: "OpenCode auto-selects" },
@@ -26,7 +33,7 @@ const GEMINI_MODELS: readonly ModelEntry[] = [
 
 const DEFAULT_BY_CLI: Record<TerminalKind, string> = {
   codex: DEFAULT_CODEX_MODEL,
-  claude: "claude-sonnet-4-6",
+  claude: DEFAULT_CLAUDE_MODEL,
   opencode: "default",
   gemini: "gemini-2.5-pro",
 };
@@ -55,11 +62,10 @@ export function ModelPill({ cli }: { cli: TerminalKind }) {
   const defaultId = DEFAULT_BY_CLI[cli];
 
   const currentId =
-    cli === "codex"
-      ? (codexModel ?? defaultId)
-      : (selectedModelByCli[cli] ?? defaultId);
+    cli === "codex" ? (codexModel ?? defaultId) : (selectedModelByCli[cli] ?? defaultId);
 
   const current = catalog.find((m) => m.id === currentId) ?? catalog[0];
+  const [open, setOpen] = useState(false);
 
   function handleSelect(id: string) {
     if (cli === "codex") {
@@ -67,10 +73,11 @@ export function ModelPill({ cli }: { cli: TerminalKind }) {
     } else {
       setModelForCli(cli, id);
     }
+    setOpen(false);
   }
 
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"

@@ -7,28 +7,10 @@
  */
 import { useAuiState } from "@assistant-ui/react";
 import type { ThreadAssistantMessagePart } from "@assistant-ui/react";
-import { ListTodo, Terminal, Wrench } from "lucide-react";
-import { useEffect, useState, type FC } from "react";
-import { cn } from "@/lib/utils";
+import { BrainIcon, ListTodo, Terminal, Wrench } from "lucide-react";
+import type { FC } from "react";
 import { useThinkingElapsed } from "@/hooks/use-thinking-elapsed";
-
-const VERBS = ["Thinking", "Considering", "Reasoning", "Analyzing"] as const;
-const VERB_CYCLE_MS = 3_000;
-
-function useVerbCycle(active: boolean): string {
-  const [idx, setIdx] = useState(0);
-
-  useEffect(() => {
-    if (!active) return;
-    setIdx(0);
-    const id = setInterval(() => {
-      setIdx((i) => (i + 1) % VERBS.length);
-    }, VERB_CYCLE_MS);
-    return () => clearInterval(id);
-  }, [active]);
-
-  return VERBS[idx];
-}
+import { cn } from "@/lib/utils";
 
 type ToolCallPart = Extract<ThreadAssistantMessagePart, { type: "tool-call" }>;
 
@@ -75,8 +57,6 @@ export const ThinkingIndicator: FC = () => {
   // Streaming = running, has text/reasoning parts, no pending tool
   const isStreaming = isRunning && !isPending && activeTool === null;
 
-  const verb = useVerbCycle(isPending);
-
   // ── Streaming state: just a subtle timer badge atop the bubble ──
   if (isStreaming) {
     return (
@@ -100,28 +80,33 @@ export const ThinkingIndicator: FC = () => {
     );
   }
 
-  // ── Pending state ──
+  // ── Pending state: no part has arrived yet, so there is literally nothing
+  // to expand. Render a flat, NON-interactive shimmer badge — no chevron, no
+  // Collapsible, no fake disclosure UI. As soon as the first reasoning/text
+  // part arrives, isPending flips false and <ReasoningGroup> takes over with
+  // a real interactive trigger (its content matches the streamed text).
   if (isPending) {
+    const label = `Reasoning (${elapsed}s)`;
     return (
-      <div className="flex flex-col gap-2 rounded-lg border bg-muted/30 px-3 py-2">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          {/* Pulsating dot */}
-          <span className="relative flex size-2.5 shrink-0">
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-muted-foreground/60 opacity-75" />
-            <span className="relative inline-flex size-2.5 rounded-full bg-muted-foreground/80" />
+      <div
+        role="status"
+        aria-live="polite"
+        aria-label={label}
+        className="aui-thinking-pending mb-4 flex items-center gap-2 py-1 text-muted-foreground text-sm"
+      >
+        <BrainIcon className="size-4 shrink-0" />
+        <span className="relative inline-block leading-none">
+          <span>{label}</span>
+          <span
+            aria-hidden
+            className={cn(
+              "shimmer pointer-events-none absolute inset-0",
+              "motion-reduce:animate-none",
+            )}
+          >
+            {label}
           </span>
-          <span>
-            {verb}
-            <span className="ml-1.5 tabular-nums text-[11px] text-muted-foreground/60">
-              · {elapsed}s
-            </span>
-          </span>
-        </div>
-        {/* Shimmer placeholder lines */}
-        <div className="flex flex-col gap-1.5">
-          <div className={cn("h-3 animate-pulse rounded bg-muted", "w-[72%]")} />
-          <div className={cn("h-3 animate-pulse rounded bg-muted", "w-[52%]")} />
-        </div>
+        </span>
       </div>
     );
   }

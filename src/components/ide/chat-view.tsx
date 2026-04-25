@@ -1,11 +1,16 @@
 import {
   AssistantRuntimeProvider,
+  CompositeAttachmentAdapter,
+  SimpleImageAttachmentAdapter,
+  SimpleTextAttachmentAdapter,
   useLocalRuntime,
   type ThreadMessageLike,
 } from "@assistant-ui/react";
+import { useMemo } from "react";
 import { FlaskConical } from "lucide-react";
 import { Thread } from "@/components/assistant-ui/thread";
 import { codexAdapter } from "@/lib/chat/codex-adapter";
+import { claudeAdapter } from "@/lib/chat/claude-adapter";
 import type { WorkspaceSource } from "@/lib/fs";
 import { useIDE, type TerminalKind } from "@/store/ide";
 import { useSessionHistory } from "@/hooks/use-session-history";
@@ -22,15 +27,17 @@ export function ChatView({
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
   const clearTick = useIDE((s) => s.sessionClearTickByWorkspace[activeWorkspaceId] ?? 0);
 
-  const { messages, loading, error } = useSessionHistory(sessionId, workspaceSource);
+  const { messages, loading, error } = useSessionHistory(sessionId, workspaceSource, clearTick);
 
   // Mount the runtime only once history has loaded. useLocalRuntime consumes
   // initialMessages at creation time only; mounting earlier with an empty
   // array freezes the thread as blank even after the async fetch resolves.
+  const isFullyWired = kind === "codex" || kind === "claude";
+
   if (loading) {
     return (
       <div className="flex h-full min-h-0 w-full flex-col">
-        {kind !== "codex" && <ExperimentalBanner kind={kind} />}
+        {!isFullyWired && <ExperimentalBanner kind={kind} />}
         <div className="flex-1 min-h-0 flex items-center justify-center text-[11px] text-muted-foreground">
           Loading history…
         </div>
@@ -39,13 +46,14 @@ export function ChatView({
   }
 
   // `key` includes clearTick: incrementing it forces React to remount CodexChat
-  // (and its AssistantRuntimeProvider) with an empty initialMessages array,
-  // giving us a clean-slate thread without touching the PTY process.
+  // (and its AssistantRuntimeProvider). useSessionHistory also refetches on the
+  // bumped tick, so /clear (DB wipe → empty) and /compact (DB replaced with
+  // summary → single seed message) both flow through the same path.
   return (
     <CodexChat
       key={`${sessionId ?? "none"}-${clearTick}`}
       kind={kind}
-      initialMessages={clearTick === 0 ? messages : []}
+      initialMessages={messages}
       error={error}
     />
   );
@@ -60,12 +68,25 @@ function CodexChat({
   initialMessages: ThreadMessageLike[];
   error: Error | null;
 }) {
-  const runtime = useLocalRuntime(codexAdapter, { initialMessages });
+  const adapter = kind === "claude" ? claudeAdapter : codexAdapter;
+  const attachments = useMemo(
+    () =>
+      new CompositeAttachmentAdapter([
+        new SimpleImageAttachmentAdapter(),
+        new SimpleTextAttachmentAdapter(),
+      ]),
+    [],
+  );
+  const runtime = useLocalRuntime(adapter, {
+    initialMessages,
+    adapters: { attachments },
+  });
+  const isFullyWired = kind === "codex" || kind === "claude";
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <div className="flex h-full min-h-0 w-full flex-col">
-        {kind !== "codex" && <ExperimentalBanner kind={kind} />}
+        {!isFullyWired && <ExperimentalBanner kind={kind} />}
         {error && (
           <div className="border-b border-destructive/30 bg-destructive/10 px-3 py-1 text-[11px] text-destructive">
             Failed to load history: {error.message}

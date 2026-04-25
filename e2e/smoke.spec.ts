@@ -18,10 +18,34 @@ test.beforeEach(async ({ context }) => {
   });
 });
 
+async function ensureMockWorkspaceActive(page: import("@playwright/test").Page) {
+  // If the dev server also spawned a local agent (bun run dev instead of
+  // dev:web), a `local-dev` remote-agent workspace may have been auto-added.
+  // Switch back to the built-in mock workspace so the offline assertions hold.
+  await page.waitForFunction(
+    () =>
+      !!(window as unknown as { __ideStore?: { workspaces: Array<{ id: string; name: string }> } })
+        .__ideStore,
+    null,
+    { timeout: 5_000 },
+  );
+  await page.evaluate(() => {
+    type Api = {
+      setActiveWorkspace: (id: string) => void;
+      workspaces: Array<{ id: string; name: string; source?: { kind: string } }>;
+    };
+    const api = (window as unknown as { __ideStore?: Api }).__ideStore;
+    if (!api) return;
+    const mock = api.workspaces.find((w) => w.source?.kind === "mock");
+    if (mock) api.setActiveWorkspace(mock.id);
+  });
+}
+
 test.describe("settings page — offline", () => {
   test("renders provider cards and runs check that fails cleanly", async ({ page }) => {
-    await page.goto("/settings");
-    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+    await page.goto("/settings?section=providers");
+    await ensureMockWorkspaceActive(page);
+    await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible();
 
     for (const provider of ["codex", "claude", "opencode", "gemini"] as const) {
       await expect(page.locator(`[data-provider="${provider}"]`)).toBeVisible();
@@ -46,7 +70,7 @@ test.describe("settings page — offline", () => {
   });
 
   test("codex sign-in dialog opens via button", async ({ page }) => {
-    await page.goto("/settings");
+    await page.goto("/settings?section=providers&provider=codex");
     // Wait for hydration — React 19 + TanStack Start SSR means DOM is present
     // before onClick handlers are attached. Polling an attribute that is only
     // rendered by the client component ensures hydration is complete.

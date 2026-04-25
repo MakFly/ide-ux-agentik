@@ -27,6 +27,14 @@ const MarkdownTextImpl = () => {
 
 export const MarkdownText = memo(MarkdownTextImpl);
 
+const HIDDEN_LANGUAGES = new Set(["", "unknown", "text", "plaintext", "plain", "txt"]);
+
+const displayLanguage = (raw: string | undefined): string => {
+  const lang = (raw ?? "").trim().toLowerCase();
+  if (HIDDEN_LANGUAGES.has(lang)) return "";
+  return lang;
+};
+
 const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   const { isCopied, copyToClipboard } = useCopyToClipboard();
   const onCopy = () => {
@@ -34,10 +42,12 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
     copyToClipboard(code);
   };
 
+  const label = displayLanguage(language);
+
   return (
     <div className="aui-code-header-root mt-2.5 flex items-center justify-between rounded-t-lg border border-border/50 border-b-0 bg-muted/50 px-3 py-1.5 text-xs">
       <span className="aui-code-header-language font-medium text-muted-foreground lowercase">
-        {language}
+        {label}
       </span>
       <TooltipIconButton tooltip="Copy" onClick={onCopy}>
         {!isCopied && <CopyIcon />}
@@ -105,28 +115,19 @@ const defaultComponents = memoizeMarkdownComponents({
   ),
   h5: ({ className, ...props }) => (
     <h5
-      className={cn(
-        "aui-md-h5 mt-2 mb-1 font-medium text-sm first:mt-0 last:mb-0",
-        className,
-      )}
+      className={cn("aui-md-h5 mt-2 mb-1 font-medium text-sm first:mt-0 last:mb-0", className)}
       {...props}
     />
   ),
   h6: ({ className, ...props }) => (
     <h6
-      className={cn(
-        "aui-md-h6 mt-2 mb-1 font-medium text-sm first:mt-0 last:mb-0",
-        className,
-      )}
+      className={cn("aui-md-h6 mt-2 mb-1 font-medium text-sm first:mt-0 last:mb-0", className)}
       {...props}
     />
   ),
   p: ({ className, ...props }) => (
     <p
-      className={cn(
-        "aui-md-p my-2.5 leading-normal first:mt-0 last:mb-0",
-        className,
-      )}
+      className={cn("aui-md-p my-2.5 leading-normal first:mt-0 last:mb-0", className)}
       {...props}
     />
   ),
@@ -167,10 +168,7 @@ const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   hr: ({ className, ...props }) => (
-    <hr
-      className={cn("aui-md-hr my-2 border-muted-foreground/20", className)}
-      {...props}
-    />
+    <hr className={cn("aui-md-hr my-2 border-muted-foreground/20", className)} {...props} />
   ),
   table: ({ className, ...props }) => (
     <table
@@ -212,15 +210,12 @@ const defaultComponents = memoizeMarkdownComponents({
     <li className={cn("aui-md-li leading-normal", className)} {...props} />
   ),
   sup: ({ className, ...props }) => (
-    <sup
-      className={cn("aui-md-sup [&>a]:text-xs [&>a]:no-underline", className)}
-      {...props}
-    />
+    <sup className={cn("aui-md-sup [&>a]:text-xs [&>a]:no-underline", className)} {...props} />
   ),
   pre: ({ className, ...props }) => (
     <pre
       className={cn(
-        "aui-md-pre overflow-x-auto rounded-t-none rounded-b-lg border border-border/50 border-t-0 bg-muted/30 p-3 text-xs leading-relaxed",
+        "aui-md-pre overflow-x-auto whitespace-pre rounded-t-none rounded-b-lg border border-border/50 border-t-0 bg-muted/30 p-3 text-xs leading-relaxed font-mono [font-variant-ligatures:none] [tab-size:2]",
         className,
       )}
       {...props}

@@ -24,6 +24,7 @@ import {
   SuggestionPrimitive,
   ThreadPrimitive,
   useAssistantRuntime,
+  useAui,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -40,16 +41,15 @@ import {
   SquareIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FC } from "react";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useIDE, TOKEN_CONTEXT_MAX } from "@/store/ide";
+import { useIDE } from "@/store/ide";
 import { ModelPill } from "@/components/ide/model-pill";
 import { ReasoningPill } from "@/components/ide/reasoning-pill";
-import { SandboxLockButton } from "@/components/ide/sandbox-lock";
-import { VoiceButton } from "@/components/ide/voice-button";
+import { ContextRing } from "@/components/assistant-ui/context-ring";
+import { StatusButton } from "@/components/assistant-ui/status-button";
+import { getContextWindow } from "@/lib/chat/context-windows";
 import { SkillsTrigger } from "@/components/ide/skills-trigger";
 import { PlanToggle } from "@/components/ide/plan-toggle";
 import { ComposerModeTabs } from "@/components/ide/composer-mode-tabs";
-import { ComposerWorktreePicker } from "@/components/ide/composer-worktree-picker";
 import { FileMentionPopover } from "@/components/ide/composer-file-mention";
 import { SlashCommandPopover } from "@/components/ide/composer-slash-command";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -91,6 +91,7 @@ export const Thread: FC = () => {
           ChatGPT-style "stick to bottom when new messages arrive" behavior. */}
       <ThreadPrimitive.Viewport
         data-slot="aui_thread-viewport"
+        data-testid="chat-thread"
         className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-6"
       >
         <AuiIf condition={(s) => s.thread.isEmpty}>
@@ -285,6 +286,7 @@ const Composer: FC = () => {
           >
             <ComposerAttachments />
             <ComposerPrimitive.Input
+              data-testid="chat-composer-input"
               placeholder={placeholder}
               className="aui-composer-input max-h-32 min-h-10 w-full resize-none bg-transparent px-1.75 py-1 text-sm outline-none placeholder:text-muted-foreground/80"
               rows={1}
@@ -318,7 +320,6 @@ const Composer: FC = () => {
         )}
         <div className="mt-1 flex items-center justify-between gap-2">
           <ComposerModeTabs />
-          <ComposerWorktreePicker />
         </div>
       </ComposerPrimitive.Root>
       <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
@@ -352,35 +353,9 @@ const HelpDialog: FC<{ open: boolean; onOpenChange: (v: boolean) => void }> = ({
   </Dialog>
 );
 
-function formatCompact(n: number): string {
-  if (n < 1000) return `${n}`;
-  const k = n / 1000;
-  return `${k.toFixed(k < 10 ? 1 : 0)}k`;
-}
-
-const TokenBadge: FC<{ used: number; max: number }> = ({ used, max }) => {
-  const pct = Math.min(1, used / max);
-  const warn = pct > 0.8;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span
-          className={cn(
-            "select-none font-mono text-[11px] tabular-nums",
-            warn ? "text-status-warn" : "text-muted-foreground",
-          )}
-          aria-label="Context tokens"
-        >
-          ctx {formatCompact(used)}/{formatCompact(max)}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="top">Estimated context usage (~4 chars / token)</TooltipContent>
-    </Tooltip>
-  );
-};
-
 const SendOrStopButton: FC = () => {
   const runtime = useAssistantRuntime();
+  const aui = useAui();
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const composerText = useAuiState((s) => s.composer.text ?? "");
 
@@ -392,12 +367,25 @@ const SendOrStopButton: FC = () => {
         size="icon"
         className="aui-composer-cancel size-8 rounded-full"
         aria-label="Stop generating"
-        onClick={() => {
+        data-testid="chat-composer-stop"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          let cancelled = false;
           try {
             runtime.thread.cancelRun();
-            console.debug("[composer] cancelRun fired");
-          } catch (e) {
-            console.warn("[composer] cancelRun failed:", e);
+            cancelled = true;
+            console.debug("[composer] cancelRun fired (runtime.thread)");
+          } catch (err) {
+            console.warn("[composer] runtime.thread.cancelRun failed:", err);
+          }
+          if (!cancelled) {
+            try {
+              aui.threads().__internal_getAssistantRuntime?.()?.thread.cancelRun();
+              console.debug("[composer] cancelRun fired (aui fallback)");
+            } catch (err) {
+              console.warn("[composer] aui cancelRun failed:", err);
+            }
           }
         }}
       >
@@ -434,7 +422,13 @@ const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
     s.thread.messages.reduce((acc, m) => acc + messageTextLength(m as MessageLike), 0),
   );
   const composerChars = useAuiState((s) => (s.composer.text ?? "").length);
-  const used = Math.round((messagesChars + composerChars) / 4);
+  const estimatedUsed = Math.round((messagesChars + composerChars) / 4);
+  const model = useIDE((s) => s.selectedModelByCli[activeAgent]);
+  const claudeOverride = useIDE((s) => s.claudeContextOverride);
+  const lastUsage = useIDE((s) => s.lastUsageByCli[activeAgent]);
+  const realUsed = lastUsage ? lastUsage.inputTokens + lastUsage.outputTokens : undefined;
+  const used = realUsed ?? estimatedUsed;
+  const max = getContextWindow(activeAgent, model, claudeOverride);
   return (
     <div className="aui-composer-action-wrapper flex items-center justify-between gap-2">
       <div className="flex items-center gap-1">
@@ -445,11 +439,10 @@ const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
         <SkillsTrigger />
       </div>
       <div className="flex items-center gap-1">
-        <SandboxLockButton cli={activeAgent} />
-        <VoiceButton />
-        <span className="ml-2 mr-1 hidden sm:inline">
-          <TokenBadge used={used} max={TOKEN_CONTEXT_MAX} />
+        <span className="hidden h-8 items-center justify-center sm:inline-flex">
+          <ContextRing used={used} max={max} />
         </span>
+        <StatusButton cli={activeAgent} estimatedUsed={estimatedUsed} />
         <SendOrStopButton />
       </div>
     </div>

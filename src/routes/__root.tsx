@@ -3,7 +3,11 @@ import { Outlet, Link, createRootRoute, HeadContent, Scripts } from "@tanstack/r
 
 import appCss from "../styles.css?url";
 import { Toaster } from "@/components/ui/sonner";
-import { useIDE } from "@/store/ide";
+import { useIDE, type TerminalKind } from "@/store/ide";
+import { autoRegisterDevAgent } from "@/lib/dev-bootstrap";
+import { providerFor } from "@/lib/fs";
+import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
+import { persistence } from "@/lib/persistence/client";
 
 const themeBootstrapScript = `
 (() => {
@@ -106,6 +110,8 @@ function RootComponent() {
 
   useEffect(() => {
     hydrate();
+    // Auto-register the local dev agent workspace when VITE_DEV_AGENT_* are injected.
+    void autoRegisterDevAgent();
     // If Codex auth is older than 23h, silently refresh it in the background.
     const s = useIDE.getState();
     if (s.codexAuth) {
@@ -118,10 +124,56 @@ function RootComponent() {
     if (import.meta.env.DEV && typeof window !== "undefined") {
       (window as unknown as { __ideStore?: unknown }).__ideStore = {
         addWorkspace: (name: string, source: unknown) =>
-          useIDE.getState().addWorkspace(name, source as Parameters<ReturnType<typeof useIDE.getState>["addWorkspace"]>[1]),
+          useIDE
+            .getState()
+            .addWorkspace(
+              name,
+              source as Parameters<ReturnType<typeof useIDE.getState>["addWorkspace"]>[1],
+            ),
         setActiveWorkspace: (id: string) => useIDE.getState().setActiveWorkspace(id),
         get workspaces() {
           return useIDE.getState().workspaces;
+        },
+        /** Create a new agent session in the active workspace and return its id. */
+        addAgentSession: (kind: TerminalKind) => {
+          useIDE.getState().addAgentSession(kind);
+          const s = useIDE.getState();
+          return s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
+        },
+        /** Read the active session id for a given workspace. */
+        getActiveSessionId: (workspaceId: string) =>
+          useIDE.getState().activeSessionIdByWorkspaceId[workspaceId],
+        /** Seed the DB with N fake assistant/user messages for a given session. */
+        seedMessages: async (sessionId: string, count: number) => {
+          const s = useIDE.getState();
+          const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId);
+          if (!ws || ws.source.kind !== "remote-agent") {
+            throw new Error("seedMessages: active workspace is not remote-agent");
+          }
+          const provider = (await providerFor(ws.source, ws.source.label)) as RemoteAgentProvider;
+          await provider.connect();
+          await persistence.sessions.create(provider, {
+            id: sessionId,
+            workspaceId: ws.id,
+            cli: "codex",
+            title: "e2e seed session",
+          });
+          for (let i = 0; i < count; i++) {
+            await persistence.messages.append(provider, {
+              sessionId,
+              role: i % 2 === 0 ? "user" : "assistant",
+              parts: [{ type: "text", text: `seed message ${i}` }],
+            });
+          }
+        },
+        /** List persisted messages for a session via the remote-agent RPC. */
+        listMessages: async (sessionId: string) => {
+          const s = useIDE.getState();
+          const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId);
+          if (!ws || ws.source.kind !== "remote-agent") return [];
+          const provider = (await providerFor(ws.source, ws.source.label)) as RemoteAgentProvider;
+          await provider.connect();
+          return persistence.messages.list(provider, sessionId);
         },
       };
     }

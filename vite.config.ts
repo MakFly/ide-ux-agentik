@@ -6,4 +6,16 @@
 // You can pass additional config via defineConfig({ vite: { ... } }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
-export default defineConfig();
+// `bun run dev` (scripts/dev.ts) injects these so the UI auto-registers a
+// `local-dev` remote-agent workspace on first load. Absent in prod builds.
+const devAgentUrl = process.env.VITE_DEV_AGENT_URL ?? "";
+const devAgentToken = process.env.VITE_DEV_AGENT_TOKEN ?? "";
+
+export default defineConfig({
+  vite: {
+    define: {
+      "import.meta.env.VITE_DEV_AGENT_URL": JSON.stringify(devAgentUrl),
+      "import.meta.env.VITE_DEV_AGENT_TOKEN": JSON.stringify(devAgentToken),
+    },
+  },
+});

@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { MessageSquare, Terminal as TerminalIcon } from "lucide-react";
 import { ChatView } from "@/components/ide/chat-view";
 import { PtyTerminal } from "@/components/ide/pty-terminal";
@@ -35,37 +34,24 @@ function argsFor(kind: TerminalKind, codexModel: string | undefined): string[] |
   return undefined;
 }
 
-type Mode = "chat" | "terminal";
+export type SessionMode = "chat" | "terminal";
 
-export function AgentSessionView({ session }: { session: WorkspaceTerminal }) {
-  const [mode, setMode] = useState<Mode>("chat");
+export function AgentSessionView({
+  session,
+  mode = "chat",
+}: {
+  session: WorkspaceTerminal;
+  mode?: SessionMode;
+}) {
   const codexModel = useIDE((s) => s.codexModel);
   const isCodex = session.kind === "codex";
   const workspaceSource = useIDE(
-    (s) => s.workspaces.find((w) => w.id === session.workspaceId)?.source as WorkspaceSource | undefined,
+    (s) =>
+      s.workspaces.find((w) => w.id === session.workspaceId)?.source as WorkspaceSource | undefined,
   );
 
   return (
     <div className="flex h-full flex-col bg-black">
-      <div className="flex items-center justify-between border-b border-border px-3 py-1">
-        <div className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-muted-foreground">
-          {session.kind} · {session.title}
-        </div>
-        <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5">
-          <ModeButton
-            active={mode === "chat"}
-            onClick={() => setMode("chat")}
-            icon={<MessageSquare className="h-3 w-3" />}
-            label="Chat"
-          />
-          <ModeButton
-            active={mode === "terminal"}
-            onClick={() => setMode("terminal")}
-            icon={<TerminalIcon className="h-3 w-3" />}
-            label="Terminal"
-          />
-        </div>
-      </div>
       {/* Both panels stay MOUNTED across mode toggles — otherwise switching
           Chat → Terminal → Chat would destroy the assistant-ui runtime and
           wipe the conversation, and the PTY would re-spawn every time. We
@@ -94,6 +80,31 @@ export function AgentSessionView({ session }: { session: WorkspaceTerminal }) {
   );
 }
 
+export function SessionModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: SessionMode;
+  onChange: (m: SessionMode) => void;
+}) {
+  return (
+    <div className="flex items-center">
+      <ModeButton
+        active={mode === "chat"}
+        onClick={() => onChange("chat")}
+        icon={<MessageSquare className="h-3.5 w-3.5" />}
+        label="Chat"
+      />
+      <ModeButton
+        active={mode === "terminal"}
+        onClick={() => onChange("terminal")}
+        icon={<TerminalIcon className="h-3.5 w-3.5" />}
+        label="Terminal"
+      />
+    </div>
+  );
+}
+
 function ModeButton({
   active,
   onClick,
@@ -108,13 +119,17 @@ function ModeButton({
   return (
     <button
       onClick={onClick}
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
       className={cn(
-        "flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] font-medium uppercase tracking-wider transition-colors",
-        active ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground",
+        "flex h-7 w-7 items-center justify-center rounded transition-colors",
+        active
+          ? "text-foreground"
+          : "text-muted-foreground/70 hover:text-foreground hover:bg-accent/40",
       )}
     >
       {icon}
-      {label}
     </button>
   );
 }

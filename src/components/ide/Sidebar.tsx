@@ -90,7 +90,6 @@ export function Sidebar() {
   const workspaces = useIDE((s) => s.workspaces);
   const activeBranchId = useIDE((s) => s.activeBranchId);
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
-  const showSidebar = useIDE((s) => s.showSidebar);
   const addBranch = useIDE((s) => s.addBranch);
   const setActiveWorkspace = useIDE((s) => s.setActiveWorkspace);
   const branchesLoading = useIDE((s) => s.branchesLoading);
@@ -98,8 +97,6 @@ export function Sidebar() {
 
   const [branchDialogOpen, setBranchDialogOpen] = useState(false);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
-
-  if (!showSidebar) return null;
 
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
   const activeBranch = currentBranches.find((b) => b.id === activeBranchId);
@@ -147,14 +144,14 @@ export function Sidebar() {
             </div>
             <AccordionContent className="pb-1 pt-0">
               <div className={SIDEBAR_SECTION_SCROLL_AREA_CLASS}>
-                {branchesLoading ? (
+                {branchesLoading && currentBranches.length === 0 ? (
                   <BranchesSkeleton />
                 ) : (
                   <>
                     {currentBranches.map((b) => (
                       <BranchRow key={b.id} branch={b} active={b.id === activeBranchId} />
                     ))}
-                    {currentBranches.length === 0 && (
+                    {!branchesLoading && currentBranches.length === 0 && (
                       <div className="mx-3 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
                         No branches.
                       </div>
@@ -201,13 +198,13 @@ export function Sidebar() {
               title={ws.name}
               className={cn(
                 "h-2 w-2 rounded-full transition-all hover:scale-125",
-                ws.id === activeWorkspaceId ? "ring-1 ring-offset-1 ring-offset-sidebar" : "opacity-60",
+                ws.id === activeWorkspaceId
+                  ? "ring-1 ring-offset-1 ring-offset-sidebar"
+                  : "opacity-60",
               )}
               style={{
                 background:
-                  ws.id === activeWorkspaceId
-                    ? ws.color
-                    : "var(--color-muted-foreground)",
+                  ws.id === activeWorkspaceId ? ws.color : "var(--color-muted-foreground)",
               }}
             />
           ))}

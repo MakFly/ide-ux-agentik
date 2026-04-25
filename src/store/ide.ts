@@ -213,12 +213,17 @@ type State = {
   thinking: boolean;
   webSearch: boolean;
   codexApiKey?: string;
+  claudeApiKey?: string;
   /** Codex --model override. `undefined` = use codex's own default. */
   codexModel?: string;
   /** Per-CLI selected model. Key = TerminalKind, value = model id. */
   selectedModelByCli: Record<string, string>;
   /** Per-CLI approval mode. Key = TerminalKind, value = ApprovalMode. Default "confirm". */
   approvalModeByCli: Record<string, "auto" | "confirm" | "sandbox">;
+  /** Claude context window override. `undefined` = auto from model. */
+  claudeContextOverride?: "200k" | "1m";
+  /** Last usage figures per CLI, captured at end of each adapter turn. */
+  lastUsageByCli: Record<string, { inputTokens: number; outputTokens: number; ts: number }>;
   codexAuth?: {
     idToken: string;
     accessToken: string;
@@ -271,9 +276,12 @@ type State = {
   pinSession: (sessionId: string) => void;
   unpinSession: (sessionId: string) => void;
   setCodexApiKey: (key: string) => void;
+  setClaudeApiKey: (key: string) => void;
   setCodexModel: (model: string | undefined) => void;
   setModelForCli: (cli: string, model: string) => void;
   setApprovalMode: (cli: string, mode: "auto" | "confirm" | "sandbox") => void;
+  setClaudeContextOverride: (override: "200k" | "1m" | undefined) => void;
+  setLastUsage: (cli: string, inputTokens: number, outputTokens: number) => void;
   setCodexAuth: (auth: State["codexAuth"] | null) => void;
   refreshCodexTokens: () => Promise<boolean>;
   togglePreview: () => void;
@@ -760,6 +768,10 @@ export const useIDE = create<State>()(
         typeof window !== "undefined"
           ? (window.localStorage.getItem("codex-api-key") ?? undefined)
           : undefined,
+      claudeApiKey:
+        typeof window !== "undefined"
+          ? (window.localStorage.getItem("claude-api-key") ?? undefined)
+          : undefined,
       codexModel:
         typeof window !== "undefined"
           ? (window.localStorage.getItem("codex-model") ?? undefined)
@@ -788,6 +800,14 @@ export const useIDE = create<State>()(
               }
             })()
           : {},
+      claudeContextOverride:
+        typeof window !== "undefined"
+          ? (() => {
+              const raw = window.localStorage.getItem("claude-context-override");
+              return raw === "200k" || raw === "1m" ? raw : undefined;
+            })()
+          : undefined,
+      lastUsageByCli: {},
       codexAuth:
         typeof window !== "undefined"
           ? (() => {
@@ -1234,6 +1254,13 @@ export const useIDE = create<State>()(
         }
         set({ codexApiKey: key || undefined });
       },
+      setClaudeApiKey: (key) => {
+        if (typeof window !== "undefined") {
+          if (key) window.localStorage.setItem("claude-api-key", key);
+          else window.localStorage.removeItem("claude-api-key");
+        }
+        set({ claudeApiKey: key || undefined });
+      },
       setCodexModel: (model) => {
         if (typeof window !== "undefined") {
           if (model) window.localStorage.setItem("codex-model", model);
@@ -1252,6 +1279,21 @@ export const useIDE = create<State>()(
         if (typeof window !== "undefined")
           window.localStorage.setItem("approval-mode-by-cli", JSON.stringify(next));
         set({ approvalModeByCli: next });
+      },
+      setClaudeContextOverride: (override) => {
+        if (typeof window !== "undefined") {
+          if (override) window.localStorage.setItem("claude-context-override", override);
+          else window.localStorage.removeItem("claude-context-override");
+        }
+        set({ claudeContextOverride: override });
+      },
+      setLastUsage: (cli, inputTokens, outputTokens) => {
+        set((s) => ({
+          lastUsageByCli: {
+            ...s.lastUsageByCli,
+            [cli]: { inputTokens, outputTokens, ts: Date.now() },
+          },
+        }));
       },
       setCodexAuth: (auth) => {
         if (typeof window !== "undefined") {

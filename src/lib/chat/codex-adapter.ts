@@ -7,42 +7,11 @@ import type {
 import { providerFor } from "@/lib/fs";
 import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import { codexExtraArgs } from "@/lib/chat/models";
+import { getReasoningEffort } from "@/components/ide/reasoning-pill";
 import { useIDE } from "@/store/ide";
 import { persistence } from "@/lib/persistence/client";
 import { maybeInterceptSlash } from "@/lib/chat/slash-commands";
-
-/**
- * Plan Mode prefix — verbatim from Piebald-AI's Claude Code system-prompts
- * repo, agent-prompt-plan-mode-enhanced.md (Claude Code v2.1.119, 2026-04-23).
- * Source: https://github.com/Piebald-AI/claude-code-system-prompts/blob/main/system-prompts/agent-prompt-plan-mode-enhanced.md
- */
-const PLAN_MODE_SYSTEM_PREFIX = `PLAN MODE — output a plan proposal, NOT an implementation.
-
-Hard rules for this turn (non-negotiable):
-- Do NOT run any tool. No shell, no ls, no grep, no cat, no file reads, no git, no web search.
-- Do NOT open, edit, create, delete or move files.
-- Do NOT ask clarifying questions.
-- Reply with ONE single agent message using the exact markdown format below, then stop.
-- Base the plan on the user's description and any context already present in the prompt history; do not try to verify assumptions by exploring.
-
-Required output — use EXACTLY this structure, nothing before, nothing after, no other headers:
-
-## Plan: <one-line title of the plan>
-
-<optional 1-2 sentence context about what you will do>
-
-- [ ] Step 1: <imperative step title> — <short rationale>
-- [ ] Step 2: <imperative step title> — <short rationale>
-- [ ] Step 3: <imperative step title> — <short rationale>
-(aim for 3 to 8 steps; each must start with "- [ ] " and be a single line)
-
-## Follow-up
-- <short refinement suggestion the user could ask for>
-- <another refinement suggestion>
-- <another refinement suggestion>
-(3 to 5 items; each a single line, no markdown formatting inside)
-
-Do NOT add a "Critical Files", "Analysis", "Context" or any other extra section. Do NOT prefix steps with numbers — the "- [ ]" prefix is mandatory.`;
+import { PLAN_MODE_SYSTEM_PREFIX, parsePlanMarkdown, isPlanModeOn } from "@/lib/chat/plan-mode";
 
 /**
  * assistant-ui adapter that runs `codex exec --json "<prompt>"` via the remote
@@ -107,86 +76,8 @@ function getActiveRemoteAgent() {
 const MAX_HISTORY_TURNS = 6;
 const MAX_PROMPT_CHARS = 40_000;
 
-/**
- * Parse a Plan-Mode markdown response into a structured `update_plan`-like
- * shape so PlanStepList can render the same UI whether or not Codex emits
- * native plan_update events. Expected format (enforced by
- * PLAN_MODE_SYSTEM_PREFIX):
- *
- *   ## Plan: <title>
- *   <optional explanation>
- *   - [ ] step 1
- *   - [ ] step 2
- *
- *   ## Follow-up
- *   - suggestion 1
- *   - suggestion 2
- */
-type ParsedPlan = {
-  title?: string;
-  explanation?: string;
-  steps: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>;
-  followUps: string[];
-};
-
-function parsePlanMarkdown(text: string): ParsedPlan | null {
-  if (!text) return null;
-  const planMatch = text.match(/##\s*Plan(?::\s*(.+?))?\s*\n([\s\S]*?)(?=\n##\s|$)/i);
-  if (!planMatch) return null;
-  const title = planMatch[1]?.trim() || undefined;
-  const planBody = planMatch[2] ?? "";
-
-  const steps: ParsedPlan["steps"] = [];
-  const explanationLines: string[] = [];
-  let sawStep = false;
-  for (const raw of planBody.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    const checkbox = line.match(/^[-*]\s*\[( |x|X|~)\]\s*(.+)$/);
-    if (checkbox) {
-      sawStep = true;
-      const marker = checkbox[1];
-      const status =
-        marker === "x" || marker === "X"
-          ? ("completed" as const)
-          : marker === "~"
-            ? ("in_progress" as const)
-            : ("pending" as const);
-      steps.push({ step: checkbox[2].trim(), status });
-    } else if (!sawStep) {
-      explanationLines.push(line);
-    }
-  }
-  if (steps.length === 0) return null;
-
-  const followMatch = text.match(/##\s*Follow[-\s]?up[^\n]*\n([\s\S]*?)(?=\n##\s|$)/i);
-  const followUps: string[] = [];
-  if (followMatch) {
-    for (const raw of followMatch[1].split(/\r?\n/)) {
-      const m = raw.match(/^\s*[-*]\s+(.+)$/);
-      if (m) followUps.push(m[1].trim());
-    }
-  }
-
-  return {
-    title,
-    explanation: explanationLines.length ? explanationLines.join(" ") : undefined,
-    steps,
-    followUps,
-  };
-}
-
-function isPlanModeOn(cli: "codex" | "claude" | "opencode" | "gemini"): boolean {
-  try {
-    const m = JSON.parse(localStorage.getItem("plan-mode-by-cli") ?? "{}") as Record<
-      string,
-      boolean
-    >;
-    return m[cli] === true;
-  } catch {
-    return false;
-  }
-}
+// PLAN_MODE_SYSTEM_PREFIX, parsePlanMarkdown, isPlanModeOn, ParsedPlan
+// were extracted to ./plan-mode.ts so claude-adapter can reuse them.
 
 function flattenMessages(options: ChatModelRunOptions): string {
   // A "turn" = 1 user + 1 assistant message. Slice from the tail.
@@ -341,6 +232,12 @@ export const codexAdapter: ChatModelAdapter = {
       if (!entries.has(key)) order.push(key);
       entries.set(key, entry);
     };
+    const removeEntry = (key: string) => {
+      if (!entries.has(key)) return;
+      entries.delete(key);
+      const i = order.indexOf(key);
+      if (i !== -1) order.splice(i, 1);
+    };
 
     // Async queue of events.
     const buffer: CodexEvent[] = [];
@@ -366,10 +263,31 @@ export const codexAdapter: ChatModelAdapter = {
     const env: Record<string, string> = {};
     if (codexApiKey) env.OPENAI_API_KEY = codexApiKey;
 
+    const effort = getReasoningEffort("codex");
+    const modelArgs = codexExtraArgs(codexModel) ?? [];
+    // Codex CLI does NOT have a `--effort` flag. Reasoning effort is set via
+    // a TOML config override: `-c model_reasoning_effort=<value>`. Accepted
+    // values per https://developers.openai.com/codex/config-basic :
+    //   minimal | low | medium | high | xhigh   (no `max` tier)
+    // Map our shared union accordingly.
+    const codexEffort = effort === "max" ? "xhigh" : effort;
+    // `model_reasoning_summary=auto` opts into progressive reasoning summary
+    // emission so the existing `item.updated`/`item.completed` handler below
+    // streams reasoning text into the UI as it arrives instead of dumping the
+    // full block once at completion. Per Codex docs (config-basic), accepted
+    // values are: none | auto | concise | detailed.
+    const extraArgs = [
+      ...modelArgs,
+      "-c",
+      `model_reasoning_effort="${codexEffort}"`,
+      "-c",
+      `model_reasoning_summary="auto"`,
+    ];
+
     const handle = await provider.chatSpawn({
       cli: "codex",
       prompt,
-      extraArgs: codexExtraArgs(codexModel),
+      extraArgs,
       env: Object.keys(env).length ? env : undefined,
     });
 
@@ -447,6 +365,12 @@ export const codexAdapter: ChatModelAdapter = {
                     } as Record<string, unknown>,
                     result: "ok",
                   });
+                  // Drop the raw markdown text entry (built incrementally on
+                  // earlier item.updated passes when the markdown wasn't yet
+                  // parseable) — otherwise both the wall-of-text AND the
+                  // structured PlanStepList render side-by-side, and both end
+                  // up in the persisted parts_json (visible after refresh).
+                  if (itemId) removeEntry(`msg:${itemId}`);
                   console.debug(
                     `[plan] promoted agent_message → ${parsed.steps.length} steps, ${parsed.followUps.length} follow-ups`,
                   );
@@ -553,6 +477,20 @@ export const codexAdapter: ChatModelAdapter = {
           upsert(nextAnon(), { kind: "note", text: `⚠️ ${msg}` });
         } else if (type === "turn.failed") {
           upsert(nextAnon(), { kind: "note", text: "⚠️ Turn failed" });
+        } else if (type === "turn.completed") {
+          // Codex emits usage at end of turn — persist for the ContextRing /
+          // StatusButton so the user sees real token counts, not an estimate.
+          const inputTokens =
+            typeof evt.usage?.input_tokens === "number" ? evt.usage.input_tokens : 0;
+          const outputTokens =
+            typeof evt.usage?.output_tokens === "number" ? evt.usage.output_tokens : 0;
+          if (inputTokens || outputTokens) {
+            try {
+              useIDE.getState().setLastUsage("codex", inputTokens, outputTokens);
+            } catch (e) {
+              console.warn("[codex] setLastUsage failed", e);
+            }
+          }
         }
 
         const rendered = renderParts(order, entries);
