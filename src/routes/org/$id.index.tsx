@@ -13,6 +13,8 @@ const searchSchema = z.object({
   workspace: z.string().optional(),
   branch: z.string().optional(),
   tab: tabSchema.optional(),
+  // Wave 2: task-centric URL — `?task=<id>` mirrors store.activeTaskId.
+  task: z.string().optional(),
 });
 
 export const Route = createFileRoute("/org/$id/")({

@@ -121,6 +121,8 @@ const searchSchema = z.object({
   workspace: z.string().optional(),
   branch: z.string().optional(),
   tab: tabSchema.optional(),
+  // Wave 2: task-centric URL — mirrors store.activeTaskId.
+  task: z.string().optional(),
 });
 
 export type IdeShellSearch = z.infer<typeof searchSchema>;
@@ -136,15 +138,17 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
 
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
   const activeBranchId = useIDE((s) => s.activeBranchId);
+  const activeTaskId = useIDE((s) => s.activeTaskId);
   const activeTab = useCurrentActiveTab();
   const setActiveBranch = useIDE((s) => s.setActiveBranch);
   const setActiveWorkspace = useIDE((s) => s.setActiveWorkspace);
   const setActiveTab = useIDE((s) => s.setActiveTab);
+  const setActiveTask = useIDE((s) => s.setActiveTask);
   const setApplyingFromUrl = useIDE((s) => s.setApplyingFromUrl);
   const workspaces = useIDE((s) => s.workspaces);
   const showTerminal = useIDE((s) => s.showTerminal);
 
-  const { workspace, branch, tab } = search;
+  const { workspace, branch, tab, task } = search;
 
   // URL → store, once on mount.
   useEffect(() => {
@@ -162,17 +166,20 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
       if (exists) setActiveBranch(branch);
     }
     if (tab) setActiveTab(tab as TabId);
+    if (task) setActiveTask(task);
     queueMicrotask(() => setApplyingFromUrl(false));
   }, [
     workspace,
     branch,
     tab,
+    task,
     activeWorkspaceId,
     activeBranchId,
     workspaces,
     setActiveBranch,
     setActiveWorkspace,
     setActiveTab,
+    setActiveTask,
     setApplyingFromUrl,
   ]);
 
@@ -189,9 +196,10 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
             : activeWorkspaceId || undefined,
         branch: MOCK_ENABLED && activeBranchId === "b1" ? undefined : activeBranchId || undefined,
         tab: activeTab === "overview" ? undefined : activeTab,
+        task: activeTaskId ?? undefined,
       });
     }
-  }, [activeWorkspaceId, activeBranchId, activeTab, onNavigate]);
+  }, [activeWorkspaceId, activeBranchId, activeTab, activeTaskId, onNavigate]);
 
   const taskDetailDialogTaskId = useIDE((s) => s.taskDetailDialogTaskId);
   const setTaskDetailDialogOpen = useIDE((s) => s.setTaskDetailDialogOpen);
