@@ -25,8 +25,21 @@ function taskStatusIcon(status: Task["status"]) {
   return <Clock className="h-3.5 w-3.5 text-muted-foreground" />;
 }
 
-function elapsedTime(startedAt: number | null, endedAt: number | null): string {
-  const now = Date.now();
+function useNowTick(active: boolean, intervalMs = 1000) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [active, intervalMs]);
+  return now;
+}
+
+function elapsedTime(
+  startedAt: number | null,
+  endedAt: number | null,
+  now: number = Date.now(),
+): string {
   const start = startedAt ? startedAt : now;
   const end = endedAt ? endedAt : now;
   const elapsed = Math.floor((end - start) / 1000);
@@ -35,17 +48,40 @@ function elapsedTime(startedAt: number | null, endedAt: number | null): string {
   return `${Math.floor(elapsed / 3600)}h`;
 }
 
-function TaskRow({ task, workspace }: { task: Task; workspace: Workspace }) {
+function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; now: number }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const setActiveSession = useIDE((s) => s.setActiveSession);
   const setActiveAgent = useIDE((s) => s.setActiveAgent);
   const activateInWorkspace = () => {
-    // 1:1 invariant: task.sessionId is the WorkspaceTerminal.id of the matching tab.
-    setActiveSession(task.sessionId);
+    // If this is a child task, find its conversation's root session-tab.
+    // Otherwise, use the task's own sessionId.
+    let targetSessionId = task.sessionId;
+    if (task.parentSessionId) {
+      // Child task: find the conversation's session-tab via conversationRootTaskId.
+      const tasksByWs = useIDE.getState().tasksByWorkspaceId[workspace.id] ?? [];
+      const allSessions = useIDE.getState().sessionsByWorkspaceId[workspace.id] ?? [];
+      // Walk up parent chain to find root
+      let cur = task;
+      const seen = new Set<string>();
+      while (cur.parentSessionId) {
+        if (seen.has(cur.id)) break;
+        seen.add(cur.id);
+        const parent = tasksByWs.find((t) => t.sessionId === cur.parentSessionId);
+        if (!parent) break;
+        cur = parent;
+      }
+      // Now cur is the root task; find its session-tab
+      const rootTab = allSessions.find((s) => s.taskId === cur.id);
+      if (rootTab) targetSessionId = rootTab.id;
+    }
+    setActiveSession(targetSessionId);
     setActiveAgent(task.cli as any);
   };
   return (
-    <div className="group mx-1.5 flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/50">
+    <div
+      className="group mx-1.5 flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/50"
+      data-task-id={task.id}
+    >
       <button
         type="button"
         onClick={activateInWorkspace}
@@ -60,7 +96,7 @@ function TaskRow({ task, workspace }: { task: Task; workspace: Workspace }) {
             {task.startedAt && (
               <>
                 <span>·</span>
-                <span>{elapsedTime(task.startedAt, task.endedAt)}</span>
+                <span data-task-elapsed>{elapsedTime(task.startedAt, task.endedAt, now)}</span>
               </>
             )}
           </div>
@@ -148,6 +184,8 @@ export function WorkspaceTasksSection() {
   const openNewTaskDialog = useIDE((s) => s.openNewTaskDialog);
 
   const tasks = tasksByWorkspaceId[workspaceId] ?? [];
+  const hasRunning = tasks.some((t) => t.status === "running");
+  const now = useNowTick(hasRunning);
 
   useEffect(() => {
     if (!workspace || workspace.source.kind !== "remote-agent") {
@@ -216,7 +254,7 @@ export function WorkspaceTasksSection() {
                 </div>
                 <div className="space-y-0.5">
                   {running.map((task) => (
-                    <TaskRow key={task.id} task={task} workspace={workspace} />
+                    <TaskRow key={task.id} task={task} workspace={workspace} now={now} />
                   ))}
                 </div>
               </>
@@ -229,7 +267,7 @@ export function WorkspaceTasksSection() {
                 </div>
                 <div className="space-y-0.5">
                   {awaiting.map((task) => (
-                    <TaskRow key={task.id} task={task} workspace={workspace} />
+                    <TaskRow key={task.id} task={task} workspace={workspace} now={now} />
                   ))}
                 </div>
               </>
@@ -242,7 +280,7 @@ export function WorkspaceTasksSection() {
                 </div>
                 <div className="space-y-0.5">
                   {done.map((task) => (
-                    <TaskRow key={task.id} task={task} workspace={workspace} />
+                    <TaskRow key={task.id} task={task} workspace={workspace} now={now} />
                   ))}
                 </div>
               </>
@@ -255,7 +293,7 @@ export function WorkspaceTasksSection() {
                 </div>
                 <div className="space-y-0.5">
                   {failed.map((task) => (
-                    <TaskRow key={task.id} task={task} workspace={workspace} />
+                    <TaskRow key={task.id} task={task} workspace={workspace} now={now} />
                   ))}
                 </div>
               </>

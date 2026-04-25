@@ -380,6 +380,7 @@ function AgentCliTabs({
             <div
               key={s.id}
               data-session-id={s.id}
+              data-active={active}
               onMouseDown={(e) => {
                 if (e.button === 1) {
                   e.preventDefault();

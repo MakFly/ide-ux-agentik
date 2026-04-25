@@ -52,6 +52,10 @@ export type WorkspaceTerminal = {
   // task.sessionId === WorkspaceTerminal.id, so taskId is the link back to
   // the parent task row.
   taskId?: string;
+  // Conversation aggregation (Wave 3): points to the root task of the
+  // conversation thread. Immutable for the lifetime of this tab.
+  // If undefined, treated as taskId (backward-compat for legacy sessions).
+  conversationRootTaskId?: string;
 };
 
 export type Worktree = {
@@ -783,6 +787,26 @@ function buildInitialTasksByWorktreeId(): Record<string, WorkTask[]> {
   }
 
   return result;
+}
+
+/**
+ * Resolve the conversation root task by walking up the parentSessionId chain.
+ * Returns the root task's id (which has parentSessionId = null).
+ */
+function resolveConversationRoot(
+  task: import("@/lib/fs/remote-agent").Task,
+  allTasks: import("@/lib/fs/remote-agent").Task[],
+): string {
+  let cur = task;
+  const seen = new Set<string>();
+  while (cur.parentSessionId) {
+    if (seen.has(cur.id)) break; // cycle detection
+    seen.add(cur.id);
+    const parent = allTasks.find((t) => t.sessionId === cur.parentSessionId);
+    if (!parent) break;
+    cur = parent;
+  }
+  return cur.id;
 }
 
 export const useIDE = create<State>()(
@@ -2105,6 +2129,7 @@ export const useIDE = create<State>()(
             workspaceId: workspace.id,
             lastCommand: titleByKind[cliKind],
             taskId,
+            conversationRootTaskId: taskId,
           };
           set((s) => {
             const current = s.sessionsByWorkspaceId[workspace.id] ?? [];
@@ -2138,10 +2163,9 @@ export const useIDE = create<State>()(
           const nextTasks = idx >= 0 ? [...tasks] : [...tasks, task];
           if (idx >= 0) nextTasks[idx] = task;
 
-          // Mirror the task as a session-tab in <Workspace> (1:1 invariant).
-          // Choke point used by all task-arrival paths: onTaskCreated, onTaskStarted,
-          // and direct calls from NewTaskDialog. Keeps sessionsByWorkspaceId in sync
-          // regardless of which entry point created the task.
+          // Conversation aggregation: determine if this is a root task or a child.
+          const conversationRootTaskId = resolveConversationRoot(task, nextTasks);
+
           const titleByKind: Record<TerminalKind, string> = {
             codex: "Codex",
             claude: "Claude Code",
@@ -2151,21 +2175,48 @@ export const useIDE = create<State>()(
           const cliKind = (task.cli as TerminalKind) ?? "codex";
           const tabStatus: WorkspaceTerminal["status"] =
             task.status === "running" ? "busy" : "ready";
-          const sessionTab: WorkspaceTerminal = {
-            id: task.sessionId,
-            kind: cliKind,
-            title: task.title?.slice(0, 40) || titleByKind[cliKind],
-            status: tabStatus,
-            workspaceId: task.workspaceId,
-            lastCommand: titleByKind[cliKind],
-            taskId: task.id,
-          };
+
           const existingSessions = s.sessionsByWorkspaceId[task.workspaceId] ?? [];
-          const tabIdx = existingSessions.findIndex((t) => t.id === task.sessionId);
-          const nextSessions =
-            tabIdx >= 0
-              ? existingSessions.map((t) => (t.id === task.sessionId ? sessionTab : t))
-              : [...existingSessions, sessionTab];
+          let nextSessions = existingSessions;
+
+          if (!task.parentSessionId) {
+            // Root task: create or update its session-tab (1:1 invariant).
+            const sessionTab: WorkspaceTerminal = {
+              id: task.sessionId,
+              kind: cliKind,
+              title: task.title?.slice(0, 40) || titleByKind[cliKind],
+              status: tabStatus,
+              workspaceId: task.workspaceId,
+              lastCommand: titleByKind[cliKind],
+              taskId: task.id,
+              conversationRootTaskId: task.id,
+            };
+            const tabIdx = nextSessions.findIndex((t) => t.id === task.sessionId);
+            nextSessions =
+              tabIdx >= 0
+                ? nextSessions.map((t) => (t.id === task.sessionId ? sessionTab : t))
+                : [...nextSessions, sessionTab];
+          } else {
+            // Child task: update the conversation's existing tab (don't create a new one).
+            // Find the session-tab whose conversationRootTaskId matches the conversation root.
+            const rootSessionTab = nextSessions.find(
+              (t) => (t.conversationRootTaskId ?? t.taskId) === conversationRootTaskId,
+            );
+            if (rootSessionTab) {
+              // Update the existing tab to point to this new child task.
+              nextSessions = nextSessions.map((t) =>
+                t.id === rootSessionTab.id
+                  ? {
+                      ...t,
+                      taskId: task.id, // latest task in the conversation
+                      status: tabStatus,
+                      title: task.title?.slice(0, 40) || t.title,
+                    }
+                  : t,
+              );
+            }
+            // If no conversation tab found (shouldn't happen), silently skip creating a tab.
+          }
 
           return {
             tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [task.workspaceId]: nextTasks },
@@ -2453,6 +2504,36 @@ export const useIDE = create<State>()(
     },
   ),
 );
+
+// ─── Development test hooks ───────────────────────────────────────────────────
+
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  (window as any).__test = {
+    seedTask: (task: import("@/lib/fs/remote-agent").Task) => {
+      useIDE.getState().upsertTask(task);
+    },
+    pushTaskEvent: (taskId: string, event: unknown) => {
+      useIDE.setState((s) => {
+        const cur = s.taskEventsByTaskId[taskId] ?? [];
+        const entry = {
+          id: -1,
+          taskId,
+          ts: Date.now(),
+          level: "info" as const,
+          source: "stdout" as const,
+          data: event,
+        };
+        return {
+          taskEventsByTaskId: {
+            ...s.taskEventsByTaskId,
+            [taskId]: [...cur, entry as any],
+          },
+        };
+      });
+    },
+    getStore: () => useIDE.getState(),
+  };
+}
 
 // ─── Derived-scope hooks ──────────────────────────────────────────────────────
 
