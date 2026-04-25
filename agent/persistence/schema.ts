@@ -68,4 +68,37 @@ CREATE TABLE IF NOT EXISTS summaries (
 
 CREATE INDEX IF NOT EXISTS idx_summaries_session
   ON summaries(session_id, ts DESC);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  parent_session_id TEXT,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  cli TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  worktree_path TEXT,
+  branch_name TEXT,
+  base_ref TEXT,
+  exit_code INTEGER,
+  error_message TEXT,
+  session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  ended_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_workspace_status
+  ON tasks(workspace_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  ts INTEGER NOT NULL,
+  level TEXT NOT NULL,
+  source TEXT NOT NULL,
+  data_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id, ts);
 `;

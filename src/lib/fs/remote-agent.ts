@@ -41,6 +41,25 @@ export type ChatHandle = {
   onEnd(cb: (code: number | null, signal: string | null) => void): () => void;
 };
 
+export type Task = {
+  id: string;
+  workspaceId: string;
+  parentSessionId: string | null;
+  title: string;
+  prompt: string;
+  cli: string;
+  status: "queued" | "running" | "awaiting" | "done" | "failed" | "cancelled";
+  worktreePath: string | null;
+  branchName: string | null;
+  baseRef: string | null;
+  exitCode: number | null;
+  errorMessage: string | null;
+  sessionId: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  endedAt: number | null;
+};
+
 /**
  * Remote-agent provider.
  *
@@ -90,6 +109,27 @@ type Pending = {
   reject: (e: unknown) => void;
 };
 
+function taskFromDb(row: Record<string, unknown>): Task {
+  return {
+    id: row.id as string,
+    workspaceId: row.workspace_id as string,
+    parentSessionId: (row.parent_session_id as string) || null,
+    title: row.title as string,
+    prompt: row.prompt as string,
+    cli: row.cli as string,
+    status: row.status as Task["status"],
+    worktreePath: (row.worktree_path as string) || null,
+    branchName: (row.branch_name as string) || null,
+    baseRef: (row.base_ref as string) || null,
+    exitCode: (row.exit_code as number) || null,
+    errorMessage: (row.error_message as string) || null,
+    sessionId: (row.session_id as string) || null,
+    createdAt: row.created_at as number,
+    startedAt: (row.started_at as number) || null,
+    endedAt: (row.ended_at as number) || null,
+  };
+}
+
 export class RemoteAgentProvider implements FsProvider {
   readonly kind = "remote-agent" as const;
 
@@ -112,6 +152,20 @@ export class RemoteAgentProvider implements FsProvider {
     Set<(chunk: { stream: "stdout" | "stderr"; data: string }) => void>
   >();
   private cloneEndListeners = new Map<string, Set<(r: { code: number; dest: string }) => void>>();
+  private taskCreatedListeners = new Set<(t: Task) => void>();
+  private taskStartedListeners = new Set<
+    (e: { taskId: string; sessionId: string; worktreePath: string; branchName: string }) => void
+  >();
+  private taskEventListeners = new Set<(e: { taskId: string; event: unknown }) => void>();
+  private taskEndedListeners = new Set<
+    (e: {
+      taskId: string;
+      status: Task["status"];
+      exitCode: number | null;
+      errorMessage: string | null;
+    }) => void
+  >();
+  private taskWorktreeRemovedListeners = new Set<(e: { taskId: string }) => void>();
   private connecting: Promise<void> | null = null;
 
   constructor(
@@ -169,6 +223,11 @@ export class RemoteAgentProvider implements FsProvider {
         this.ptyExitListeners.clear();
         this.cloneProgressListeners.clear();
         this.cloneEndListeners.clear();
+        this.taskCreatedListeners.clear();
+        this.taskStartedListeners.clear();
+        this.taskEventListeners.clear();
+        this.taskEndedListeners.clear();
+        this.taskWorktreeRemovedListeners.clear();
       });
       ws.addEventListener("open", async () => {
         try {
@@ -263,6 +322,73 @@ export class RemoteAgentProvider implements FsProvider {
       for (const cb of this.cloneEndListeners.get(id) ?? []) cb({ code, dest });
       this.cloneProgressListeners.delete(id);
       this.cloneEndListeners.delete(id);
+      return;
+    }
+    if ("method" in msg && msg.method === "task.created") {
+      const { task } = msg.params as { task: Record<string, unknown> };
+      const t = taskFromDb(task);
+      for (const cb of this.taskCreatedListeners) {
+        try {
+          cb(t);
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+    if ("method" in msg && msg.method === "task.started") {
+      const { taskId, sessionId, worktreePath, branchName } = msg.params as {
+        taskId: string;
+        sessionId: string;
+        worktreePath: string;
+        branchName: string;
+      };
+      for (const cb of this.taskStartedListeners) {
+        try {
+          cb({ taskId, sessionId, worktreePath, branchName });
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+    if ("method" in msg && msg.method === "task.event") {
+      const { taskId, event } = msg.params as { taskId: string; event: unknown };
+      for (const cb of this.taskEventListeners) {
+        try {
+          cb({ taskId, event });
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+    if ("method" in msg && msg.method === "task.ended") {
+      const { taskId, status, exitCode, errorMessage } = msg.params as {
+        taskId: string;
+        status: Task["status"];
+        exitCode: number | null;
+        errorMessage: string | null;
+      };
+      for (const cb of this.taskEndedListeners) {
+        try {
+          cb({ taskId, status, exitCode, errorMessage });
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+    if ("method" in msg && msg.method === "task.worktreeRemoved") {
+      const { taskId } = msg.params as { taskId: string };
+      for (const cb of this.taskWorktreeRemovedListeners) {
+        try {
+          cb({ taskId });
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
     }
   }
 
@@ -441,6 +567,73 @@ export class RemoteAgentProvider implements FsProvider {
 
   async gitCloneCancel(id: string): Promise<void> {
     await this.call<void>("git.clone.cancel", { id });
+  }
+
+  async taskCreate(params: {
+    workspaceId: string;
+    title: string;
+    prompt: string;
+    cli: string;
+    baseRef?: string;
+    parentSessionId?: string;
+  }): Promise<{ id: string }> {
+    return this.call("task.create", params);
+  }
+
+  async taskList(params: { workspaceId: string; status?: Task["status"] }): Promise<Task[]> {
+    const tasks = await this.call<Record<string, unknown>[]>("task.list", params);
+    return tasks.map(taskFromDb);
+  }
+
+  async taskStart(id: string): Promise<void> {
+    await this.call<void>("task.start", { id });
+  }
+
+  async taskCancel(id: string): Promise<void> {
+    await this.call<void>("task.cancel", { id });
+  }
+
+  async taskRemoveWorktree(id: string, deleteBranch?: boolean): Promise<void> {
+    await this.call<void>("task.removeWorktree", { id, deleteBranch });
+  }
+
+  onTaskCreated(cb: (task: Task) => void): () => void {
+    this.taskCreatedListeners.add(cb);
+    return () => this.taskCreatedListeners.delete(cb);
+  }
+
+  onTaskStarted(
+    cb: (e: {
+      taskId: string;
+      sessionId: string;
+      worktreePath: string;
+      branchName: string;
+    }) => void,
+  ): () => void {
+    this.taskStartedListeners.add(cb);
+    return () => this.taskStartedListeners.delete(cb);
+  }
+
+  onTaskEvent(cb: (e: { taskId: string; event: unknown }) => void): () => void {
+    this.taskEventListeners.add(cb);
+    return () => this.taskEventListeners.delete(cb);
+  }
+
+  onTaskEnded(
+    cb: (e: {
+      taskId: string;
+      status: Task["status"];
+      exitCode: number | null;
+      errorMessage: string | null;
+    }) => void,
+  ): () => void {
+    this.taskEndedListeners.add(cb);
+    return () => this.taskEndedListeners.delete(cb);
+  }
+
+  onTaskWorktreeRemoved(cb: (e: { taskId: string }) => void): () => void {
+    this.taskWorktreeRemovedListeners.add(cb);
+    return () => this.taskWorktreeRemovedListeners.delete(cb);
   }
 
   watch(path: string, cb: (ev: FsWatchEvent) => void): FsUnsubscribe {

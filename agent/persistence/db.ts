@@ -57,6 +57,34 @@ export type Summary = {
   ts: number;
 };
 
+export type DbTask = {
+  id: string;
+  workspace_id: string;
+  parent_session_id: string | null;
+  title: string;
+  prompt: string;
+  cli: string;
+  status: "queued" | "running" | "awaiting" | "done" | "failed" | "cancelled";
+  worktree_path: string | null;
+  branch_name: string | null;
+  base_ref: string | null;
+  exit_code: number | null;
+  error_message: string | null;
+  session_id: string | null;
+  created_at: number;
+  started_at: number | null;
+  ended_at: number | null;
+};
+
+export type DbTaskLog = {
+  id: number;
+  task_id: string;
+  ts: number;
+  level: string;
+  source: string;
+  data_json: string;
+};
+
 export const DB_DIR = path.join(os.homedir(), ".ide-ux-agentik");
 const DB_PATH = path.join(DB_DIR, "data.sqlite");
 const BLOBS_DIR = path.join(DB_DIR, "blobs");
@@ -170,7 +198,9 @@ export const sessionsRepo = {
     const db = openDb();
     const now = Date.now();
     const id = params.id ?? randomUUID();
-    db.prepare<[string, string, string, string | null, string | null, string | null, number, number]>(
+    db.prepare<
+      [string, string, string, string | null, string | null, string | null, number, number]
+    >(
       `INSERT OR IGNORE INTO sessions (id, workspace_id, cli, title, model, approval_mode, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
@@ -189,9 +219,10 @@ export const sessionsRepo = {
   list(workspaceId: string): Session[] {
     const db = openDb();
     return db
-      .prepare<[string], Session>(
-        `SELECT * FROM sessions WHERE workspace_id = ? ORDER BY updated_at DESC`,
-      )
+      .prepare<
+        [string],
+        Session
+      >(`SELECT * FROM sessions WHERE workspace_id = ? ORDER BY updated_at DESC`)
       .all(workspaceId);
   },
 
@@ -263,7 +294,22 @@ type MessageRow = {
 
 function _insertMessage(row: MessageRow): void {
   const db = openDb();
-  db.prepare<[string, string, string | null, string | null, number, string, string, string | null, string | null, string | null, string | null, number]>(
+  db.prepare<
+    [
+      string,
+      string,
+      string | null,
+      string | null,
+      number,
+      string,
+      string,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      number,
+    ]
+  >(
     `INSERT INTO messages
        (id, session_id, parent_id, logical_parent_id, is_sidechain, role, parts_json,
         cwd, git_branch, slug, version, ts)
@@ -335,9 +381,10 @@ export const messagesRepo = {
       return rows.reverse();
     }
     const rows = db
-      .prepare<[string, number], Message>(
-        `SELECT * FROM messages WHERE session_id = ? ORDER BY ts DESC LIMIT ?`,
-      )
+      .prepare<
+        [string, number],
+        Message
+      >(`SELECT * FROM messages WHERE session_id = ? ORDER BY ts DESC LIMIT ?`)
       .all(sessionId, limit);
     return rows.reverse();
   },
@@ -413,17 +460,16 @@ export const snapshotsRepo = {
          (id, session_id, message_id, path, content_before_hash, content_after_hash, ts)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(id, params.sessionId, params.messageId ?? null, params.path, beforeHash, afterHash, now);
-    return db
-      .prepare<[string], FileSnapshot>(`SELECT * FROM file_snapshots WHERE id = ?`)
-      .get(id)!;
+    return db.prepare<[string], FileSnapshot>(`SELECT * FROM file_snapshots WHERE id = ?`).get(id)!;
   },
 
   listBySession(sessionId: string): FileSnapshot[] {
     const db = openDb();
     return db
-      .prepare<[string], FileSnapshot>(
-        `SELECT * FROM file_snapshots WHERE session_id = ? ORDER BY ts`,
-      )
+      .prepare<
+        [string],
+        FileSnapshot
+      >(`SELECT * FROM file_snapshots WHERE session_id = ? ORDER BY ts`)
       .all(sessionId);
   },
 
@@ -456,9 +502,166 @@ export const summariesRepo = {
   listBySession(sessionId: string): Summary[] {
     const db = openDb();
     return db
-      .prepare<[string], Summary>(
-        `SELECT * FROM summaries WHERE session_id = ? ORDER BY ts DESC`,
-      )
+      .prepare<[string], Summary>(`SELECT * FROM summaries WHERE session_id = ? ORDER BY ts DESC`)
       .all(sessionId);
+  },
+};
+
+// ─── Tasks ────────────────────────────────────────────────────────────────────
+
+type CreateTaskParams = {
+  id: string;
+  workspaceId: string;
+  parentSessionId?: string;
+  title: string;
+  prompt: string;
+  cli: string;
+  baseRef?: string;
+};
+
+export const tasksRepo = {
+  create(params: CreateTaskParams): DbTask {
+    const db = openDb();
+    const now = Date.now();
+    db.prepare<[string, string, string | null, string, string, string, number]>(
+      `INSERT INTO tasks (id, workspace_id, parent_session_id, title, prompt, cli, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      params.id,
+      params.workspaceId,
+      params.parentSessionId ?? null,
+      params.title,
+      params.prompt,
+      params.cli,
+      now,
+    );
+    return tasksRepo.get(params.id)!;
+  },
+
+  get(id: string): DbTask | null {
+    const db = openDb();
+    return db.prepare<[string], DbTask>(`SELECT * FROM tasks WHERE id = ?`).get(id) ?? null;
+  },
+
+  list(workspaceId: string, opts?: { status?: DbTask["status"]; limit?: number }): DbTask[] {
+    const db = openDb();
+    const limit = opts?.limit ?? 100;
+    if (opts?.status) {
+      return db
+        .prepare<[string, string, number], DbTask>(
+          `SELECT * FROM tasks
+           WHERE workspace_id = ? AND status = ?
+           ORDER BY created_at DESC LIMIT ?`,
+        )
+        .all(workspaceId, opts.status, limit);
+    }
+    return db
+      .prepare<
+        [string, number],
+        DbTask
+      >(`SELECT * FROM tasks WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?`)
+      .all(workspaceId, limit);
+  },
+
+  update(
+    id: string,
+    patch: Partial<
+      Pick<
+        DbTask,
+        | "status"
+        | "worktree_path"
+        | "branch_name"
+        | "base_ref"
+        | "exit_code"
+        | "error_message"
+        | "session_id"
+        | "started_at"
+        | "ended_at"
+      >
+    >,
+  ): void {
+    const db = openDb();
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+
+    if (patch.status !== undefined) {
+      sets.push("status = ?");
+      vals.push(patch.status);
+    }
+    if (patch.worktree_path !== undefined) {
+      sets.push("worktree_path = ?");
+      vals.push(patch.worktree_path);
+    }
+    if (patch.branch_name !== undefined) {
+      sets.push("branch_name = ?");
+      vals.push(patch.branch_name);
+    }
+    if (patch.base_ref !== undefined) {
+      sets.push("base_ref = ?");
+      vals.push(patch.base_ref);
+    }
+    if (patch.exit_code !== undefined) {
+      sets.push("exit_code = ?");
+      vals.push(patch.exit_code);
+    }
+    if (patch.error_message !== undefined) {
+      sets.push("error_message = ?");
+      vals.push(patch.error_message);
+    }
+    if (patch.session_id !== undefined) {
+      sets.push("session_id = ?");
+      vals.push(patch.session_id);
+    }
+    if (patch.started_at !== undefined) {
+      sets.push("started_at = ?");
+      vals.push(patch.started_at);
+    }
+    if (patch.ended_at !== undefined) {
+      sets.push("ended_at = ?");
+      vals.push(patch.ended_at);
+    }
+
+    if (sets.length === 0) return;
+    vals.push(id);
+    db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+  },
+
+  delete(id: string): void {
+    const db = openDb();
+    db.prepare(`DELETE FROM tasks WHERE id = ?`).run(id);
+  },
+};
+
+// ─── Task Logs ────────────────────────────────────────────────────────────────
+
+export const taskLogsRepo = {
+  append(taskId: string, level: string, source: string, data: unknown): void {
+    const db = openDb();
+    const now = Date.now();
+    db.prepare<[string, number, string, string, string]>(
+      `INSERT INTO task_logs (task_id, ts, level, source, data_json)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(taskId, now, level, source, JSON.stringify(data));
+  },
+
+  list(taskId: string, opts?: { since?: number; limit?: number }): DbTaskLog[] {
+    const db = openDb();
+    const limit = opts?.limit ?? 1000;
+
+    if (opts?.since !== undefined) {
+      return db
+        .prepare<[string, number, number], DbTaskLog>(
+          `SELECT * FROM task_logs WHERE task_id = ? AND ts >= ?
+           ORDER BY ts LIMIT ?`,
+        )
+        .all(taskId, opts.since, limit);
+    }
+
+    return db
+      .prepare<
+        [string, number],
+        DbTaskLog
+      >(`SELECT * FROM task_logs WHERE task_id = ? ORDER BY ts LIMIT ?`)
+      .all(taskId, limit);
   },
 };

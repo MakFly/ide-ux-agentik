@@ -33,6 +33,9 @@ import {
   snapshotsRepo,
   summariesRepo,
   blobsRepo,
+  tasksRepo,
+  taskLogsRepo,
+  type DbTask,
 } from "./persistence/db.ts";
 import { importCodexRollouts } from "./persistence/import-codex.ts";
 
@@ -110,6 +113,66 @@ function validateExtraArgs(cli: string, args: string[]): string[] {
   return out;
 }
 
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 30);
+}
+
+async function getRemoteDefaultBranch(gitRoot: string): Promise<string> {
+  try {
+    const { stdout } = await gitExec(["symbolic-ref", "refs/remotes/origin/HEAD"], gitRoot);
+    const match = stdout.match(/refs\/remotes\/origin\/(.+)/);
+    return match ? match[1] : "main";
+  } catch {
+    return "main";
+  }
+}
+
+async function setupTaskWorktree(
+  gitRoot: string,
+  worktreePath: string,
+  branchName: string,
+  baseRef: string,
+): Promise<void> {
+  let attempt = 0;
+  let finalBranchName = branchName;
+  while (attempt < 3) {
+    try {
+      await gitExec(["worktree", "add", "-b", finalBranchName, worktreePath, baseRef], gitRoot);
+      return;
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (msg.includes("already exists")) {
+        attempt++;
+        finalBranchName = `${branchName}-${Date.now()}`;
+      } else {
+        throw e;
+      }
+    }
+  }
+  throw new Error(`setupTaskWorktree: failed after 3 retries`);
+}
+
+async function removeTaskWorktree(
+  gitRoot: string,
+  worktreePath: string,
+  branchName: string,
+): Promise<void> {
+  try {
+    await gitExec(["worktree", "remove", "--force", worktreePath], gitRoot);
+  } catch (e) {
+    console.warn("[task] worktree remove failed:", (e as Error).message);
+  }
+  try {
+    await gitExec(["branch", "-D", branchName], gitRoot);
+  } catch (e) {
+    console.warn("[task] branch delete failed:", (e as Error).message);
+  }
+}
+
 type ServerOpts = { root: string; port: number; token: string; host: string };
 
 function parseArgs(): ServerOpts {
@@ -163,12 +226,23 @@ type GitCloneSession = {
   dest: string;
 };
 
+type TaskSession = {
+  id: string;
+  taskId: string;
+  sessionId: string;
+  proc: ChildProcess;
+  alive: boolean;
+};
+
 type Ctx = {
   authed: boolean;
   watchers: Map<string, FSWatcher>;
   ptySessions: Map<string, PtySession>;
   chatSessions: Map<string, ChatSession>;
   gitCloneSessions: Map<string, GitCloneSession>;
+  taskSessions: Map<string, TaskSession>;
+  runningTasks: Set<string>;
+  pendingTasks: string[];
   ws: { send: (d: string) => void };
 };
 
@@ -234,6 +308,17 @@ function parseGitStatus(output: string): { branch: string; files: GitEntry[] } {
     });
   }
   return { branch, files };
+}
+
+let globalCtx: Ctx | null = null;
+
+function drainPendingTasks() {
+  if (!globalCtx || globalCtx.runningTasks.size >= 3) return;
+  const next = globalCtx.pendingTasks.shift();
+  if (!next) return;
+  methods["task.start"]({ id: next }, globalCtx).catch((e) =>
+    console.error("[task] drain error:", e),
+  );
 }
 
 const methods: Record<string, Handler> = {
@@ -765,6 +850,344 @@ const methods: Record<string, Handler> = {
     }
 
     return null;
+  },
+
+  // ─── Task RPC ──────────────────────────────────────────────────────────────
+
+  async "task.create"({ workspaceId, title, prompt, cli, baseRef, parentSessionId }, _ctx) {
+    const wid = String(workspaceId ?? "").trim();
+    const t = String(title ?? "").trim();
+    const p = String(prompt ?? "").trim();
+    const c = String(cli ?? "").trim();
+    if (!wid) throw new Error("task.create: workspaceId is required");
+    if (!t) throw new Error("task.create: title is required");
+    if (!p) throw new Error("task.create: prompt is required");
+    if (!c) throw new Error("task.create: cli is required");
+    if (!ALLOWED_CHAT_FLAGS[c]) throw new Error(`task.create: unsupported cli "${c}"`);
+
+    const taskId = randomUUID();
+    const task = tasksRepo.create({
+      id: taskId,
+      workspaceId: wid,
+      title: t,
+      prompt: p,
+      cli: c,
+      parentSessionId: parentSessionId !== undefined ? String(parentSessionId) : undefined,
+    });
+
+    _ctx.ws.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "task.created",
+        params: { task },
+      }),
+    );
+
+    return { id: taskId };
+  },
+
+  async "task.list"({ workspaceId, status }, _ctx) {
+    const wid = String(workspaceId ?? "").trim();
+    if (!wid) throw new Error("task.list: workspaceId is required");
+    const opts = status ? { status: String(status) as DbTask["status"] } : undefined;
+    return tasksRepo.list(wid, opts);
+  },
+
+  async "task.start"({ id }, ctx) {
+    const taskId = String(id ?? "").trim();
+    if (!taskId) throw new Error("task.start: id is required");
+
+    const task = tasksRepo.get(taskId);
+    if (!task) throw new Error(`task.start: task not found: ${taskId}`);
+
+    if (ctx.runningTasks.size >= 3) {
+      ctx.pendingTasks.push(taskId);
+      tasksRepo.update(taskId, { status: "awaiting" });
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "task.queued",
+          params: { taskId, reason: "concurrency limit (3 running)" },
+        }),
+      );
+      return { status: "queued" };
+    }
+
+    ctx.runningTasks.add(taskId);
+    tasksRepo.update(taskId, { status: "running", started_at: Date.now() });
+
+    ctx.ws.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "task.started",
+        params: { taskId },
+      }),
+    );
+
+    const spawnTaskAsync = async () => {
+      try {
+        const currentTask = tasksRepo.get(taskId);
+        if (!currentTask) {
+          ctx.runningTasks.delete(taskId);
+          drainPendingTasks();
+          return;
+        }
+
+        const gitRoot = root;
+        const worktreePath = path.join(root, ".multica", "tasks", taskId);
+        const branchName = `task/${slugify(currentTask.title)}-${taskId.slice(0, 8)}`;
+        const baseRef = currentTask.base_ref || (await getRemoteDefaultBranch(gitRoot));
+
+        try {
+          await setupTaskWorktree(gitRoot, worktreePath, branchName, baseRef);
+        } catch (e) {
+          const errorMsg = (e as Error).message;
+          tasksRepo.update(taskId, {
+            status: "failed",
+            error_message: errorMsg,
+            ended_at: Date.now(),
+          });
+          ctx.ws.send(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              method: "task.ended",
+              params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
+            }),
+          );
+          ctx.runningTasks.delete(taskId);
+          drainPendingTasks();
+          return;
+        }
+
+        tasksRepo.update(taskId, {
+          worktree_path: worktreePath,
+          branch_name: branchName,
+          base_ref: baseRef,
+        });
+
+        const cliKind = currentTask.cli;
+        const text = currentTask.prompt;
+        const safeExtra: string[] = [];
+
+        let execCmd: string;
+        let execArgs: string[];
+        if (cliKind === "codex") {
+          execCmd = "codex";
+          execArgs = ["exec", "--json", ...safeExtra, text];
+        } else if (cliKind === "claude") {
+          execCmd = "claude";
+          execArgs = ["-p", text, "--output-format", "stream-json", "--verbose", ...safeExtra];
+        } else {
+          throw new Error(`unsupported cli "${cliKind}"`);
+        }
+
+        const mergedEnv = safeEnv();
+        const sessionId = randomUUID();
+        const proc = cpSpawn(execCmd, execArgs, {
+          cwd: worktreePath,
+          env: mergedEnv,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+        const taskSession: TaskSession = { id: sessionId, taskId, sessionId, proc, alive: true };
+        ctx.taskSessions.set(sessionId, taskSession);
+
+        tasksRepo.update(taskId, { session_id: sessionId });
+
+        let buf = "";
+        proc.stdout?.setEncoding("utf8");
+        proc.stdout?.on("data", (chunk: string) => {
+          buf += chunk;
+          let nl: number;
+          while ((nl = buf.indexOf("\n")) !== -1) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (!line) continue;
+            let evt: unknown;
+            try {
+              evt = JSON.parse(line);
+            } catch {
+              evt = { type: "raw", text: line };
+            }
+            ctx.ws.send(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                method: "task.event",
+                params: { taskId, event: evt },
+              }),
+            );
+            taskLogsRepo.append(taskId, "info", "stdout", evt);
+          }
+        });
+
+        proc.stderr?.setEncoding("utf8");
+        proc.stderr?.on("data", (chunk: string) => {
+          ctx.ws.send(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              method: "task.event",
+              params: { taskId, event: { type: "stderr", text: chunk } },
+            }),
+          );
+          taskLogsRepo.append(taskId, "warn", "stderr", { text: chunk });
+        });
+
+        proc.on("exit", (code, signal) => {
+          if (!taskSession.alive) return;
+          taskSession.alive = false;
+
+          if (buf.trim()) {
+            try {
+              const evt = JSON.parse(buf.trim());
+              ctx.ws.send(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  method: "task.event",
+                  params: { taskId, event: evt },
+                }),
+              );
+              taskLogsRepo.append(taskId, "info", "stdout", evt);
+            } catch {
+              /* ignore malformed trailing line */
+            }
+            buf = "";
+          }
+
+          const finalStatus =
+            code === 0 || signal === null ? ("done" as const) : ("failed" as const);
+          tasksRepo.update(taskId, {
+            status: finalStatus,
+            exit_code: code ?? undefined,
+            ended_at: Date.now(),
+          });
+
+          ctx.ws.send(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              method: "task.ended",
+              params: { taskId, status: finalStatus, exitCode: code, errorMessage: signal },
+            }),
+          );
+
+          ctx.taskSessions.delete(sessionId);
+          ctx.runningTasks.delete(taskId);
+          drainPendingTasks();
+        });
+
+        proc.on("error", (err) => {
+          if (!taskSession.alive) return;
+          taskSession.alive = false;
+          const errorMsg = err.message;
+          ctx.ws.send(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              method: "task.event",
+              params: { taskId, event: { type: "error", message: errorMsg } },
+            }),
+          );
+          taskLogsRepo.append(taskId, "error", "spawn", { message: errorMsg });
+
+          tasksRepo.update(taskId, {
+            status: "failed",
+            error_message: errorMsg,
+            ended_at: Date.now(),
+          });
+
+          ctx.ws.send(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              method: "task.ended",
+              params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
+            }),
+          );
+
+          ctx.taskSessions.delete(sessionId);
+          ctx.runningTasks.delete(taskId);
+          drainPendingTasks();
+        });
+      } catch (e) {
+        const errorMsg = (e as Error).message;
+        tasksRepo.update(taskId, {
+          status: "failed",
+          error_message: errorMsg,
+          ended_at: Date.now(),
+        });
+        ctx.ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            method: "task.ended",
+            params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
+          }),
+        );
+        ctx.runningTasks.delete(taskId);
+        drainPendingTasks();
+      }
+    };
+
+    spawnTaskAsync().catch((e) => console.error("[task] spawn error:", e));
+
+    return { status: "started" };
+  },
+
+  async "task.cancel"({ id }, ctx) {
+    const taskId = String(id ?? "").trim();
+    if (!taskId) throw new Error("task.cancel: id is required");
+
+    const task = tasksRepo.get(taskId);
+    if (!task) throw new Error(`task.cancel: task not found: ${taskId}`);
+
+    if (task.session_id) {
+      const session = ctx.taskSessions.get(task.session_id);
+      if (session) {
+        try {
+          session.proc.kill("SIGTERM");
+        } catch {
+          /* ignore */
+        }
+        session.alive = false;
+        ctx.taskSessions.delete(task.session_id);
+      }
+    }
+
+    tasksRepo.update(taskId, {
+      status: "cancelled",
+      ended_at: Date.now(),
+    });
+
+    ctx.ws.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "task.ended",
+        params: { taskId, status: "cancelled", exitCode: null },
+      }),
+    );
+
+    ctx.runningTasks.delete(taskId);
+    drainPendingTasks();
+
+    return { ok: true };
+  },
+
+  async "task.removeWorktree"({ id }, ctx) {
+    const taskId = String(id ?? "").trim();
+    if (!taskId) throw new Error("task.removeWorktree: id is required");
+
+    const task = tasksRepo.get(taskId);
+    if (!task) throw new Error(`task.removeWorktree: task not found: ${taskId}`);
+
+    if (task.worktree_path && task.branch_name) {
+      await removeTaskWorktree(root, task.worktree_path, task.branch_name);
+    }
+
+    ctx.ws.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "task.worktreeRemoved",
+        params: { taskId },
+      }),
+    );
+
+    return { ok: true };
   },
 
   // ─── Persistence RPC ──────────────────────────────────────────────────────
@@ -1343,9 +1766,13 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
     ptySessions: new Map<string, PtySession>(),
     chatSessions: new Map<string, ChatSession>(),
     gitCloneSessions: new Map<string, GitCloneSession>(),
+    taskSessions: new Map<string, TaskSession>(),
+    runningTasks: new Set<string>(),
+    pendingTasks: [],
     ws: { send: (d: string) => ws.send(d) },
   };
   contexts.set(ws, ctx);
+  globalCtx = ctx;
   ctx.authTimeout = setTimeout(() => {
     if (!ctx.authed) ws.close(4401, "auth timeout");
   }, 5000);
@@ -1427,7 +1854,16 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
       }
     }
     ctx.gitCloneSessions.clear();
+    for (const session of ctx.taskSessions.values()) {
+      try {
+        session.proc.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+    }
+    ctx.taskSessions.clear();
     if (ctx.authTimeout) clearTimeout(ctx.authTimeout);
+    if (globalCtx === ctx) globalCtx = null;
   });
 });
 
