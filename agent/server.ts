@@ -1482,11 +1482,15 @@ const methods: Record<string, Handler> = {
     return sessionsRepo.list(id);
   },
 
-  async "sessions.create"({ id, workspaceId, cli, title, model, approvalMode }) {
+  async "sessions.create"({ id, workspaceId, cli, title, model, approvalMode, mode }) {
     const wid = String(workspaceId ?? "").trim();
     const c = String(cli ?? "").trim();
     if (!wid) throw new Error("sessions.create: workspaceId is required");
     if (!c) throw new Error("sessions.create: cli is required");
+    const m = mode !== undefined ? String(mode).trim() : undefined;
+    if (m && !["chat", "terminal"].includes(m)) {
+      throw new Error(`sessions.create: mode must be 'chat' or 'terminal', got '${m}'`);
+    }
     return sessionsRepo.create({
       id: id !== undefined ? String(id).trim() || undefined : undefined,
       workspaceId: wid,
@@ -1494,6 +1498,7 @@ const methods: Record<string, Handler> = {
       title: title !== undefined ? String(title) : undefined,
       model: model !== undefined ? String(model) : undefined,
       approvalMode: approvalMode !== undefined ? String(approvalMode) : undefined,
+      mode: (m as "chat" | "terminal" | undefined) ?? undefined,
     });
   },
 
@@ -1502,11 +1507,16 @@ const methods: Record<string, Handler> = {
     if (!sid) throw new Error("sessions.update: id is required");
     if (!patch || typeof patch !== "object") throw new Error("sessions.update: patch is required");
     const p = patch as Record<string, unknown>;
+    const mode = p.mode !== undefined ? String(p.mode).trim() : undefined;
+    if (mode && !["chat", "terminal"].includes(mode)) {
+      throw new Error(`sessions.update: mode must be 'chat' or 'terminal', got '${mode}'`);
+    }
     const result = sessionsRepo.update(sid, {
       title: p.title !== undefined ? String(p.title) : undefined,
       model: p.model !== undefined ? String(p.model) : undefined,
       approval_mode: p.approval_mode !== undefined ? String(p.approval_mode) : undefined,
       status: p.status !== undefined ? String(p.status) : undefined,
+      mode: (mode as "chat" | "terminal" | undefined) ?? undefined,
     });
     if (!result) throw new Error(`sessions.update: session not found: ${sid}`);
     return result;

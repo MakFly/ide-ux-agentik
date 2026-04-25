@@ -309,9 +309,10 @@ export function Workspace() {
   const sessions = useCurrentSessions();
   const pinnedIds = usePinnedSessionIds();
   const allSessions = useCurrentSessions();
-  const [sessionModes, setSessionModes] = useState<Record<string, SessionMode>>({});
-  const setMode = (id: string, m: SessionMode) => setSessionModes((prev) => ({ ...prev, [id]: m }));
-  const modeOf = (id: string): SessionMode => sessionModes[id] ?? "chat";
+  const sessionModeBySessionId = useIDE((s) => s.sessionModeBySessionId);
+  const setSessionMode = useIDE((s) => s.setSessionMode);
+  const setMode = (id: string, m: SessionMode) => setSessionMode(id, m);
+  const modeOf = (id: string): SessionMode => sessionModeBySessionId[id] ?? "chat";
 
   const pinnedSessions = useMemo(
     () =>

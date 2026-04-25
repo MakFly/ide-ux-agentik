@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { storage, setEndpoint, resetProviderCache } from "@/lib/storage";
+import { useIDE } from "@/store/ide";
 import type { Org, User } from "@/lib/types/org";
 import type { Workspace } from "@/store/ide";
 import type { WorkspaceSource } from "@/lib/fs";
@@ -143,6 +144,10 @@ export function SetupWizard() {
 
       toast.success("Organization setup complete!");
       navigate({ to: `/org/${org.id}` });
+
+      setTimeout(() => {
+        useIDE.getState().openNewTaskDialog(userDraft.defaultAgent);
+      }, 100);
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Setup failed";
       toast.error(msg);

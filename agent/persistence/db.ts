@@ -13,6 +13,7 @@ export type Session = {
   title: string | null;
   model: string | null;
   approval_mode: string | null;
+  mode: "chat" | "terminal";
   created_at: number;
   updated_at: number;
   status: string;
@@ -126,6 +127,14 @@ function migrateIfNeeded(db: Database.Database): void {
   if (!taskCols.includes("effort")) {
     db.exec(`ALTER TABLE tasks ADD COLUMN effort TEXT`);
     console.log(`[persistence] migration: added tasks.effort`);
+  }
+
+  const sessionCols = (db.prepare(`PRAGMA table_info(sessions)`).all() as { name: string }[]).map(
+    (r) => r.name,
+  );
+  if (!sessionCols.includes("mode")) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`);
+    console.log(`[persistence] migration: added sessions.mode`);
   }
 
   // Migration: relax tasks.session_id to nullable (lazy session creation).
@@ -522,6 +531,7 @@ type CreateSessionParams = {
   title?: string;
   model?: string;
   approvalMode?: string;
+  mode?: "chat" | "terminal";
 };
 
 type SessionPatch = {
@@ -529,6 +539,7 @@ type SessionPatch = {
   model?: string;
   approval_mode?: string;
   status?: string;
+  mode?: "chat" | "terminal";
 };
 
 export const sessionsRepo = {
@@ -537,10 +548,10 @@ export const sessionsRepo = {
     const now = Date.now();
     const id = params.id ?? randomUUID();
     db.prepare<
-      [string, string, string, string | null, string | null, string | null, number, number]
+      [string, string, string, string | null, string | null, string | null, string, number, number]
     >(
-      `INSERT OR IGNORE INTO sessions (id, workspace_id, cli, title, model, approval_mode, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO sessions (id, workspace_id, cli, title, model, approval_mode, mode, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       params.workspaceId,
@@ -548,6 +559,7 @@ export const sessionsRepo = {
       params.title ?? null,
       params.model ?? null,
       params.approvalMode ?? null,
+      params.mode ?? "chat",
       now,
       now,
     );
@@ -588,6 +600,10 @@ export const sessionsRepo = {
     if (patch.status !== undefined) {
       sets.push("status = ?");
       vals.push(patch.status);
+    }
+    if (patch.mode !== undefined) {
+      sets.push("mode = ?");
+      vals.push(patch.mode);
     }
     vals.push(id);
     db.prepare(`UPDATE sessions SET ${sets.join(", ")} WHERE id = ?`).run(...vals);

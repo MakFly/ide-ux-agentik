@@ -5,6 +5,7 @@ export type DbSession = {
   title: string | null;
   model: string | null;
   approval_mode: string | null;
+  mode: "chat" | "terminal";
   created_at: number;
   updated_at: number;
   status: string;
@@ -56,6 +57,7 @@ export type CreateSessionInput = {
   title?: string;
   model?: string;
   approvalMode?: string;
+  mode?: "chat" | "terminal";
 };
 
 export type UpdateSessionInput = {
@@ -65,6 +67,7 @@ export type UpdateSessionInput = {
     model?: string;
     approval_mode?: string;
     status?: string;
+    mode?: "chat" | "terminal";
   };
 };
 

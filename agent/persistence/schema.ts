@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   title TEXT,
   model TEXT,
   approval_mode TEXT,
+  mode TEXT NOT NULL DEFAULT 'chat',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'idle'

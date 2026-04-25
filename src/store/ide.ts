@@ -226,6 +226,7 @@ type State = {
   sessionsByWorkspaceId: Record<string, WorkspaceTerminal[]>;
   activeSessionIdByWorkspaceId: Record<string, string>;
   pinnedSessionIdsByWorkspaceId: Record<string, string[]>;
+  sessionModeBySessionId: Record<string, "chat" | "terminal">;
   /** Incremented by tickClearSession() to force ChatView remount with empty history. */
   sessionClearTickByWorkspace: Record<string, number>;
 
@@ -309,6 +310,7 @@ type State = {
   closeAgentSession: (sessionId: string) => void;
   pinSession: (sessionId: string) => void;
   unpinSession: (sessionId: string) => void;
+  setSessionMode: (sessionId: string, mode: "chat" | "terminal") => void;
   setCodexApiKey: (key: string) => void;
   setClaudeApiKey: (key: string) => void;
   setCodexModel: (model: string | undefined) => void;
@@ -900,6 +902,7 @@ export const useIDE = create<State>()(
       sessionsByWorkspaceId: {},
       activeSessionIdByWorkspaceId: {},
       pinnedSessionIdsByWorkspaceId: {},
+      sessionModeBySessionId: {},
       sessionClearTickByWorkspace: {},
       agentProvidersByWorkspaceId: {},
 
@@ -1246,10 +1249,18 @@ export const useIDE = create<State>()(
                   workspaceId: ws.id,
                   lastCommand: s.cli,
                 }));
+                const sessionModes: Record<string, "chat" | "terminal"> = {};
+                for (const s of sessions) {
+                  sessionModes[s.id] = s.mode ?? "chat";
+                }
                 set((cur) => ({
                   sessionsByWorkspaceId: {
                     ...cur.sessionsByWorkspaceId,
                     [ws.id]: workspaceTerminals,
+                  },
+                  sessionModeBySessionId: {
+                    ...cur.sessionModeBySessionId,
+                    ...sessionModes,
                   },
                 }));
                 anySuccess = true;
@@ -1872,6 +1883,26 @@ export const useIDE = create<State>()(
             },
           };
         }),
+
+      setSessionMode: (sessionId, mode) => {
+        set((s) => ({
+          sessionModeBySessionId: {
+            ...s.sessionModeBySessionId,
+            [sessionId]: mode,
+          },
+        }));
+        const workspaceId = Object.entries(get().activeSessionIdByWorkspaceId).find(
+          ([, id]) => id === sessionId,
+        )?.[0];
+        if (workspaceId) {
+          void persistence.sessions
+            .update(null as any, {
+              id: sessionId,
+              patch: { mode },
+            })
+            .catch((e) => console.warn(`[store] failed to persist session mode: ${e}`));
+        }
+      },
 
       removeWorktree: (worktreeId) =>
         set((s) => {
