@@ -98,7 +98,7 @@ function validateExtraArgs(cli: string, args: string[]): string[] {
     // A flag token starts with `-`. Value tokens that follow are passed through as-is.
     if (a.startsWith("-")) {
       if (!allow.has(a)) {
-        throw new Error(`chat.spawn: forbidden flag "${a}" for cli "${cli}"`);
+        throw new Error(`task spawn: forbidden flag "${a}" for cli "${cli}"`);
       }
       out.push(a);
       // If the next token does not start with `-`, treat as value.
@@ -107,7 +107,7 @@ function validateExtraArgs(cli: string, args: string[]): string[] {
       }
     } else {
       // Bare value without preceding flag — reject.
-      throw new Error(`chat.spawn: unexpected positional arg "${a}"`);
+      throw new Error(`task spawn: unexpected positional arg "${a}"`);
     }
   }
   return out;
@@ -156,6 +156,22 @@ async function setupTaskWorktree(
   throw new Error(`setupTaskWorktree: failed after 3 retries`);
 }
 
+// Errors we treat as "already cleaned up" — logged at info level instead of
+// warn, since they happen normally when the user removes a worktree twice or
+// the branch was merged elsewhere.
+const WORKTREE_GONE_MARKERS = [
+  "is not a working tree",
+  "n'est pas une copie de travail",
+  "no such file or directory",
+  "aucun fichier ou dossier",
+];
+const BRANCH_GONE_MARKERS = ["branch not found", "non trouvée", "not found"];
+
+function matchesAny(msg: string, markers: string[]): boolean {
+  const lower = msg.toLowerCase();
+  return markers.some((m) => lower.includes(m.toLowerCase()));
+}
+
 async function removeTaskWorktree(
   gitRoot: string,
   worktreePath: string,
@@ -163,13 +179,25 @@ async function removeTaskWorktree(
 ): Promise<void> {
   try {
     await gitExec(["worktree", "remove", "--force", worktreePath], gitRoot);
+    console.info(`[task] worktree removed: ${worktreePath}`);
   } catch (e) {
-    console.warn("[task] worktree remove failed:", (e as Error).message);
+    const msg = (e as Error).message;
+    if (matchesAny(msg, WORKTREE_GONE_MARKERS)) {
+      console.info(`[task] worktree already gone: ${worktreePath}`);
+    } else {
+      console.warn(`[task] worktree remove failed (${worktreePath}): ${msg}`);
+    }
   }
   try {
     await gitExec(["branch", "-D", branchName], gitRoot);
+    console.info(`[task] branch deleted: ${branchName}`);
   } catch (e) {
-    console.warn("[task] branch delete failed:", (e as Error).message);
+    const msg = (e as Error).message;
+    if (matchesAny(msg, BRANCH_GONE_MARKERS)) {
+      console.info(`[task] branch already gone: ${branchName}`);
+    } else {
+      console.warn(`[task] branch delete failed (${branchName}): ${msg}`);
+    }
   }
 }
 
@@ -502,150 +530,6 @@ const methods: Record<string, Handler> = {
   },
 
   /**
-   * Spawn a non-interactive chat-CLI subprocess (no PTY). Meant for
-   * `codex exec --json` / `claude -p --output-format stream-json`: the child
-   * prints newline-delimited JSON events to stdout; each line is forwarded to
-   * the client as a `chat.event` notification. On process exit, `chat.end` is
-   * sent once with `{ id, code, signal }`.
-   *
-   * Params: { cli: "codex" | "claude", prompt: string, cwd?: string,
-   *          env?: Record<string,string>, extraArgs?: string[] }
-   */
-  async "chat.spawn"({ cli, prompt, cwd, env, extraArgs }, ctx) {
-    const cliKind = String(cli ?? "codex");
-    const text = String(prompt ?? "");
-    if (!text.trim()) throw new Error("chat.spawn: prompt is required");
-
-    let resolvedCwd: string;
-    try {
-      resolvedCwd = cwd ? safeResolve(String(cwd)) : root;
-    } catch {
-      resolvedCwd = root;
-    }
-
-    const safeExtra = Array.isArray(extraArgs)
-      ? validateExtraArgs(cliKind, extraArgs as string[])
-      : [];
-
-    let execCmd: string;
-    let execArgs: string[];
-    if (cliKind === "codex") {
-      execCmd = "codex";
-      execArgs = ["exec", "--json", ...safeExtra, text];
-    } else if (cliKind === "claude") {
-      execCmd = "claude";
-      execArgs = ["-p", text, "--output-format", "stream-json", "--verbose", ...safeExtra];
-    } else {
-      throw new Error(`chat.spawn: unsupported cli "${cliKind}"`);
-    }
-
-    const mergedEnv = safeEnv((env as Record<string, string> | undefined) ?? {});
-
-    const id = randomUUID();
-    const proc = cpSpawn(execCmd, execArgs, {
-      cwd: resolvedCwd,
-      env: mergedEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    const session: ChatSession = { id, proc, alive: true };
-    ctx.chatSessions.set(id, session);
-
-    // Buffer stdout, split on newlines, parse each as JSON, forward as event.
-    let buf = "";
-    proc.stdout?.setEncoding("utf8");
-    proc.stdout?.on("data", (chunk: string) => {
-      buf += chunk;
-      let nl: number;
-      while ((nl = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        let evt: unknown;
-        try {
-          evt = JSON.parse(line);
-        } catch {
-          evt = { type: "raw", text: line };
-        }
-        ctx.ws.send(
-          JSON.stringify({ jsonrpc: "2.0", method: "chat.event", params: { id, event: evt } }),
-        );
-      }
-    });
-
-    // stderr is forwarded as a synthetic stderr event so the UI can surface it.
-    proc.stderr?.setEncoding("utf8");
-    proc.stderr?.on("data", (chunk: string) => {
-      ctx.ws.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          method: "chat.event",
-          params: { id, event: { type: "stderr", text: chunk } },
-        }),
-      );
-    });
-
-    proc.on("exit", (code, signal) => {
-      if (!session.alive) return; // error handler already ended this session
-      session.alive = false;
-      // Flush any trailing line that did not end with \n.
-      if (buf.trim()) {
-        try {
-          const evt = JSON.parse(buf.trim());
-          ctx.ws.send(
-            JSON.stringify({ jsonrpc: "2.0", method: "chat.event", params: { id, event: evt } }),
-          );
-        } catch {
-          /* ignore malformed trailing line */
-        }
-        buf = "";
-      }
-      ctx.ws.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          method: "chat.end",
-          params: { id, code, signal: signal ?? null },
-        }),
-      );
-      ctx.chatSessions.delete(id);
-    });
-
-    proc.on("error", (err) => {
-      if (!session.alive) return; // already ended
-      session.alive = false;
-      ctx.ws.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          method: "chat.event",
-          params: { id, event: { type: "error", message: err.message } },
-        }),
-      );
-      ctx.ws.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          method: "chat.end",
-          params: { id, code: null, signal: "error" },
-        }),
-      );
-      ctx.chatSessions.delete(id);
-    });
-
-    return { id };
-  },
-
-  async "chat.kill"({ id, signal }, ctx) {
-    const session = ctx.chatSessions.get(String(id));
-    if (!session) throw new Error(`chat session not found: ${id}`);
-    try {
-      session.proc.kill((signal ? String(signal) : "SIGTERM") as NodeJS.Signals);
-    } catch {
-      /* ignore */
-    }
-    session.alive = false;
-    return { ok: true };
-  },
-
-  /**
    * Git helpers. Each RPC validates that `workspacePath` exists and contains
    * a `.git/` directory. All git invocations use `execFile` — no shell, no
    * string interpolation.
@@ -854,11 +738,17 @@ const methods: Record<string, Handler> = {
 
   // ─── Task RPC ──────────────────────────────────────────────────────────────
 
-  async "task.create"({ workspaceId, title, prompt, cli, baseRef, parentSessionId }, _ctx) {
+  async "task.create"(
+    { workspaceId, title, prompt, cli, model, effort, baseRef, parentSessionId },
+    _ctx,
+  ) {
     const wid = String(workspaceId ?? "").trim();
     const t = String(title ?? "").trim();
     const p = String(prompt ?? "").trim();
     const c = String(cli ?? "").trim();
+    const m = model !== undefined && model !== null ? String(model).trim() || undefined : undefined;
+    const eff =
+      effort !== undefined && effort !== null ? String(effort).trim() || undefined : undefined;
     if (!wid) throw new Error("task.create: workspaceId is required");
     if (!t) throw new Error("task.create: title is required");
     if (!p) throw new Error("task.create: prompt is required");
@@ -866,24 +756,42 @@ const methods: Record<string, Handler> = {
     if (!ALLOWED_CHAT_FLAGS[c]) throw new Error(`task.create: unsupported cli "${c}"`);
 
     const taskId = randomUUID();
-    const task = tasksRepo.create({
-      id: taskId,
-      workspaceId: wid,
-      title: t,
-      prompt: p,
-      cli: c,
-      parentSessionId: parentSessionId !== undefined ? String(parentSessionId) : undefined,
-    });
+    const sessionId = randomUUID();
 
-    _ctx.ws.send(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        method: "task.created",
-        params: { task },
-      }),
+    console.info(
+      `[task.create] id=${taskId} sessionId=${sessionId} ws=${wid} cli=${c} model=${m ?? "(default)"} effort=${eff ?? "(default)"} title="${t.slice(0, 60)}"`,
     );
 
-    return { id: taskId };
+    // Atomically create both session and task in a single transaction
+    const { taskId: createdTaskId, sessionId: createdSessionId } = tasksRepo.createWithSession(
+      {
+        id: taskId,
+        workspaceId: wid,
+        title: t,
+        prompt: p,
+        cli: c,
+        model: m,
+        effort: eff,
+        parentSessionId: parentSessionId !== undefined ? String(parentSessionId) : undefined,
+      },
+      {
+        id: sessionId,
+        workspaceId: wid,
+        cli: c,
+        title: t,
+      },
+    );
+
+    // Fetch the full task to broadcast
+    const task = tasksRepo.get(createdTaskId)!;
+
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.created",
+      params: { task, sessionId: createdSessionId },
+    });
+
+    return { id: taskId, sessionId };
   },
 
   async "task.list"({ workspaceId, status }, _ctx) {
@@ -891,6 +799,15 @@ const methods: Record<string, Handler> = {
     if (!wid) throw new Error("task.list: workspaceId is required");
     const opts = status ? { status: String(status) as DbTask["status"] } : undefined;
     return tasksRepo.list(wid, opts);
+  },
+
+  async "task.logs.list"({ taskId, since, limit }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.logs.list: taskId is required");
+    return taskLogsRepo.list(tid, {
+      since: typeof since === "number" ? since : undefined,
+      limit: typeof limit === "number" ? Math.min(limit, 5000) : 1000,
+    });
   },
 
   async "task.start"({ id }, ctx) {
@@ -903,26 +820,24 @@ const methods: Record<string, Handler> = {
     if (ctx.runningTasks.size >= 3) {
       ctx.pendingTasks.push(taskId);
       tasksRepo.update(taskId, { status: "awaiting" });
-      ctx.ws.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          method: "task.queued",
-          params: { taskId, reason: "concurrency limit (3 running)" },
-        }),
-      );
+      console.info(`[task.start] queued id=${taskId} (concurrency cap reached: 3)`);
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.queued",
+        params: { taskId, reason: "concurrency limit (3 running)" },
+      });
       return { status: "queued" };
     }
 
     ctx.runningTasks.add(taskId);
     tasksRepo.update(taskId, { status: "running", started_at: Date.now() });
+    console.info(`[task.start] running id=${taskId}`);
 
-    ctx.ws.send(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        method: "task.started",
-        params: { taskId },
-      }),
-    );
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.started",
+      params: { taskId },
+    });
 
     const spawnTaskAsync = async () => {
       try {
@@ -938,22 +853,24 @@ const methods: Record<string, Handler> = {
         const branchName = `task/${slugify(currentTask.title)}-${taskId.slice(0, 8)}`;
         const baseRef = currentTask.base_ref || (await getRemoteDefaultBranch(gitRoot));
 
+        console.info(
+          `[task.spawn] id=${taskId} worktree=${worktreePath} branch=${branchName} baseRef=${baseRef}`,
+        );
         try {
           await setupTaskWorktree(gitRoot, worktreePath, branchName, baseRef);
         } catch (e) {
           const errorMsg = (e as Error).message;
+          console.error(`[task.spawn] worktree setup FAILED id=${taskId}: ${errorMsg}`);
           tasksRepo.update(taskId, {
             status: "failed",
             error_message: errorMsg,
             ended_at: Date.now(),
           });
-          ctx.ws.send(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              method: "task.ended",
-              params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
-            }),
-          );
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.ended",
+            params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
+          });
           ctx.runningTasks.delete(taskId);
           drainPendingTasks();
           return;
@@ -968,6 +885,17 @@ const methods: Record<string, Handler> = {
         const cliKind = currentTask.cli;
         const text = currentTask.prompt;
         const safeExtra: string[] = [];
+        if (currentTask.model) {
+          safeExtra.push("--model", currentTask.model);
+        }
+        if (currentTask.effort) {
+          // Codex uses -c model_reasoning_effort; Claude uses --effort directly.
+          if (cliKind === "codex") {
+            safeExtra.push("-c", `model_reasoning_effort=${currentTask.effort}`);
+          } else {
+            safeExtra.push("--effort", currentTask.effort);
+          }
+        }
 
         let execCmd: string;
         let execArgs: string[];
@@ -982,7 +910,17 @@ const methods: Record<string, Handler> = {
         }
 
         const mergedEnv = safeEnv();
-        const sessionId = randomUUID();
+        // Session already exists from task.create — retrieve it instead of creating
+        const sessionId = currentTask.session_id;
+        if (!sessionId) {
+          throw new Error(
+            `[task.spawn] session_id missing for task ${taskId} — task.create should have created it atomically`,
+          );
+        }
+
+        console.info(
+          `[task.spawn] id=${taskId} sessionId=${sessionId} exec="${execCmd} ${execArgs.slice(0, 3).join(" ")}…" cwd=${worktreePath}`,
+        );
         const proc = cpSpawn(execCmd, execArgs, {
           cwd: worktreePath,
           env: mergedEnv,
@@ -991,8 +929,6 @@ const methods: Record<string, Handler> = {
 
         const taskSession: TaskSession = { id: sessionId, taskId, sessionId, proc, alive: true };
         ctx.taskSessions.set(sessionId, taskSession);
-
-        tasksRepo.update(taskId, { session_id: sessionId });
 
         let buf = "";
         proc.stdout?.setEncoding("utf8");
@@ -1009,26 +945,22 @@ const methods: Record<string, Handler> = {
             } catch {
               evt = { type: "raw", text: line };
             }
-            ctx.ws.send(
-              JSON.stringify({
-                jsonrpc: "2.0",
-                method: "task.event",
-                params: { taskId, event: evt },
-              }),
-            );
+            broadcastAuthed({
+              jsonrpc: "2.0",
+              method: "task.event",
+              params: { taskId, event: evt },
+            });
             taskLogsRepo.append(taskId, "info", "stdout", evt);
           }
         });
 
         proc.stderr?.setEncoding("utf8");
         proc.stderr?.on("data", (chunk: string) => {
-          ctx.ws.send(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              method: "task.event",
-              params: { taskId, event: { type: "stderr", text: chunk } },
-            }),
-          );
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.event",
+            params: { taskId, event: { type: "stderr", text: chunk } },
+          });
           taskLogsRepo.append(taskId, "warn", "stderr", { text: chunk });
         });
 
@@ -1039,13 +971,11 @@ const methods: Record<string, Handler> = {
           if (buf.trim()) {
             try {
               const evt = JSON.parse(buf.trim());
-              ctx.ws.send(
-                JSON.stringify({
-                  jsonrpc: "2.0",
-                  method: "task.event",
-                  params: { taskId, event: evt },
-                }),
-              );
+              broadcastAuthed({
+                jsonrpc: "2.0",
+                method: "task.event",
+                params: { taskId, event: evt },
+              });
               taskLogsRepo.append(taskId, "info", "stdout", evt);
             } catch {
               /* ignore malformed trailing line */
@@ -1055,19 +985,20 @@ const methods: Record<string, Handler> = {
 
           const finalStatus =
             code === 0 || signal === null ? ("done" as const) : ("failed" as const);
+          console.info(
+            `[task.exit] id=${taskId} status=${finalStatus} code=${code} signal=${signal ?? "none"}`,
+          );
           tasksRepo.update(taskId, {
             status: finalStatus,
             exit_code: code ?? undefined,
             ended_at: Date.now(),
           });
 
-          ctx.ws.send(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              method: "task.ended",
-              params: { taskId, status: finalStatus, exitCode: code, errorMessage: signal },
-            }),
-          );
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.ended",
+            params: { taskId, status: finalStatus, exitCode: code, errorMessage: signal },
+          });
 
           ctx.taskSessions.delete(sessionId);
           ctx.runningTasks.delete(taskId);
@@ -1078,13 +1009,12 @@ const methods: Record<string, Handler> = {
           if (!taskSession.alive) return;
           taskSession.alive = false;
           const errorMsg = err.message;
-          ctx.ws.send(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              method: "task.event",
-              params: { taskId, event: { type: "error", message: errorMsg } },
-            }),
-          );
+          console.error(`[task.spawn] proc error id=${taskId}: ${errorMsg}`);
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.event",
+            params: { taskId, event: { type: "error", message: errorMsg } },
+          });
           taskLogsRepo.append(taskId, "error", "spawn", { message: errorMsg });
 
           tasksRepo.update(taskId, {
@@ -1093,13 +1023,11 @@ const methods: Record<string, Handler> = {
             ended_at: Date.now(),
           });
 
-          ctx.ws.send(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              method: "task.ended",
-              params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
-            }),
-          );
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.ended",
+            params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
+          });
 
           ctx.taskSessions.delete(sessionId);
           ctx.runningTasks.delete(taskId);
@@ -1107,24 +1035,23 @@ const methods: Record<string, Handler> = {
         });
       } catch (e) {
         const errorMsg = (e as Error).message;
+        console.error(`[task.spawn] uncaught FAILED id=${taskId}: ${errorMsg}`);
         tasksRepo.update(taskId, {
           status: "failed",
           error_message: errorMsg,
           ended_at: Date.now(),
         });
-        ctx.ws.send(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            method: "task.ended",
-            params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
-          }),
-        );
+        broadcastAuthed({
+          jsonrpc: "2.0",
+          method: "task.ended",
+          params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
+        });
         ctx.runningTasks.delete(taskId);
         drainPendingTasks();
       }
     };
 
-    spawnTaskAsync().catch((e) => console.error("[task] spawn error:", e));
+    spawnTaskAsync().catch((e) => console.error(`[task.spawn] async error id=${taskId}:`, e));
 
     return { status: "started" };
   },
@@ -1135,6 +1062,8 @@ const methods: Record<string, Handler> = {
 
     const task = tasksRepo.get(taskId);
     if (!task) throw new Error(`task.cancel: task not found: ${taskId}`);
+
+    console.info(`[task.cancel] id=${taskId} prev_status=${task.status}`);
 
     if (task.session_id) {
       const session = ctx.taskSessions.get(task.session_id);
@@ -1154,13 +1083,11 @@ const methods: Record<string, Handler> = {
       ended_at: Date.now(),
     });
 
-    ctx.ws.send(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        method: "task.ended",
-        params: { taskId, status: "cancelled", exitCode: null },
-      }),
-    );
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.ended",
+      params: { taskId, status: "cancelled", exitCode: null },
+    });
 
     ctx.runningTasks.delete(taskId);
     drainPendingTasks();
@@ -1175,17 +1102,25 @@ const methods: Record<string, Handler> = {
     const task = tasksRepo.get(taskId);
     if (!task) throw new Error(`task.removeWorktree: task not found: ${taskId}`);
 
+    console.info(
+      `[task.removeWorktree] id=${taskId} worktree=${task.worktree_path ?? "(none)"} branch=${task.branch_name ?? "(none)"}`,
+    );
+
     if (task.worktree_path && task.branch_name) {
       await removeTaskWorktree(root, task.worktree_path, task.branch_name);
     }
 
-    ctx.ws.send(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        method: "task.worktreeRemoved",
-        params: { taskId },
-      }),
-    );
+    // Delete the row too — UX says "Remove worktree" means the task is gone
+    // for good. Session cascades via tasks.session_id FK ON DELETE CASCADE,
+    // and logs cascade via task_logs FK ON DELETE CASCADE.
+    tasksRepo.delete(taskId);
+    console.info(`[task.removeWorktree] db row deleted id=${taskId}`);
+
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.worktreeRemoved",
+      params: { taskId },
+    });
 
     return { ok: true };
   },
@@ -1758,6 +1693,20 @@ const wss = new WebSocketServer({ server: httpServer });
 
 type WsContext = Ctx & { authTimeout?: NodeJS.Timeout };
 const contexts = new WeakMap<WebSocket, WsContext>();
+
+function broadcastAuthed(payload: object) {
+  const data = JSON.stringify(payload);
+  for (const client of wss.clients) {
+    if (client.readyState !== client.OPEN) continue;
+    const cctx = contexts.get(client);
+    if (!cctx?.authed) continue;
+    try {
+      client.send(data);
+    } catch (err) {
+      console.warn("[broadcastAuthed] send failed:", err);
+    }
+  }
+}
 
 wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
   const ctx: WsContext = {

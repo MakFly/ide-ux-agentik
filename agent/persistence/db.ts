@@ -64,13 +64,15 @@ export type DbTask = {
   title: string;
   prompt: string;
   cli: string;
+  model: string | null;
+  effort: string | null;
   status: "queued" | "running" | "awaiting" | "done" | "failed" | "cancelled";
   worktree_path: string | null;
   branch_name: string | null;
   base_ref: string | null;
   exit_code: number | null;
   error_message: string | null;
-  session_id: string | null;
+  session_id: string;
   created_at: number;
   started_at: number | null;
   ended_at: number | null;
@@ -92,17 +94,141 @@ const BLOBS_DIR = path.join(DB_DIR, "blobs");
 let _db: Database.Database | null = null;
 
 function migrateIfNeeded(db: Database.Database): void {
-  // Detect old schema: messages lacks logical_parent_id
-  const cols = (db.prepare(`PRAGMA table_info(messages)`).all() as { name: string }[]).map(
+  // Detect ancient schema: messages lacks logical_parent_id → backup + reset
+  const msgCols = (db.prepare(`PRAGMA table_info(messages)`).all() as { name: string }[]).map(
     (r) => r.name,
   );
-  if (cols.includes("logical_parent_id")) return;
+  if (!msgCols.includes("logical_parent_id")) {
+    const bakPath = DB_PATH + ".bak";
+    db.close();
+    fs.renameSync(DB_PATH, bakPath);
+    console.log(`[persistence] schema migration: old db backed up to ${bakPath}`);
+    _db = null;
+    return;
+  }
 
-  const bakPath = DB_PATH + ".bak";
-  db.close();
-  fs.renameSync(DB_PATH, bakPath);
-  console.log(`[persistence] schema migration: old db backed up to ${bakPath}`);
-  _db = null;
+  // Lightweight ALTER additions for new columns we don't want to reset for.
+  const taskCols = (db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[]).map(
+    (r) => r.name,
+  );
+  if (!taskCols.includes("model")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN model TEXT`);
+    console.log(`[persistence] migration: added tasks.model`);
+  }
+  if (!taskCols.includes("effort")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN effort TEXT`);
+    console.log(`[persistence] migration: added tasks.effort`);
+  }
+
+  // Migration: enforce tasks.session_id NOT NULL UNIQUE ON DELETE CASCADE
+  // Detect old schema by checking if session_id is nullable or lacks UNIQUE
+  const taskTable = db.prepare(`PRAGMA table_info(tasks)`).all() as {
+    cid: number;
+    name: string;
+    type: string;
+    notnull: number;
+    dflt_value: unknown;
+    pk: number;
+  }[];
+  const sessionIdCol = taskTable.find((col) => col.name === "session_id");
+
+  if (sessionIdCol && (sessionIdCol.notnull === 0 || !sessionIdCol.pk)) {
+    // Need to recreate tasks table with new constraint
+    console.info("[persistence] migration: enforcing tasks.session_id NOT NULL UNIQUE ...");
+
+    // FKs must be OFF outside the transaction (SQLite forbids toggling inside a tx).
+    // Old rows may have session_id pointing to deleted sessions (legacy bug pre-Wave 1).
+    // We filter them out below; FKs OFF lets the recreate proceed without trip-wire.
+    db.pragma("foreign_keys = OFF");
+
+    const run = db.transaction(() => {
+      db.exec(`
+        CREATE TABLE tasks_new (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          parent_session_id TEXT,
+          title TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          cli TEXT NOT NULL,
+          model TEXT,
+          effort TEXT,
+          status TEXT NOT NULL DEFAULT 'queued',
+          worktree_path TEXT,
+          branch_name TEXT,
+          base_ref TEXT,
+          exit_code INTEGER,
+          error_message TEXT,
+          session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+          created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          ended_at INTEGER
+        )
+      `);
+
+      // Copy only rows whose session_id resolves to an existing session row.
+      // Drops both NULL session_ids and dangling pointers.
+      // Explicit column list — old `tasks` may have model/effort at the end (added via
+      // earlier ALTER) while tasks_new has them between cli and status. `SELECT *`
+      // would silently misalign positional values → FK + UNIQUE violations.
+      db.exec(`
+        INSERT INTO tasks_new (
+          id, workspace_id, parent_session_id, title, prompt, cli, model, effort,
+          status, worktree_path, branch_name, base_ref, exit_code, error_message,
+          session_id, created_at, started_at, ended_at
+        )
+        SELECT
+          t.id, t.workspace_id, t.parent_session_id, t.title, t.prompt, t.cli,
+          t.model, t.effort, t.status, t.worktree_path, t.branch_name, t.base_ref,
+          t.exit_code, t.error_message, t.session_id, t.created_at, t.started_at,
+          t.ended_at
+        FROM tasks t
+        INNER JOIN sessions s ON s.id = t.session_id
+      `);
+
+      const totalOld = (db.prepare(`SELECT COUNT(*) as cnt FROM tasks`).get() as { cnt: number })
+        .cnt;
+      const kept = (db.prepare(`SELECT COUNT(*) as cnt FROM tasks_new`).get() as { cnt: number })
+        .cnt;
+      const dropped = totalOld - kept;
+
+      db.exec(`DROP TABLE tasks`);
+      db.exec(`ALTER TABLE tasks_new RENAME TO tasks`);
+
+      // Sweep task_logs that referenced the dropped tasks (FKs were OFF, so the
+      // ON DELETE CASCADE on task_logs.task_id never fired).
+      const logsDeleted = db
+        .prepare(`DELETE FROM task_logs WHERE task_id NOT IN (SELECT id FROM tasks)`)
+        .run().changes;
+      if (logsDeleted > 0) {
+        console.info(`[persistence] migration: swept ${logsDeleted} orphaned task_logs rows`);
+      }
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_tasks_workspace_status
+          ON tasks(workspace_id, status, created_at DESC)
+      `);
+
+      if (dropped > 0) {
+        console.info(
+          `[persistence] migration: dropped ${dropped} orphaned task rows (NULL or dangling session_id)`,
+        );
+      }
+    });
+
+    try {
+      run();
+      // Verify integrity before re-enabling FKs.
+      const violations = db.pragma("foreign_key_check") as unknown[];
+      if (violations.length > 0) {
+        throw new Error(
+          `[persistence] migration left FK violations: ${JSON.stringify(violations)}`,
+        );
+      }
+    } finally {
+      db.pragma("foreign_keys = ON");
+    }
+    console.info("[persistence] migration completed: tasks.session_id is now NOT NULL UNIQUE");
+  }
 }
 
 export function openDb(): Database.Database {
@@ -516,6 +642,8 @@ type CreateTaskParams = {
   title: string;
   prompt: string;
   cli: string;
+  model?: string;
+  effort?: string;
   baseRef?: string;
 };
 
@@ -523,9 +651,11 @@ export const tasksRepo = {
   create(params: CreateTaskParams): DbTask {
     const db = openDb();
     const now = Date.now();
-    db.prepare<[string, string, string | null, string, string, string, number]>(
-      `INSERT INTO tasks (id, workspace_id, parent_session_id, title, prompt, cli, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    db.prepare<
+      [string, string, string | null, string, string, string, string | null, string | null, number]
+    >(
+      `INSERT INTO tasks (id, workspace_id, parent_session_id, title, prompt, cli, model, effort, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       params.id,
       params.workspaceId,
@@ -533,9 +663,77 @@ export const tasksRepo = {
       params.title,
       params.prompt,
       params.cli,
+      params.model ?? null,
+      params.effort ?? null,
       now,
     );
     return tasksRepo.get(params.id)!;
+  },
+
+  /**
+   * createWithSession — atomically create both a session and task row in a single transaction.
+   * Returns { taskId, sessionId } on success.
+   * Enforces the invariant: 1 task ↔ 1 CLI session, created together.
+   */
+  createWithSession(
+    taskParams: CreateTaskParams,
+    sessionParams: CreateSessionParams,
+  ): { taskId: string; sessionId: string } {
+    const db = openDb();
+    const now = Date.now();
+    const sessionId = sessionParams.id ?? randomUUID();
+
+    const run = db.transaction(() => {
+      // Insert session first
+      db.prepare<
+        [string, string, string, string | null, string | null, string | null, number, number]
+      >(
+        `INSERT OR IGNORE INTO sessions (id, workspace_id, cli, title, model, approval_mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        sessionId,
+        sessionParams.workspaceId,
+        sessionParams.cli,
+        sessionParams.title ?? null,
+        sessionParams.model ?? null,
+        sessionParams.approvalMode ?? null,
+        now,
+        now,
+      );
+
+      // Insert task with session_id FK constraint
+      db.prepare<
+        [
+          string,
+          string,
+          string | null,
+          string,
+          string,
+          string,
+          string | null,
+          string | null,
+          number,
+          string,
+        ]
+      >(
+        `INSERT INTO tasks (id, workspace_id, parent_session_id, title, prompt, cli, model, effort, created_at, session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        taskParams.id,
+        taskParams.workspaceId,
+        taskParams.parentSessionId ?? null,
+        taskParams.title,
+        taskParams.prompt,
+        taskParams.cli,
+        taskParams.model ?? null,
+        taskParams.effort ?? null,
+        now,
+        sessionId,
+      );
+    });
+
+    run();
+    return { taskId: taskParams.id, sessionId };
   },
 
   get(id: string): DbTask | null {

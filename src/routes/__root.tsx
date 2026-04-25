@@ -4,7 +4,6 @@ import { Outlet, Link, createRootRoute, HeadContent, Scripts } from "@tanstack/r
 import appCss from "../styles.css?url";
 import { Toaster } from "@/components/ui/sonner";
 import { useIDE, type TerminalKind } from "@/store/ide";
-import { autoRegisterDevAgent } from "@/lib/dev-bootstrap";
 import { providerFor } from "@/lib/fs";
 import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import { persistence } from "@/lib/persistence/client";
@@ -110,8 +109,9 @@ function RootComponent() {
 
   useEffect(() => {
     hydrate();
-    // Auto-register the local dev agent workspace when VITE_DEV_AGENT_* are injected.
-    void autoRegisterDevAgent();
+    // dev-bootstrap is now run from the /org/$id layout, AFTER per-org workspaces
+    // have been hydrated from storage — otherwise it racey-creates a fresh
+    // workspace every reload, orphaning persisted tasks.
     // If Codex auth is older than 23h, silently refresh it in the background.
     const s = useIDE.getState();
     if (s.codexAuth) {

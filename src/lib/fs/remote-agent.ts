@@ -24,21 +24,13 @@ export type PtyHandle = {
   onExit(cb: (code: number | null, signal: string | null) => void): () => void;
 };
 
-/** A non-interactive chat subprocess (codex exec --json, claude -p). */
-export type ChatCli = "codex" | "claude";
-export type ChatEvent = Record<string, unknown>;
-export type ChatSpawnParams = {
-  cli: ChatCli;
-  prompt: string;
-  cwd?: string;
-  env?: Record<string, string>;
-  extraArgs?: string[];
-};
-export type ChatHandle = {
-  id: string;
-  kill(signal?: string): void;
-  onEvent(cb: (event: ChatEvent) => void): () => void;
-  onEnd(cb: (code: number | null, signal: string | null) => void): () => void;
+export type TaskLogEntry = {
+  id: number;
+  taskId: string;
+  ts: number;
+  level: "info" | "warn" | "error";
+  source: "stdout" | "stderr" | "spawn";
+  data: unknown;
 };
 
 export type Task = {
@@ -48,13 +40,15 @@ export type Task = {
   title: string;
   prompt: string;
   cli: string;
+  model: string | null;
+  effort: string | null;
   status: "queued" | "running" | "awaiting" | "done" | "failed" | "cancelled";
   worktreePath: string | null;
   branchName: string | null;
   baseRef: string | null;
   exitCode: number | null;
   errorMessage: string | null;
-  sessionId: string | null;
+  sessionId: string;
   createdAt: number;
   startedAt: number | null;
   endedAt: number | null;
@@ -117,13 +111,15 @@ function taskFromDb(row: Record<string, unknown>): Task {
     title: row.title as string,
     prompt: row.prompt as string,
     cli: row.cli as string,
+    model: (row.model as string) || null,
+    effort: (row.effort as string) || null,
     status: row.status as Task["status"],
     worktreePath: (row.worktree_path as string) || null,
     branchName: (row.branch_name as string) || null,
     baseRef: (row.base_ref as string) || null,
     exitCode: (row.exit_code as number) || null,
     errorMessage: (row.error_message as string) || null,
-    sessionId: (row.session_id as string) || null,
+    sessionId: (row.session_id as string) || "",
     createdAt: row.created_at as number,
     startedAt: (row.started_at as number) || null,
     endedAt: (row.ended_at as number) || null,
@@ -139,11 +135,6 @@ export class RemoteAgentProvider implements FsProvider {
   private watchers = new Map<string, (ev: FsWatchEvent) => void>();
   private ptyDataListeners = new Map<string, Set<(data: string) => void>>();
   private ptyExitListeners = new Map<
-    string,
-    Set<(code: number | null, signal: string | null) => void>
-  >();
-  private chatEventListeners = new Map<string, Set<(event: ChatEvent) => void>>();
-  private chatEndListeners = new Map<
     string,
     Set<(code: number | null, signal: string | null) => void>
   >();
@@ -198,16 +189,7 @@ export class RemoteAgentProvider implements FsProvider {
           p.reject(new FsError("Agent connection closed", "io"));
         this.pending.clear();
         // 2. Synthesize terminal events for every in-flight stream so async
-        //    consumers (codex-adapter generator, xterm PTY loop) can unblock.
-        for (const [, listeners] of this.chatEndListeners) {
-          for (const cb of listeners) {
-            try {
-              cb(null, "closed");
-            } catch {
-              /* consumer threw — still clear */
-            }
-          }
-        }
+        //    consumers (xterm PTY loop) can unblock.
         for (const [, listeners] of this.ptyExitListeners) {
           for (const cb of listeners) {
             try {
@@ -217,8 +199,6 @@ export class RemoteAgentProvider implements FsProvider {
             }
           }
         }
-        this.chatEventListeners.clear();
-        this.chatEndListeners.clear();
         this.ptyDataListeners.clear();
         this.ptyExitListeners.clear();
         this.cloneProgressListeners.clear();
@@ -288,21 +268,6 @@ export class RemoteAgentProvider implements FsProvider {
       this.ptyDataListeners.delete(id);
       this.ptyExitListeners.delete(id);
       return;
-    }
-    if ("method" in msg && msg.method === "chat.event") {
-      const { id, event } = msg.params as { id: string; event: ChatEvent };
-      for (const cb of this.chatEventListeners.get(id) ?? []) cb(event);
-      return;
-    }
-    if ("method" in msg && msg.method === "chat.end") {
-      const { id, code, signal } = msg.params as {
-        id: string;
-        code: number | null;
-        signal: string | null;
-      };
-      for (const cb of this.chatEndListeners.get(id) ?? []) cb(code, signal);
-      this.chatEventListeners.delete(id);
-      this.chatEndListeners.delete(id);
     }
     if ("method" in msg && msg.method === "git.clone.progress") {
       const { id, stream, data } = msg.params as {
@@ -489,21 +454,6 @@ export class RemoteAgentProvider implements FsProvider {
     return this.call("pty.list", {});
   }
 
-  private onChatEvent(id: string, cb: (event: ChatEvent) => void): () => void {
-    if (!this.chatEventListeners.has(id)) this.chatEventListeners.set(id, new Set());
-    this.chatEventListeners.get(id)!.add(cb);
-    return () => this.chatEventListeners.get(id)?.delete(cb);
-  }
-
-  private onChatEnd(
-    id: string,
-    cb: (code: number | null, signal: string | null) => void,
-  ): () => void {
-    if (!this.chatEndListeners.has(id)) this.chatEndListeners.set(id, new Set());
-    this.chatEndListeners.get(id)!.add(cb);
-    return () => this.chatEndListeners.get(id)?.delete(cb);
-  }
-
   onCloneProgress(
     id: string,
     cb: (chunk: { stream: "stdout" | "stderr"; data: string }) => void,
@@ -517,18 +467,6 @@ export class RemoteAgentProvider implements FsProvider {
     if (!this.cloneEndListeners.has(id)) this.cloneEndListeners.set(id, new Set());
     this.cloneEndListeners.get(id)!.add(cb);
     return () => this.cloneEndListeners.get(id)?.delete(cb);
-  }
-
-  async chatSpawn(params: ChatSpawnParams): Promise<ChatHandle> {
-    const { id } = await this.call<{ id: string }>("chat.spawn", params);
-    return {
-      id,
-      kill: (signal) => {
-        this.call<void>("chat.kill", { id, signal }).catch(() => {});
-      },
-      onEvent: (cb) => this.onChatEvent(id, cb),
-      onEnd: (cb) => this.onChatEnd(id, cb),
-    };
   }
 
   async gitStatus(workspacePath: string): Promise<{
@@ -574,15 +512,44 @@ export class RemoteAgentProvider implements FsProvider {
     title: string;
     prompt: string;
     cli: string;
+    model?: string;
+    effort?: string;
     baseRef?: string;
     parentSessionId?: string;
-  }): Promise<{ id: string }> {
+  }): Promise<{ id: string; sessionId: string }> {
     return this.call("task.create", params);
   }
 
   async taskList(params: { workspaceId: string; status?: Task["status"] }): Promise<Task[]> {
     const tasks = await this.call<Record<string, unknown>[]>("task.list", params);
     return tasks.map(taskFromDb);
+  }
+
+  async taskLogsList(params: {
+    taskId: string;
+    since?: number;
+    limit?: number;
+  }): Promise<TaskLogEntry[]> {
+    const rows = await this.call<Record<string, unknown>[]>("task.logs.list", params);
+    return rows.map((r) => {
+      const raw = r.data_json;
+      let parsed: unknown = raw;
+      if (typeof raw === "string") {
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          parsed = { type: "raw", text: raw };
+        }
+      }
+      return {
+        id: r.id as number,
+        taskId: r.task_id as string,
+        ts: r.ts as number,
+        level: r.level as TaskLogEntry["level"],
+        source: r.source as TaskLogEntry["source"],
+        data: parsed,
+      };
+    });
   }
 
   async taskStart(id: string): Promise<void> {

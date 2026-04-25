@@ -118,7 +118,7 @@ export function Sidebar() {
 
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
   const activeBranch = currentBranches.find((b) => b.id === activeBranchId);
-  const defaultOpen = ["sessions", "branches", "worktrees"];
+  const defaultOpen = ["sessions", "branches", "worktrees", "workspace-tasks"];
 
   return (
     <aside className="flex h-full w-full min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-sidebar shadow-sm">

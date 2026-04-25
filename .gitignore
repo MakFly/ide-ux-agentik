@@ -42,5 +42,9 @@ playwright/.cache/
 # Codex runtime (contains auth.json — never commit)
 .codex-home/
 
+# Task worktrees (created by task.start). Vite watches the project root and
+# would full-reload the page on every dispatch if these aren't ignored.
+.multica/
+
 # Local scratch
 hello.py

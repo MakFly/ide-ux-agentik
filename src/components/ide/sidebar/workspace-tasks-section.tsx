@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, LoaderCircle, AlertTriangle, Clock, Trash2, X } from "lucide-react";
+import { CheckCircle2, LoaderCircle, AlertTriangle, Clock, Trash2, X, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useIDE, type Workspace } from "@/store/ide";
@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
+import { TaskDetailDialog } from "@/components/ide/task-detail-dialog";
 
 function taskStatusIcon(status: Task["status"]) {
   if (status === "done") return <CheckCircle2 className="h-3.5 w-3.5 text-status-add" />;
@@ -35,21 +36,42 @@ function elapsedTime(startedAt: number | null, endedAt: number | null): string {
 }
 
 function TaskRow({ task, workspace }: { task: Task; workspace: Workspace }) {
+  const [detailOpen, setDetailOpen] = useState(false);
+  const setActiveSession = useIDE((s) => s.setActiveSession);
+  const setActiveAgent = useIDE((s) => s.setActiveAgent);
+  const activateInWorkspace = () => {
+    // 1:1 invariant: task.sessionId is the WorkspaceTerminal.id of the matching tab.
+    setActiveSession(task.sessionId);
+    setActiveAgent(task.cli as any);
+  };
   return (
     <div className="group mx-1.5 flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/50">
-      {taskStatusIcon(task.status)}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[12.5px] font-medium text-foreground">{task.title}</div>
-        <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-          {task.branchName && <span className="font-mono">{task.branchName}</span>}
-          {task.startedAt && (
-            <>
-              <span>·</span>
-              <span>{elapsedTime(task.startedAt, task.endedAt)}</span>
-            </>
-          )}
+      <button
+        type="button"
+        onClick={activateInWorkspace}
+        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        title="Open in Workspace composer"
+      >
+        {taskStatusIcon(task.status)}
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[12.5px] font-medium text-foreground">{task.title}</div>
+          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+            {task.branchName && <span className="truncate font-mono">{task.branchName}</span>}
+            {task.startedAt && (
+              <>
+                <span>·</span>
+                <span>{elapsedTime(task.startedAt, task.endedAt)}</span>
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      </button>
+      <TaskDetailDialog
+        task={task}
+        workspace={workspace}
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+      />
       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -58,6 +80,10 @@ function TaskRow({ task, workspace }: { task: Task; workspace: Workspace }) {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuItem onClick={() => setDetailOpen(true)} className="gap-2 text-[12.5px]">
+              Details…
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             {task.status === "running" || task.status === "queued" || task.status === "awaiting" ? (
               <DropdownMenuItem
                 onClick={async () => {
@@ -119,6 +145,7 @@ export function WorkspaceTasksSection() {
   const hydrateTasks = useIDE((s) => s.hydrateTasks);
   const workspaceId = useIDE((s) => s.activeWorkspaceId);
   const [isLoadingInitial, setIsLoadingInitial] = useState(true);
+  const openNewTaskDialog = useIDE((s) => s.openNewTaskDialog);
 
   const tasks = tasksByWorkspaceId[workspaceId] ?? [];
 
@@ -153,17 +180,33 @@ export function WorkspaceTasksSection() {
             </span>
           </span>
         </AccordionTrigger>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            openNewTaskDialog();
+          }}
+          className="ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+          title="New task (compose & dispatch)"
+          aria-label="New task"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
       </div>
-
       <AccordionContent className="pb-1 pt-0">
         {isLoadingInitial ? (
           <div className="mx-3 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
             Loading tasks…
           </div>
         ) : !hasAny ? (
-          <div className="mx-3 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
-            No tasks yet — send your first prompt to an agent.
-          </div>
+          <button
+            type="button"
+            onClick={() => openNewTaskDialog()}
+            className="mx-3 flex w-[calc(100%-1.5rem)] items-center gap-2 rounded-md border border-dashed border-border px-3 py-3 text-left text-[11.5px] text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            New task — compose your first prompt
+          </button>
         ) : (
           <div className="space-y-2">
             {running.length > 0 && (

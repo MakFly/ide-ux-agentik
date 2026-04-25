@@ -131,61 +131,10 @@ function flattenDbTranscript(rows: DbMessage[]): string {
   return `…[older turns truncated]…\n\n${joined.slice(-COMPACT_TRANSCRIPT_MAX_CHARS)}`;
 }
 
-async function runCodexOneShot(provider: RemoteAgentProvider, prompt: string): Promise<string> {
-  const { codexModel, codexApiKey } = useIDE.getState();
-  const env: Record<string, string> = {};
-  if (codexApiKey) env.OPENAI_API_KEY = codexApiKey;
-
-  const handle = await provider.chatSpawn({
-    cli: "codex",
-    prompt,
-    extraArgs: codexExtraArgs(codexModel),
-    env: Object.keys(env).length ? env : undefined,
-  });
-
-  return new Promise<string>((resolve, reject) => {
-    // `agent_message` emits the whole text on item.updated AND item.completed
-    // (codex re-sends the final text at completion). We keep the last non-empty
-    // value — that is the final answer.
-    let finalText = "";
-    const timer = setTimeout(() => {
-      try {
-        handle.kill();
-      } catch {
-        /* ignore */
-      }
-      cleanup();
-      reject(new Error(`compact timed out after ${Math.round(COMPACT_TIMEOUT_MS / 1000)}s`));
-    }, COMPACT_TIMEOUT_MS);
-
-    const offEvent = handle.onEvent((evt) => {
-      const e = evt as {
-        type?: string;
-        item?: { type?: string; text?: string };
-      };
-      const type = e.type;
-      const itemType = e.item?.type;
-      if ((type === "item.updated" || type === "item.completed") && itemType === "agent_message") {
-        const t = typeof e.item?.text === "string" ? e.item.text : "";
-        if (t) finalText = t;
-      }
-    });
-
-    const offEnd = handle.onEnd((code) => {
-      cleanup();
-      if (!finalText) {
-        reject(new Error(`codex produced no summary (exit code=${code ?? "null"})`));
-        return;
-      }
-      resolve(finalText);
-    });
-
-    function cleanup() {
-      clearTimeout(timer);
-      offEvent();
-      offEnd();
-    }
-  });
+async function runCodexOneShot(_provider: RemoteAgentProvider, _prompt: string): Promise<string> {
+  throw new Error(
+    "Wave 3 cutover: runCodexOneShot disabled. Slash commands will be re-enabled in a future update.",
+  );
 }
 
 const compactHandler: SlashCommandDef["handler"] = async (ctx) => {

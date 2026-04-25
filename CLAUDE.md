@@ -116,6 +116,32 @@ takes care of the transcript + snapshots, so the delete is single-call.
 `src/components/ide/kill-session-dialog.tsx` is the owner of this
 orchestration (UI layer, not the store — the store has no provider handle).
 
+## SQLite table-recreate migration — three traps
+
+Recreating a table to change constraints (e.g. `session_id NOT NULL UNIQUE`) via
+the standard `CREATE tasks_new ; INSERT … ; DROP ; RENAME` pattern in
+`agent/persistence/db.ts` requires three things together. Skipping any one
+fails:
+
+1. **`PRAGMA foreign_keys = OFF` BEFORE the transaction**, not inside (SQLite
+   forbids toggling FKs mid-tx). Re-enable in `finally` and run
+   `PRAGMA foreign_key_check` to verify integrity before considering the
+   migration done.
+2. **Explicit column list** in `INSERT INTO new (col1, col2, …) SELECT …`. Never
+   `SELECT *`. Old tables that had columns added via `ALTER TABLE` (here:
+   `model`, `effort`) carry those columns at the END of the table, while the
+   new schema places them mid-row. Positional `*` silently misaligns values
+   into wrong columns → FK + UNIQUE violations.
+3. **Manual sweep of dependent tables**. With FKs OFF, `ON DELETE CASCADE` does
+   NOT fire when you `DROP TABLE tasks`. Orphaned `task_logs`/`messages`/etc.
+   rows survive and trip `foreign_key_check` after re-enabling. Run
+   `DELETE FROM task_logs WHERE task_id NOT IN (SELECT id FROM tasks)` for
+   every child table.
+
+Symptom of trap #2 (the silent one): `foreign_key_check` reports violations on
+rows that look fine in `tasks_new` because the value in `session_id` is
+actually the old table's `created_at` integer cast to text.
+
 ## Playwright webserver — dedicated port 8099
 
 `playwright.config.ts` uses `bunx vite dev --port 8099 --strictPort` with

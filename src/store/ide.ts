@@ -47,6 +47,11 @@ export type WorkspaceTerminal = {
   // Optional: a session may be attached to a specific worktree, but by default it is workspace-scoped.
   worktreeId?: string;
   lastCommand: string;
+  // When set, this session was spawned by a task and the panel renders
+  // <TaskTranscript /> instead of ChatView. Invariant since Wave 1+2:
+  // task.sessionId === WorkspaceTerminal.id, so taskId is the link back to
+  // the parent task row.
+  taskId?: string;
 };
 
 export type Worktree = {
@@ -188,6 +193,20 @@ type State = {
   // Tasks keyed by workspaceId — for remote-agent tasks UI.
   tasksByWorkspaceId: Record<string, import("@/lib/fs/remote-agent").Task[]>;
   activeTaskId: string | null;
+  /** Task detail dialog open state. When set, the TaskDetailDialog opens on the Transcript tab. */
+  taskDetailDialogTaskId: string | null;
+  /** Singleton NewTaskDialog open state. Sidebar + and Workspace + New CLI both pipe into it. */
+  newTaskDialogOpen: boolean;
+
+  // Live event buffer for the per-task transcript viewer. Cap is enforced
+  // in the buffering reducer below (2000 entries / task).
+  taskEventsByTaskId: Record<string, import("@/lib/fs/remote-agent").TaskLogEntry[]>;
+
+  // Client-side soft-delete tombstones. When the user removes a task we
+  // record its id here so that it stays hidden even if the agent failed to
+  // delete the SQLite row (e.g. running an older agent build). Persisted to
+  // localStorage so it survives refresh.
+  dismissedTaskIds: string[];
 
   // Messages keyed by sessionId (was: messagesByScope keyed by ScopeKey).
   messagesBySessionId: Record<string, ChatMessage[]>;
@@ -341,7 +360,16 @@ type State = {
   hydrateWorkspacesFromStorage: (orgId: string) => Promise<void>;
 
   hydrateTasks: (workspaceId: string) => Promise<void>;
+  loadTaskLogs: (taskId: string) => Promise<void>;
   setActiveTask: (id: string | null) => void;
+  setTaskDetailDialogOpen: (taskId: string | null) => void;
+  /** Open the singleton NewTaskDialog. If `prefillCli` is given, set activeAgent so the dialog defaults to that CLI. */
+  openNewTaskDialog: (prefillCli?: TerminalKind) => void;
+  closeNewTaskDialog: () => void;
+  createTaskFromPrompt: (
+    prompt: string,
+    options?: { cli?: string; model?: string; effort?: string },
+  ) => Promise<void>;
   upsertTask: (task: import("@/lib/fs/remote-agent").Task) => void;
   removeTaskById: (taskId: string) => void;
 };
@@ -778,6 +806,10 @@ export const useIDE = create<State>()(
       tasksByWorktreeId: buildInitialTasksByWorktreeId(),
       tasksByWorkspaceId: {},
       activeTaskId: null,
+      taskDetailDialogTaskId: null,
+      newTaskDialogOpen: false,
+      taskEventsByTaskId: {},
+      dismissedTaskIds: [],
       worktreesByWorkspaceId: initialWorktrees,
       sessionsByWorkspaceId: {},
       activeSessionIdByWorkspaceId: {},
@@ -1850,29 +1882,147 @@ export const useIDE = create<State>()(
           await provider.connect();
           const tasks = await provider.taskList({ workspaceId });
 
-          set((s) => ({
-            tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [workspaceId]: tasks },
-          }));
+          set((s) => {
+            const dismissed = new Set(s.dismissedTaskIds);
+            const visibleTasks = tasks.filter((t) => !dismissed.has(t.id));
+            // Mirror live tasks as session-tabs so the Workspace surfaces them
+            // after refresh. 1:1 invariant: WorkspaceTerminal.id === task.sessionId.
+            const titleByKind: Record<TerminalKind, string> = {
+              codex: "Codex",
+              claude: "Claude Code",
+              opencode: "OpenCode",
+              gemini: "Gemini",
+            };
+            const existingSessions = s.sessionsByWorkspaceId[workspaceId] ?? [];
+            const byId = new Map(existingSessions.map((t) => [t.id, t]));
+            for (const task of visibleTasks) {
+              const cliKind = (task.cli as TerminalKind) ?? "codex";
+              const status: WorkspaceTerminal["status"] =
+                task.status === "running" ? "busy" : "ready";
+              const tab: WorkspaceTerminal = {
+                id: task.sessionId,
+                kind: cliKind,
+                title: task.title?.slice(0, 40) || titleByKind[cliKind],
+                status,
+                workspaceId,
+                lastCommand: titleByKind[cliKind],
+                taskId: task.id,
+              };
+              byId.set(task.sessionId, tab);
+            }
+            return {
+              tasksByWorkspaceId: {
+                ...s.tasksByWorkspaceId,
+                [workspaceId]: visibleTasks,
+              },
+              sessionsByWorkspaceId: {
+                ...s.sessionsByWorkspaceId,
+                [workspaceId]: Array.from(byId.values()),
+              },
+            };
+          });
 
           provider.onTaskCreated((task) => {
+            console.debug("[store.tasks] created", task.id, task.title);
             get().upsertTask(task);
           });
 
-          provider.onTaskEvent((e) => {
-            console.debug("[store] task.event:", e);
-          });
-
-          provider.onTaskEnded((e) => {
+          provider.onTaskStarted((e) => {
+            console.debug("[store.tasks] started", e.taskId);
             set((s) => ({
               tasksByWorkspaceId: {
                 ...s.tasksByWorkspaceId,
                 [workspaceId]: (s.tasksByWorkspaceId[workspaceId] ?? []).map((t) =>
                   t.id === e.taskId
-                    ? { ...t, status: e.status, exitCode: e.exitCode, errorMessage: e.errorMessage }
+                    ? {
+                        ...t,
+                        status: "running",
+                        startedAt: t.startedAt ?? Date.now(),
+                        worktreePath: e.worktreePath ?? t.worktreePath,
+                        branchName: e.branchName ?? t.branchName,
+                      }
                     : t,
                 ),
               },
             }));
+            // worktree_path / branch_name are set asynchronously after the
+            // started event fires (server emits started BEFORE setupWorktree
+            // runs). Re-pull a fresh list so the row carries the branch.
+            void provider
+              .taskList({ workspaceId })
+              .then((fresh) => {
+                set((s) => {
+                  const dismissed = new Set(s.dismissedTaskIds);
+                  return {
+                    tasksByWorkspaceId: {
+                      ...s.tasksByWorkspaceId,
+                      [workspaceId]: fresh.filter((t) => !dismissed.has(t.id)),
+                    },
+                  };
+                });
+              })
+              .catch(() => {});
+          });
+
+          provider.onTaskEvent((e) => {
+            // Verbose stream — kept at debug to avoid console spam.
+            console.debug("[store.tasks] event", e.taskId, e.event);
+            const entry: import("@/lib/fs/remote-agent").TaskLogEntry = {
+              id: -1,
+              taskId: e.taskId,
+              ts: Date.now(),
+              level: "info",
+              source: "stdout",
+              data: e.event,
+            };
+            set((s) => {
+              const cur = s.taskEventsByTaskId[e.taskId] ?? [];
+              const next = cur.length >= 2000 ? [...cur.slice(-1999), entry] : [...cur, entry];
+              return {
+                taskEventsByTaskId: { ...s.taskEventsByTaskId, [e.taskId]: next },
+              };
+            });
+          });
+
+          provider.onTaskEnded((e) => {
+            console.debug("[store.tasks] ended", e.taskId, e.status);
+            set((s) => ({
+              tasksByWorkspaceId: {
+                ...s.tasksByWorkspaceId,
+                [workspaceId]: (s.tasksByWorkspaceId[workspaceId] ?? []).map((t) =>
+                  t.id === e.taskId
+                    ? {
+                        ...t,
+                        status: e.status,
+                        exitCode: e.exitCode,
+                        errorMessage: e.errorMessage,
+                        endedAt: t.endedAt ?? Date.now(),
+                      }
+                    : t,
+                ),
+              },
+            }));
+            // Final pull to capture any field set during the run
+            // (worktree_path, exit_code, error_message, etc.)
+            void provider
+              .taskList({ workspaceId })
+              .then((fresh) => {
+                set((s) => {
+                  const dismissed = new Set(s.dismissedTaskIds);
+                  return {
+                    tasksByWorkspaceId: {
+                      ...s.tasksByWorkspaceId,
+                      [workspaceId]: fresh.filter((t) => !dismissed.has(t.id)),
+                    },
+                  };
+                });
+              })
+              .catch(() => {});
+          });
+
+          provider.onTaskWorktreeRemoved((e) => {
+            console.debug("[store.tasks] worktreeRemoved", e.taskId);
+            get().removeTaskById(e.taskId);
           });
         } catch (err) {
           console.warn(`[store] hydrateTasks failed for workspace ${workspaceId}:`, err);
@@ -1883,17 +2033,146 @@ export const useIDE = create<State>()(
         set({ activeTaskId: id });
       },
 
+      setTaskDetailDialogOpen: (taskId) => {
+        set({ taskDetailDialogTaskId: taskId });
+      },
+
+      openNewTaskDialog: (prefillCli) => {
+        set((s) => ({
+          newTaskDialogOpen: true,
+          activeAgent: prefillCli ?? s.activeAgent,
+        }));
+      },
+
+      closeNewTaskDialog: () => {
+        set({ newTaskDialogOpen: false });
+      },
+
+      createTaskFromPrompt: async (prompt, options = {}) => {
+        const state = get();
+        const workspace = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+        if (!workspace || workspace.source.kind !== "remote-agent") {
+          toast.error("Active workspace is not a remote agent");
+          return;
+        }
+
+        const cli = (options.cli as any) ?? state.activeAgent;
+        const model = options.model ?? state.selectedModelByCli[cli];
+        const effort = options.effort;
+
+        try {
+          console.info(
+            `[store.createTaskFromPrompt] creating task ws=${workspace.id} cli=${cli} prompt=${prompt.length} chars`,
+          );
+          const provider = new RemoteAgentProvider(
+            workspace.source.label,
+            workspace.source.url,
+            workspace.source.token,
+          );
+          await provider.connect();
+
+          // Wave 3: taskCreate now returns { id, sessionId } atomically.
+          const { id: taskId, sessionId } = await provider.taskCreate({
+            workspaceId: workspace.id,
+            title: prompt.split("\n")[0].slice(0, 60) || "Untitled task",
+            prompt,
+            cli,
+            model,
+            effort,
+          });
+          console.info(
+            `[store.createTaskFromPrompt] taskCreate ok id=${taskId} sessionId=${sessionId}`,
+          );
+
+          await provider.taskStart(taskId);
+          console.info(`[store.createTaskFromPrompt] taskStart ok id=${taskId}`);
+
+          // Surface the task as an in-Workspace session tab (id = sessionId,
+          // taskId = back-pointer for AgentSessionView). The transcript panel
+          // renders inline; no modal dialog auto-open.
+          const titleByKind: Record<TerminalKind, string> = {
+            codex: "Codex",
+            claude: "Claude Code",
+            opencode: "OpenCode",
+            gemini: "Gemini",
+          };
+          const cliKind = cli as TerminalKind;
+          const sessionTab: WorkspaceTerminal = {
+            id: sessionId,
+            kind: cliKind,
+            title: prompt.split("\n")[0].slice(0, 40) || titleByKind[cliKind],
+            status: "busy",
+            workspaceId: workspace.id,
+            lastCommand: titleByKind[cliKind],
+            taskId,
+          };
+          set((s) => {
+            const current = s.sessionsByWorkspaceId[workspace.id] ?? [];
+            // Avoid double-push if the task event broadcast already seeded a tab.
+            const dedup = current.some((t) => t.id === sessionId)
+              ? current.map((t) => (t.id === sessionId ? sessionTab : t))
+              : [...current, sessionTab];
+            return {
+              sessionsByWorkspaceId: {
+                ...s.sessionsByWorkspaceId,
+                [workspace.id]: dedup,
+              },
+              activeSessionIdByWorkspaceId: {
+                ...s.activeSessionIdByWorkspaceId,
+                [workspace.id]: sessionId,
+              },
+              activeAgent: cliKind,
+            };
+          });
+          toast.success("Task created and started");
+        } catch (err) {
+          console.error("[store.createTaskFromPrompt] failed:", err);
+          toast.error(err instanceof Error ? err.message : "Failed to create task");
+        }
+      },
+
       upsertTask: (task) => {
         set((s) => {
           const tasks = s.tasksByWorkspaceId[task.workspaceId] ?? [];
           const idx = tasks.findIndex((t) => t.id === task.id);
-          if (idx >= 0) {
-            const next = [...tasks];
-            next[idx] = task;
-            return { tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [task.workspaceId]: next } };
-          }
+          const nextTasks = idx >= 0 ? [...tasks] : [...tasks, task];
+          if (idx >= 0) nextTasks[idx] = task;
+
+          // Mirror the task as a session-tab in <Workspace> (1:1 invariant).
+          // Choke point used by all task-arrival paths: onTaskCreated, onTaskStarted,
+          // and direct calls from NewTaskDialog. Keeps sessionsByWorkspaceId in sync
+          // regardless of which entry point created the task.
+          const titleByKind: Record<TerminalKind, string> = {
+            codex: "Codex",
+            claude: "Claude Code",
+            opencode: "OpenCode",
+            gemini: "Gemini",
+          };
+          const cliKind = (task.cli as TerminalKind) ?? "codex";
+          const tabStatus: WorkspaceTerminal["status"] =
+            task.status === "running" ? "busy" : "ready";
+          const sessionTab: WorkspaceTerminal = {
+            id: task.sessionId,
+            kind: cliKind,
+            title: task.title?.slice(0, 40) || titleByKind[cliKind],
+            status: tabStatus,
+            workspaceId: task.workspaceId,
+            lastCommand: titleByKind[cliKind],
+            taskId: task.id,
+          };
+          const existingSessions = s.sessionsByWorkspaceId[task.workspaceId] ?? [];
+          const tabIdx = existingSessions.findIndex((t) => t.id === task.sessionId);
+          const nextSessions =
+            tabIdx >= 0
+              ? existingSessions.map((t) => (t.id === task.sessionId ? sessionTab : t))
+              : [...existingSessions, sessionTab];
+
           return {
-            tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [task.workspaceId]: [...tasks, task] },
+            tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [task.workspaceId]: nextTasks },
+            sessionsByWorkspaceId: {
+              ...s.sessionsByWorkspaceId,
+              [task.workspaceId]: nextSessions,
+            },
           };
         });
       },
@@ -1901,14 +2180,81 @@ export const useIDE = create<State>()(
       removeTaskById: (taskId) => {
         set((s) => {
           const next: typeof s.tasksByWorkspaceId = {};
+          // Capture the matching task's sessionId before we drop it, so we can
+          // also evict the mirrored session-tab.
+          let sessionIdToDrop: string | null = null;
+          let workspaceIdOfDrop: string | null = null;
           for (const [wsId, tasks] of Object.entries(s.tasksByWorkspaceId)) {
+            const match = tasks.find((t) => t.id === taskId);
+            if (match) {
+              sessionIdToDrop = match.sessionId;
+              workspaceIdOfDrop = wsId;
+            }
             next[wsId] = tasks.filter((t) => t.id !== taskId);
           }
+          // Drop the cached transcript too — task is gone, no point keeping it.
+          const evNext = { ...s.taskEventsByTaskId };
+          delete evNext[taskId];
+          // Tombstone the id so future `taskList` re-pulls don't resurrect
+          // the row (covers the case where the agent backend hasn't
+          // received the `tasksRepo.delete` patch yet). Keep last 200 ids.
+          const cur = s.dismissedTaskIds;
+          const dismissed = cur.includes(taskId) ? cur : [taskId, ...cur].slice(0, 200);
+
+          // Evict mirrored session-tab + active-session pointer.
+          let nextSessions = s.sessionsByWorkspaceId;
+          let nextActive = s.activeSessionIdByWorkspaceId;
+          if (sessionIdToDrop && workspaceIdOfDrop) {
+            const list = s.sessionsByWorkspaceId[workspaceIdOfDrop] ?? [];
+            nextSessions = {
+              ...s.sessionsByWorkspaceId,
+              [workspaceIdOfDrop]: list.filter((t) => t.id !== sessionIdToDrop),
+            };
+            if (s.activeSessionIdByWorkspaceId[workspaceIdOfDrop] === sessionIdToDrop) {
+              const remaining = nextSessions[workspaceIdOfDrop];
+              const fallback = remaining[remaining.length - 1]?.id;
+              nextActive = { ...s.activeSessionIdByWorkspaceId };
+              if (fallback) nextActive[workspaceIdOfDrop] = fallback;
+              else delete nextActive[workspaceIdOfDrop];
+            }
+          }
+
           return {
             tasksByWorkspaceId: next,
+            taskEventsByTaskId: evNext,
             activeTaskId: s.activeTaskId === taskId ? null : s.activeTaskId,
+            dismissedTaskIds: dismissed,
+            sessionsByWorkspaceId: nextSessions,
+            activeSessionIdByWorkspaceId: nextActive,
           };
         });
+      },
+
+      loadTaskLogs: async (taskId) => {
+        const state = get();
+        // Find which workspace owns this task to derive the provider.
+        let workspace: Workspace | undefined;
+        for (const [wsId, tasks] of Object.entries(state.tasksByWorkspaceId)) {
+          if (tasks.some((t) => t.id === taskId)) {
+            workspace = state.workspaces.find((w) => w.id === wsId);
+            break;
+          }
+        }
+        if (!workspace || workspace.source.kind !== "remote-agent") return;
+        try {
+          const provider = new RemoteAgentProvider(
+            workspace.source.label,
+            workspace.source.url,
+            workspace.source.token,
+          );
+          await provider.connect();
+          const rows = await provider.taskLogsList({ taskId, limit: 2000 });
+          set((s) => ({
+            taskEventsByTaskId: { ...s.taskEventsByTaskId, [taskId]: rows },
+          }));
+        } catch (err) {
+          console.warn(`[store.tasks] loadTaskLogs failed for ${taskId}:`, err);
+        }
       },
 
       createFolder: (name) => {
@@ -2085,6 +2431,7 @@ export const useIDE = create<State>()(
           selectedModelByCli: state.selectedModelByCli,
           approvalModeByCli: state.approvalModeByCli,
           settingsSidebarCollapsed: state.settingsSidebarCollapsed,
+          dismissedTaskIds: state.dismissedTaskIds,
         }) as State,
       onRehydrateStorage: () => (state, error) => {
         if (error) {

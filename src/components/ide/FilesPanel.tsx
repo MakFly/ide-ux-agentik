@@ -19,7 +19,7 @@ import {
 } from "@/store/ide";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PromptDialog } from "@/components/ide/prompt-dialog";
 import { BranchDetailsPopover } from "@/components/ide/StatusBar";
 import {
@@ -64,6 +64,19 @@ export function FilesPanel() {
     gitStatus.size > 0 ? gitStatus.size : (branch?.added ?? 0) + (branch?.removed ?? 0) > 0 ? 1 : 0;
 
   const activeScopeKey: ScopeKey = scopeKey(activeWorkspaceId, activeBranchId);
+
+  // After a page refresh, Zustand rehydrates activeWorkspaceId/Branch directly
+  // without firing setActiveWorkspace/setActiveBranch, so loadRoot is never
+  // triggered and the file list stays empty until the user clicks Refresh.
+  // Self-bootstrap when we land on a scope with no tree.
+  useEffect(() => {
+    if (!activeWorkspaceId || !activeBranchId) return;
+    if (rootFiles.length > 0 || Object.keys(fileTree).length > 0) return;
+    if (fileTreeLoading) return;
+    void loadRoot(activeScopeKey);
+    void refreshGitStatus(activeScopeKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWorkspaceId, activeBranchId]);
 
   function getFolderStatus(folderName: string): GitFileStatus | null {
     const priority: GitFileStatus[] = ["modified", "added", "deleted", "untracked"];

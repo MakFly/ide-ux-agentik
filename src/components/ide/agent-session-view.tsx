@@ -1,6 +1,7 @@
 import { MessageSquare, Terminal as TerminalIcon } from "lucide-react";
 import { ChatView } from "@/components/ide/chat-view";
 import { PtyTerminal } from "@/components/ide/pty-terminal";
+import { TaskThread } from "@/components/ide/task-thread";
 import { codexExtraArgs } from "@/lib/chat/models";
 import { cn } from "@/lib/utils";
 import { useIDE, type TerminalKind, type WorkspaceTerminal } from "@/store/ide";
@@ -45,10 +46,13 @@ export function AgentSessionView({
 }) {
   const codexModel = useIDE((s) => s.codexModel);
   const isCodex = session.kind === "codex";
-  const workspaceSource = useIDE(
-    (s) =>
-      s.workspaces.find((w) => w.id === session.workspaceId)?.source as WorkspaceSource | undefined,
-  );
+  const workspace = useIDE((s) => s.workspaces.find((w) => w.id === session.workspaceId));
+  const workspaceSource = workspace?.source as WorkspaceSource | undefined;
+  const task = useIDE((s) => {
+    if (!session.taskId) return null;
+    const list = s.tasksByWorkspaceId[session.workspaceId] ?? [];
+    return list.find((t) => t.id === session.taskId) ?? null;
+  });
 
   return (
     <div className="flex h-full flex-col bg-black">
@@ -58,12 +62,16 @@ export function AgentSessionView({
           only hide the inactive one via `hidden`. */}
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <div className={cn("h-full w-full", mode !== "chat" && "hidden")}>
-          <ChatView
-            key={session.id}
-            kind={session.kind}
-            sessionId={session.id}
-            workspaceSource={workspaceSource}
-          />
+          {task && workspace ? (
+            <TaskThread key={session.id} task={task} workspace={workspace} />
+          ) : (
+            <ChatView
+              key={session.id}
+              kind={session.kind}
+              sessionId={session.id}
+              workspaceSource={workspaceSource}
+            />
+          )}
         </div>
         <div className={cn("h-full w-full", mode !== "terminal" && "hidden")}>
           <PtyTerminal

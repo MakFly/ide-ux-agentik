@@ -5,6 +5,15 @@
 //     error logger plugins, and sandbox detection (port/host/strictPort).
 // You can pass additional config via defineConfig({ vite: { ... } }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+import { createLogger } from "vite";
+
+const HMR_NOISE = /\bhmr (update|invalidate)\b|\bpage reload\b/;
+const logger = createLogger();
+const origInfo = logger.info.bind(logger);
+logger.info = (msg, opts) => {
+  if (HMR_NOISE.test(msg)) return;
+  origInfo(msg, opts);
+};
 
 // `bun run dev` (scripts/dev.ts) injects these so the UI auto-registers a
 // `local-dev` remote-agent workspace on first load. Absent in prod builds.
@@ -13,9 +22,18 @@ const devAgentToken = process.env.VITE_DEV_AGENT_TOKEN ?? "";
 
 export default defineConfig({
   vite: {
+    customLogger: logger,
     define: {
       "import.meta.env.VITE_DEV_AGENT_URL": JSON.stringify(devAgentUrl),
       "import.meta.env.VITE_DEV_AGENT_TOKEN": JSON.stringify(devAgentToken),
+    },
+    server: {
+      // Task worktrees land under .multica/tasks/<id>/ inside the project root.
+      // Without this, every dispatch triggers a full page reload because Vite
+      // sees a few hundred new files appear in its watcher.
+      watch: {
+        ignored: ["**/.multica/**"],
+      },
     },
   },
 });

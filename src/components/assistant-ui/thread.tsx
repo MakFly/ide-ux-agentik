@@ -39,12 +39,10 @@ import {
   PencilIcon,
   RefreshCwIcon,
   SquareIcon,
-  Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FC } from "react";
 import { toast } from "sonner";
 import { useIDE } from "@/store/ide";
-import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import { ModelPill } from "@/components/ide/model-pill";
 import { ReasoningPill } from "@/components/ide/reasoning-pill";
 import { ContextRing } from "@/components/assistant-ui/context-ring";
@@ -356,70 +354,6 @@ const HelpDialog: FC<{ open: boolean; onOpenChange: (v: boolean) => void }> = ({
   </Dialog>
 );
 
-const SendToAgentButton: FC<{
-  composerText: string;
-  workspaceId: string;
-  activeAgent: string;
-}> = ({ composerText, workspaceId, activeAgent }) => {
-  const [isLoading, setIsLoading] = useState(false);
-  const workspace = useIDE((s) => s.workspaces.find((w) => w.id === workspaceId));
-
-  const handleSendToAgent = async () => {
-    if (!composerText.trim()) {
-      toast.error("Please enter a prompt");
-      return;
-    }
-    if (!workspace || workspace.source.kind !== "remote-agent") {
-      toast.error("Not a remote-agent workspace");
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      const provider = new RemoteAgentProvider(
-        workspace.source.label,
-        workspace.source.url,
-        workspace.source.token,
-      );
-      await provider.connect();
-
-      const title = composerText.split("\n")[0].slice(0, 60) || "Task";
-      const { id: taskId } = await provider.taskCreate({
-        workspaceId,
-        title,
-        prompt: composerText,
-        cli: activeAgent,
-      });
-
-      await provider.taskStart(taskId);
-
-      toast.success("Task queued and started");
-    } catch (err) {
-      console.error("[SendToAgentButton] error:", err);
-      toast.error(err instanceof Error ? err.message : "Failed to create task");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  return (
-    <TooltipIconButton
-      tooltip="Send to Agent (task)"
-      variant="outline"
-      size="icon"
-      className="aui-composer-send-to-agent size-8"
-      disabled={!composerText.trim() || isLoading}
-      onClick={handleSendToAgent}
-    >
-      {isLoading ? (
-        <span className="block h-2.5 w-2.5 animate-spin rounded-full border border-transparent border-t-current" />
-      ) : (
-        <Zap className="size-4" />
-      )}
-    </TooltipIconButton>
-  );
-};
-
 const SendOrStopButton: FC = () => {
   const runtime = useAssistantRuntime();
   const aui = useAui();
@@ -489,7 +423,6 @@ const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
     s.thread.messages.reduce((acc, m) => acc + messageTextLength(m as MessageLike), 0),
   );
   const composerChars = useAuiState((s) => (s.composer.text ?? "").length);
-  const composerText = useAuiState((s) => s.composer.text ?? "");
   const estimatedUsed = Math.round((messagesChars + composerChars) / 4);
   const model = useIDE((s) => s.selectedModelByCli[activeAgent]);
   const claudeOverride = useIDE((s) => s.claudeContextOverride);
@@ -497,9 +430,6 @@ const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
   const realUsed = lastUsage ? lastUsage.inputTokens + lastUsage.outputTokens : undefined;
   const used = realUsed ?? estimatedUsed;
   const max = getContextWindow(activeAgent, model, claudeOverride);
-
-  const workspaceId = useIDE((s) => s.activeWorkspaceId);
-  const workspace = useIDE((s) => s.workspaces.find((w) => w.id === s.activeWorkspaceId));
 
   return (
     <div className="aui-composer-action-wrapper flex items-center justify-between gap-2">
@@ -515,13 +445,6 @@ const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
           <ContextRing used={used} max={max} />
         </span>
         <StatusButton cli={activeAgent} estimatedUsed={estimatedUsed} />
-        {workspace?.source.kind === "remote-agent" && (
-          <SendToAgentButton
-            composerText={composerText}
-            workspaceId={workspaceId}
-            activeAgent={activeAgent}
-          />
-        )}
         <SendOrStopButton />
       </div>
     </div>

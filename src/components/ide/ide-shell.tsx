@@ -13,6 +13,9 @@ import { TerminalPanel } from "@/components/ide/terminal-panel";
 import { EditorPanel } from "@/components/ide/editor-panel";
 import { useIDE, useCurrentActiveTab, useCurrentOpenFiles } from "@/store/ide";
 import { MOCK_ENABLED } from "@/lib/env";
+import { taskLauncherAdapter } from "@/lib/chat/task-launcher-adapter";
+import { TaskDetailDialog } from "@/components/ide/task-detail-dialog";
+import { NewTaskDialog } from "@/components/ide/new-task-dialog";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { useIsMobile } from "@/hooks/use-mobile";
 
@@ -128,7 +131,7 @@ interface IdeShellProps {
 }
 
 export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
-  const runtime = useLocalRuntime(MockModelAdapter);
+  const runtime = useLocalRuntime(taskLauncherAdapter);
   const hydratedFromUrlRef = useRef(false);
 
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
@@ -190,6 +193,23 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
     }
   }, [activeWorkspaceId, activeBranchId, activeTab, onNavigate]);
 
+  const taskDetailDialogTaskId = useIDE((s) => s.taskDetailDialogTaskId);
+  const setTaskDetailDialogOpen = useIDE((s) => s.setTaskDetailDialogOpen);
+  const tasksByWorkspaceId = useIDE((s) => s.tasksByWorkspaceId);
+  const newTaskDialogOpen = useIDE((s) => s.newTaskDialogOpen);
+  const closeNewTaskDialog = useIDE((s) => s.closeNewTaskDialog);
+  const openNewTaskDialog = useIDE((s) => s.openNewTaskDialog);
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
+
+  const currentTask = taskDetailDialogTaskId
+    ? Object.values(tasksByWorkspaceId)
+        .flat()
+        .find((t) => t.id === taskDetailDialogTaskId)
+    : null;
+  const taskWorkspace = currentTask
+    ? workspaces.find((w) => w.id === currentTask.workspaceId)
+    : null;
+
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <TooltipProvider delayDuration={200}>
@@ -200,6 +220,21 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
           </div>
           {showTerminal && <TerminalPanel />}
           <StatusBar />
+          {currentTask && taskWorkspace && (
+            <TaskDetailDialog
+              task={currentTask}
+              workspace={taskWorkspace}
+              open={!!taskDetailDialogTaskId}
+              onOpenChange={(open) => setTaskDetailDialogOpen(open ? taskDetailDialogTaskId : null)}
+            />
+          )}
+          {activeWorkspace && (
+            <NewTaskDialog
+              workspace={activeWorkspace}
+              open={newTaskDialogOpen}
+              onOpenChange={(open) => (open ? openNewTaskDialog() : closeNewTaskDialog())}
+            />
+          )}
         </div>
       </TooltipProvider>
     </AssistantRuntimeProvider>
