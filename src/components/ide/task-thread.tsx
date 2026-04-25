@@ -8,6 +8,7 @@ import { useIDE, type Workspace } from "@/store/ide";
 import { RemoteAgentProvider, type Task, type TaskLogEntry } from "@/lib/fs/remote-agent";
 
 const EMPTY_EVENTS: TaskLogEntry[] = [];
+const EMPTY_TASKS: Task[] = [];
 
 type Item = { id: string; role: "user" | "assistant"; text: string };
 
@@ -120,7 +121,7 @@ function eventToItems(entry: TaskLogEntry, cli: string): Item[] {
 
 export function TaskThread({ task, workspace }: { task: Task; workspace: Workspace }) {
   const loadTaskLogs = useIDE((s) => s.loadTaskLogs);
-  const allTasks = useIDE((s) => s.tasksByWorkspaceId[workspace.id] ?? []);
+  const allTasks = useIDE((s) => s.tasksByWorkspaceId[workspace.id] ?? EMPTY_TASKS);
 
   // Helper to resolve conversation root and collect all task ids
   const conversationTaskIds = useMemo<string[]>(() => {
@@ -154,17 +155,20 @@ export function TaskThread({ task, workspace }: { task: Task; workspace: Workspa
     return conversationTasks.map((t) => t.id);
   }, [task, allTasks]);
 
-  // Aggregate events from the conversation root and all descendants.
-  // Subscribe to all event buffers for tasks in this conversation.
-  const events = useIDE((s) => {
-    const allEvents: TaskLogEntry[] = [];
+  // Subscribe to the WHOLE event map (stable map ref between updates) and
+  // derive the merged/sorted slice via useMemo. A selector that returns a
+  // freshly-built array every snapshot violates getSnapshot caching →
+  // "Maximum update depth exceeded" infinite loop via useSyncExternalStore.
+  const eventsByTaskId = useIDE((s) => s.taskEventsByTaskId);
+  const events = useMemo<TaskLogEntry[]>(() => {
+    const acc: TaskLogEntry[] = [];
     for (const taskId of conversationTaskIds) {
-      const taskEvents = s.taskEventsByTaskId[taskId] ?? [];
-      allEvents.push(...taskEvents);
+      const buf = eventsByTaskId[taskId];
+      if (buf) acc.push(...buf);
     }
-    allEvents.sort((a, b) => a.ts - b.ts);
-    return allEvents;
-  });
+    acc.sort((a, b) => a.ts - b.ts);
+    return acc;
+  }, [conversationTaskIds, eventsByTaskId]);
 
   // Re-fetch logs if empty (switch UX: ensures logs are reloaded on tab switch).
   useEffect(() => {
