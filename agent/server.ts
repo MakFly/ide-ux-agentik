@@ -172,6 +172,21 @@ function matchesAny(msg: string, markers: string[]): boolean {
   return markers.some((m) => lower.includes(m.toLowerCase()));
 }
 
+async function autoCleanupFailedTask(
+  gitRoot: string,
+  taskId: string,
+  worktreePath: string | null | undefined,
+  branchName: string | null | undefined,
+): Promise<void> {
+  if (!worktreePath && !branchName) return;
+  try {
+    await removeTaskWorktree(gitRoot, worktreePath ?? "", branchName ?? "");
+    console.info(`[task.autoCleanup] failed task ${taskId} worktree+branch removed`);
+  } catch (e) {
+    console.warn(`[task.autoCleanup] failed for ${taskId}: ${(e as Error).message}`);
+  }
+}
+
 async function removeTaskWorktree(
   gitRoot: string,
   worktreePath: string,
@@ -860,6 +875,7 @@ const methods: Record<string, Handler> = {
             method: "task.ended",
             params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
           });
+          await autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
           ctx.runningTasks.delete(taskId);
           drainPendingTasks();
           return;
@@ -989,6 +1005,10 @@ const methods: Record<string, Handler> = {
             params: { taskId, status: finalStatus, exitCode: code, errorMessage: signal },
           });
 
+          if (finalStatus === "failed") {
+            void autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
+          }
+
           ctx.taskSessions.delete(sessionId);
           ctx.runningTasks.delete(taskId);
           drainPendingTasks();
@@ -1018,6 +1038,8 @@ const methods: Record<string, Handler> = {
             params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
           });
 
+          void autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
+
           ctx.taskSessions.delete(sessionId);
           ctx.runningTasks.delete(taskId);
           drainPendingTasks();
@@ -1025,6 +1047,7 @@ const methods: Record<string, Handler> = {
       } catch (e) {
         const errorMsg = (e as Error).message;
         console.error(`[task.spawn] uncaught FAILED id=${taskId}: ${errorMsg}`);
+        const t = tasksRepo.get(taskId);
         tasksRepo.update(taskId, {
           status: "failed",
           error_message: errorMsg,
@@ -1035,6 +1058,9 @@ const methods: Record<string, Handler> = {
           method: "task.ended",
           params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
         });
+        if (t?.worktree_path || t?.branch_name) {
+          void autoCleanupFailedTask(root, taskId, t?.worktree_path, t?.branch_name);
+        }
         ctx.runningTasks.delete(taskId);
         drainPendingTasks();
       }
