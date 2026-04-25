@@ -1,9 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { Wand2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { providerFor } from "@/lib/fs";
+
+const DEV_AGENT_URL = import.meta.env.VITE_DEV_AGENT_URL as string | undefined;
+const DEV_AGENT_TOKEN = import.meta.env.VITE_DEV_AGENT_TOKEN as string | undefined;
+const DEV_AGENT_AVAILABLE = !!(DEV_AGENT_URL && DEV_AGENT_TOKEN);
 
 type AgentDraft = {
   url: string;
@@ -20,6 +25,22 @@ type StepAgentProps = {
 
 export function StepAgent({ value, onChange, onNext, onSkip }: StepAgentProps) {
   const [testBusy, setTestBusy] = useState(false);
+
+  useEffect(() => {
+    if (!value && DEV_AGENT_AVAILABLE) {
+      onChange({
+        url: DEV_AGENT_URL!,
+        token: DEV_AGENT_TOKEN!,
+        label: "local-dev",
+      });
+    }
+  }, [value, onChange]);
+
+  const fillFromDev = () => {
+    if (!DEV_AGENT_AVAILABLE) return;
+    onChange({ url: DEV_AGENT_URL!, token: DEV_AGENT_TOKEN!, label: "local-dev" });
+    toast.success("Filled with local dev agent credentials");
+  };
 
   const handleUrlChange = (url: string) => {
     onChange({
@@ -93,6 +114,17 @@ export function StepAgent({ value, onChange, onNext, onSkip }: StepAgentProps) {
         <p className="mt-2 text-sm text-muted-foreground">
           Link to a remote Codex agent server for enhanced capabilities. You can skip this for now.
         </p>
+        {DEV_AGENT_AVAILABLE && (
+          <div className="mt-3 flex items-center justify-between rounded-md border border-dashed border-border bg-muted/40 px-3 py-2">
+            <span className="font-mono text-[11px] text-muted-foreground">
+              dev agent detected · {new URL(DEV_AGENT_URL!).host}
+            </span>
+            <Button variant="ghost" size="sm" onClick={fillFromDev} className="h-7">
+              <Wand2 className="mr-1.5 h-3.5 w-3.5" />
+              Use it
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="space-y-4">

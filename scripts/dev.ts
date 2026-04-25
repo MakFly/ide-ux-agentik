@@ -26,12 +26,19 @@ const agentTag = color(33, "[agent]");
 const viteTag = color(36, "[vite] ");
 
 function banner() {
-  console.log(color(90, "─".repeat(60)));
+  const rule = color(90, "─".repeat(72));
+  console.log(rule);
   console.log(`${color(1, "ide-ux-agentik")} ${color(90, "dev")}`);
-  console.log(`  agent     ${AGENT_URL}`);
-  console.log(`  token     ${AGENT_TOKEN.slice(0, 8)}…${color(90, " (auto, per-run)")}`);
-  console.log(`  root      ${AGENT_ROOT}`);
-  console.log(color(90, "─".repeat(60)));
+  console.log(`  ${color(90, "root")}    ${AGENT_ROOT}`);
+  console.log(`  ${color(90, "URL")}     ${color(36, AGENT_URL)}`);
+  console.log(
+    `  ${color(90, "token")}   ${color(32, AGENT_TOKEN)}  ${color(90, "(auto, per-run)")}`,
+  );
+  console.log(rule);
+  console.log(color(90, "  Paste into Setup Wizard → Agent step (or Add workspace → Remote):"));
+  console.log(`    URL    ${AGENT_URL}`);
+  console.log(`    token  ${AGENT_TOKEN}`);
+  console.log(rule);
 }
 
 function prefix(stream: NodeJS.WritableStream, tag: string, data: Buffer) {
@@ -52,10 +59,14 @@ const agent = spawn(
     "--experimental-strip-types",
     "--no-warnings",
     "agent/server.ts",
-    "--root", AGENT_ROOT,
-    "--host", AGENT_HOST,
-    "--port", AGENT_PORT,
-    "--token", AGENT_TOKEN,
+    "--root",
+    AGENT_ROOT,
+    "--host",
+    AGENT_HOST,
+    "--port",
+    AGENT_PORT,
+    "--token",
+    AGENT_TOKEN,
   ],
   { stdio: ["ignore", "pipe", "pipe"], env: process.env },
 );
@@ -102,10 +113,17 @@ vite.on("exit", async (c, s) => {
   if (!agent.killed && agent.exitCode === null) {
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
-        try { agent.kill("SIGKILL"); } catch { /* ignore */ }
+        try {
+          agent.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
         resolve();
       }, 3000);
-      agent.once("exit", () => { clearTimeout(timer); resolve(); });
+      agent.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
     });
   }
   process.exit(c ?? 0);
