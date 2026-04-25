@@ -27,6 +27,12 @@ import { MOCK_ENABLED } from "@/lib/env";
 
 type TabKey = "local" | "remote" | "github" | "mock";
 
+export type WorkspaceInput = {
+  name: string;
+  source?: WorkspaceSource;
+  opts?: { rootPath?: string; gitUrl?: string };
+};
+
 function defaultTab(): TabKey {
   if (isLocalWebSupported()) return "local";
   return "remote";
@@ -42,9 +48,10 @@ function repoBasename(url: string): string {
 export type AddWorkspaceFormProps = {
   onSuccess?: () => void;
   onCancel?: () => void;
+  onSubmit?: (input: WorkspaceInput) => void | Promise<void>;
 };
 
-export function AddWorkspaceForm({ onSuccess, onCancel }: AddWorkspaceFormProps) {
+export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspaceFormProps) {
   const addWorkspace = useIDE((s) => s.addWorkspace);
   const setActiveWorkspace = useIDE((s) => s.setActiveWorkspace);
   const workspaces = useIDE((s) => s.workspaces);
@@ -99,9 +106,13 @@ export function AddWorkspaceForm({ onSuccess, onCancel }: AddWorkspaceFormProps)
     try {
       const { handleId, name } = await pickDirectory();
       const source: WorkspaceSource = { kind: "local-web", handleId, name };
-      const id = addWorkspace(name, source);
-      setActiveWorkspace(id);
-      toast.success(`Workspace "${name}" added (local folder)`);
+      if (onSubmit) {
+        await onSubmit({ name, source });
+      } else {
+        const id = addWorkspace(name, source);
+        setActiveWorkspace(id);
+        toast.success(`Workspace "${name}" added (local folder)`);
+      }
       onSuccess?.();
     } catch (e) {
       if (
@@ -138,9 +149,13 @@ export function AddWorkspaceForm({ onSuccess, onCancel }: AddWorkspaceFormProps)
     try {
       const provider = await providerFor(source, label);
       await provider.list("");
-      const id = addWorkspace(label, source);
-      setActiveWorkspace(id);
-      toast.success(`Connected to ${label}`);
+      if (onSubmit) {
+        await onSubmit({ name: label, source });
+      } else {
+        const id = addWorkspace(label, source);
+        setActiveWorkspace(id);
+        toast.success(`Connected to ${label}`);
+      }
       onSuccess?.();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not connect to agent");
@@ -149,15 +164,19 @@ export function AddWorkspaceForm({ onSuccess, onCancel }: AddWorkspaceFormProps)
     }
   };
 
-  const onCreateMock = () => {
+  const onCreateMock = async () => {
     const name = mockName.trim();
     if (!name) {
       toast.error("Name is required");
       return;
     }
-    const id = addWorkspace(name);
-    setActiveWorkspace(id);
-    toast.success(`Workspace "${name}" added (demo)`);
+    if (onSubmit) {
+      await onSubmit({ name });
+    } else {
+      const id = addWorkspace(name);
+      setActiveWorkspace(id);
+      toast.success(`Workspace "${name}" added (demo)`);
+    }
     onSuccess?.();
   };
 
@@ -200,8 +219,16 @@ export function AddWorkspaceForm({ onSuccess, onCancel }: AddWorkspaceFormProps)
         });
       });
       const install = await provider.gitDetectInstall(resolvedDest);
-      const id = addWorkspace(name, target.source, { rootPath: resolvedDest, gitUrl: url });
-      setActiveWorkspace(id);
+      if (onSubmit) {
+        await onSubmit({
+          name,
+          source: target.source,
+          opts: { rootPath: resolvedDest, gitUrl: url },
+        });
+      } else {
+        const id = addWorkspace(name, target.source, { rootPath: resolvedDest, gitUrl: url });
+        setActiveWorkspace(id);
+      }
       if (install) {
         toast.success(
           `Cloned into ${resolvedDest}. Suggested install: \`${install.tool} ${install.args.join(" ")}\``,

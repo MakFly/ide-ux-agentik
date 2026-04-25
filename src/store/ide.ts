@@ -7,6 +7,7 @@ import { computeStatus, type GitStatusMap } from "@/lib/git/status";
 import { persistence } from "@/lib/persistence/client";
 import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import { MOCK_ENABLED } from "@/lib/env";
+import { storage } from "@/lib/storage";
 
 export type BranchStatus = "active" | "warn" | "loading" | "dot" | "none";
 
@@ -74,6 +75,7 @@ export type Workspace = {
   gitUrl?: string;
   rootPath?: string;
   source: WorkspaceSource;
+  orgId: string;
 };
 
 export type ChatMessage = {
@@ -172,6 +174,7 @@ type State = {
   workspaces: Workspace[];
   activeWorkspaceId: string;
   activeBranchId: string;
+  currentOrgId: string | null;
 
   // Normalized branch storage — replaces Workspace.branches (denormalized).
   branchesByWorkspaceId: Record<string, Branch[]>;
@@ -330,6 +333,8 @@ type State = {
 
   getWorkspaceIdForBranch: (branchId: string) => string | undefined;
   hydrateSessionsFromDb: () => Promise<void>;
+  setCurrentOrgId: (id: string) => void;
+  hydrateWorkspacesFromStorage: (orgId: string) => Promise<void>;
 };
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -449,6 +454,7 @@ const initialWorkspaces: Workspace[] = MOCK_ENABLED
         color: "oklch(0.45 0.18 270)",
         gitUrl: "https://github.com/superconductor/superconductor",
         source: { kind: "mock", id: "ws-sc" },
+        orgId: "personal-org",
       },
       {
         id: "ws-landing",
@@ -457,6 +463,7 @@ const initialWorkspaces: Workspace[] = MOCK_ENABLED
         color: "oklch(0.55 0.13 60)",
         gitUrl: "https://github.com/superconductor/landing",
         source: { kind: "mock", id: "ws-landing" },
+        orgId: "personal-org",
       },
     ]
   : [];
@@ -747,6 +754,7 @@ export const useIDE = create<State>()(
       workspaces: initialWorkspaces,
       activeWorkspaceId: MOCK_ENABLED ? "ws-sc" : "",
       activeBranchId: MOCK_ENABLED ? "b1" : "",
+      currentOrgId: MOCK_ENABLED ? "personal-org" : null,
 
       branchesByWorkspaceId: MOCK_ENABLED ? initialBranchesByWorkspaceId : {},
       activeBranchIdByWorkspaceId: (MOCK_ENABLED
@@ -1406,19 +1414,18 @@ export const useIDE = create<State>()(
             : effectiveSource.kind === "remote-agent"
               ? "oklch(0.55 0.15 30)"
               : "oklch(0.50 0.15 200)";
+        const workspace: Workspace = {
+          id,
+          letter: name.charAt(0).toUpperCase() || "W",
+          name,
+          color,
+          source: effectiveSource,
+          orgId: get().currentOrgId ?? "personal-org",
+          ...(opts?.rootPath ? { rootPath: opts.rootPath } : {}),
+          ...(opts?.gitUrl ? { gitUrl: opts.gitUrl } : {}),
+        };
         set((s) => ({
-          workspaces: [
-            ...s.workspaces,
-            {
-              id,
-              letter: name.charAt(0).toUpperCase() || "W",
-              name,
-              color,
-              source: effectiveSource,
-              ...(opts?.rootPath ? { rootPath: opts.rootPath } : {}),
-              ...(opts?.gitUrl ? { gitUrl: opts.gitUrl } : {}),
-            },
-          ],
+          workspaces: [...s.workspaces, workspace],
           branchesByWorkspaceId: {
             ...s.branchesByWorkspaceId,
             [id]: [{ id: branchId, name: "main", age: "just now", starred: true, status: "none" }],
@@ -1445,6 +1452,7 @@ export const useIDE = create<State>()(
             [scopeKey(id, branchId)]: worktreeId,
           },
         }));
+        storage.putWorkspace(workspace.orgId, workspace).catch(console.warn);
         return id;
       },
 
@@ -1774,6 +1782,7 @@ export const useIDE = create<State>()(
 
       removeWorkspace: (workspaceId) => {
         const s = get();
+        const workspace = s.workspaces.find((w) => w.id === workspaceId);
         // Cascade: remove all branches (which cascade to worktrees).
         const branches = s.branchesByWorkspaceId[workspaceId] ?? [];
         for (const branch of branches) {
@@ -1793,6 +1802,22 @@ export const useIDE = create<State>()(
             activeBranchIdByWorkspaceId: restActiveBranch,
           };
         });
+        if (workspace) {
+          storage.removeWorkspace(workspace.orgId, workspaceId).catch(console.warn);
+        }
+      },
+
+      setCurrentOrgId: (id) => {
+        set({ currentOrgId: id });
+      },
+
+      hydrateWorkspacesFromStorage: async (orgId) => {
+        try {
+          const workspaces = await storage.getWorkspaces(orgId);
+          set({ workspaces });
+        } catch (e) {
+          console.warn("Failed to hydrate workspaces from storage:", e);
+        }
       },
 
       createFolder: (name) => {
@@ -1962,7 +1987,6 @@ export const useIDE = create<State>()(
       migrate: (_persistedState, _version) => _persistedState as State,
       partialize: (state) =>
         ({
-          workspaces: state.workspaces,
           activeWorkspaceId: state.activeWorkspaceId,
           activeBranchIdByWorkspaceId: state.activeBranchIdByWorkspaceId,
           activeSessionIdByWorkspaceId: state.activeSessionIdByWorkspaceId,

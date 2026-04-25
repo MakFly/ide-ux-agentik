@@ -1,0 +1,272 @@
+import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
+import { useLocalRuntime, type ChatModelAdapter } from "@assistant-ui/react";
+import { useEffect, useRef } from "react";
+import { z } from "zod";
+import type { TabId } from "@/store/ide";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { TopBar } from "@/components/ide/TopBar";
+import { Sidebar } from "@/components/ide/Sidebar";
+import { Workspace } from "@/components/ide/Workspace";
+import { FilesPanel } from "@/components/ide/FilesPanel";
+import { StatusBar } from "@/components/ide/StatusBar";
+import { TerminalPanel } from "@/components/ide/terminal-panel";
+import { EditorPanel } from "@/components/ide/editor-panel";
+import { useIDE, useCurrentActiveTab, useCurrentOpenFiles } from "@/store/ide";
+import { MOCK_ENABLED } from "@/lib/env";
+import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
+import { useIsMobile } from "@/hooks/use-mobile";
+
+type AgentKind = "claude" | "codex" | "opencode" | "gemini";
+
+function agentBanner(kind: AgentKind, scope: string): string {
+  switch (kind) {
+    case "claude":
+      return `**Claude Code** · ${scope} · sonnet-4.6\n\n_Tip: /help, /effort, /plan, Ctrl+R for history_`;
+    case "codex":
+      return `**Codex CLI** · ${scope} · gpt-5-codex\n\n_Full-screen TUI · Plan mode · streaming diffs_`;
+    case "opencode":
+      return `**OpenCode** · ${scope} · provider: anthropic/claude-sonnet-4\n\n_Multi-provider · LSP · multi-session_`;
+    case "gemini":
+      return `**Gemini CLI** · ${scope} · gemini-2.5-pro\n\n_1M ctx · Google Search grounding · free tier_`;
+  }
+}
+
+function agentBody(kind: AgentKind, text: string, webSearch: boolean, thinking: boolean): string {
+  const snippet = text.slice(0, 80) || "(empty)";
+  switch (kind) {
+    case "claude":
+      return [
+        thinking ? `\n\n🧠 **Thinking** · decomposing "${snippet}" …` : "",
+        `\n\n**Tool calls**`,
+        `\n- 🔍 \`Glob\` — pattern \`**/*.ts\``,
+        `\n- 📖 \`Read\` — \`src/store/ide.ts\` (1 406 lines)`,
+        `\n- ✏️ \`Edit\` — queued, awaiting confirmation`,
+        `\n\nReplying: "${snippet}"`,
+      ].join("");
+    case "codex":
+      return [
+        `\n\n\`\`\`diff`,
+        `\n+ 1. Read repo structure`,
+        `\n+ 2. Identify changes required for: ${snippet}`,
+        `\n+ 3. Draft patch → preview → apply`,
+        `\n\`\`\``,
+        `\n\n_Plan ready. Say \`go\` to execute._`,
+      ].join("");
+    case "opencode":
+      return [
+        `\n\n\`\`\`bash`,
+        `\n$ opencode session: #42 · model switched to gpt-5-mini`,
+        `\n$ lsp: typescript server → 4 diagnostics`,
+        `\n\`\`\``,
+        `\n\nProposing: "${snippet}"`,
+      ].join("");
+    case "gemini":
+      return [
+        webSearch ? `\n\n🌐 **Google Search grounding** · 3 sources queried` : "",
+        `\n\n📄 Context window: 1M tokens · using 12 342 (1.2%)`,
+        `\n\nAnalysing: "${snippet}"`,
+      ].join("");
+  }
+}
+
+function getActiveSessionKind(): AgentKind {
+  const state = useIDE.getState();
+  const workspaceId = state.activeWorkspaceId;
+  const sessions = state.sessionsByWorkspaceId[workspaceId] ?? [];
+  const activeSessionId = state.activeSessionIdByWorkspaceId[workspaceId];
+  const session = sessions.find((t) => t.id === activeSessionId) ?? sessions[0];
+  return (session?.kind as AgentKind) ?? state.activeAgent;
+}
+
+const MockModelAdapter: ChatModelAdapter = {
+  async run({ messages }) {
+    const last = messages[messages.length - 1];
+    const text = last?.content?.map((p) => (p.type === "text" ? p.text : "")).join(" ") ?? "";
+    const {
+      webSearch,
+      thinking,
+      activeWorkspaceId,
+      activeBranchId,
+      workspaces,
+      branchesByWorkspaceId,
+    } = useIDE.getState();
+    const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
+    const branch = (branchesByWorkspaceId[activeWorkspaceId] ?? []).find(
+      (b) => b.id === activeBranchId,
+    );
+    const scope = `\`${workspace?.name ?? "?"}:${branch?.name ?? "?"}\``;
+    const kind = getActiveSessionKind();
+    await new Promise((r) => setTimeout(r, thinking ? 900 : 400));
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: agentBanner(kind, scope) + agentBody(kind, text, webSearch, thinking),
+        },
+      ],
+    };
+  },
+};
+
+const agentTabSchema = z.enum(["codex", "claude", "opencode", "gemini", "overview", "audit"]);
+const fileTabSchema = z.string().regex(/^file:/);
+const terminalTabSchema = z.string().regex(/^terminal:/);
+const tabSchema = z.union([agentTabSchema, terminalTabSchema, fileTabSchema]);
+
+const searchSchema = z.object({
+  workspace: z.string().optional(),
+  branch: z.string().optional(),
+  tab: tabSchema.optional(),
+});
+
+export type IdeShellSearch = z.infer<typeof searchSchema>;
+
+interface IdeShellProps {
+  search?: IdeShellSearch;
+  onNavigate?: (search: Record<string, any>) => void;
+}
+
+export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
+  const runtime = useLocalRuntime(MockModelAdapter);
+  const hydratedFromUrlRef = useRef(false);
+
+  const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
+  const activeBranchId = useIDE((s) => s.activeBranchId);
+  const activeTab = useCurrentActiveTab();
+  const setActiveBranch = useIDE((s) => s.setActiveBranch);
+  const setActiveWorkspace = useIDE((s) => s.setActiveWorkspace);
+  const setActiveTab = useIDE((s) => s.setActiveTab);
+  const setApplyingFromUrl = useIDE((s) => s.setApplyingFromUrl);
+  const workspaces = useIDE((s) => s.workspaces);
+  const showTerminal = useIDE((s) => s.showTerminal);
+
+  const { workspace, branch, tab } = search;
+
+  // URL → store, once on mount.
+  useEffect(() => {
+    if (hydratedFromUrlRef.current) return;
+    hydratedFromUrlRef.current = true;
+    setApplyingFromUrl(true);
+    if (workspace && workspace !== activeWorkspaceId) {
+      if (workspaces.some((w) => w.id === workspace)) setActiveWorkspace(workspace);
+    }
+    if (branch && branch !== activeBranchId) {
+      const { branchesByWorkspaceId: branchMap } = useIDE.getState();
+      const exists = Object.values(branchMap).some((branches) =>
+        branches.some((b) => b.id === branch),
+      );
+      if (exists) setActiveBranch(branch);
+    }
+    if (tab) setActiveTab(tab as TabId);
+    queueMicrotask(() => setApplyingFromUrl(false));
+  }, [
+    workspace,
+    branch,
+    tab,
+    activeWorkspaceId,
+    activeBranchId,
+    workspaces,
+    setActiveBranch,
+    setActiveWorkspace,
+    setActiveTab,
+    setApplyingFromUrl,
+  ]);
+
+  // store → URL, continuous (shallow replace to keep history clean).
+  useEffect(() => {
+    if (!hydratedFromUrlRef.current) return;
+    const applying = useIDE.getState().applyingFromUrl;
+    if (applying) return;
+    if (onNavigate) {
+      onNavigate({
+        workspace:
+          MOCK_ENABLED && activeWorkspaceId === "ws-sc"
+            ? undefined
+            : activeWorkspaceId || undefined,
+        branch: MOCK_ENABLED && activeBranchId === "b1" ? undefined : activeBranchId || undefined,
+        tab: activeTab === "overview" ? undefined : activeTab,
+      });
+    }
+  }, [activeWorkspaceId, activeBranchId, activeTab, onNavigate]);
+
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <TooltipProvider delayDuration={200}>
+        <div className="flex h-svh w-screen flex-col overflow-hidden bg-background text-foreground">
+          <TopBar />
+          <div className="flex min-h-0 flex-1 overflow-hidden bg-sidebar p-2">
+            <ResizableLayout />
+          </div>
+          {showTerminal && <TerminalPanel />}
+          <StatusBar />
+        </div>
+      </TooltipProvider>
+    </AssistantRuntimeProvider>
+  );
+}
+
+function ResizableLayout() {
+  const isMobile = useIsMobile();
+  const openFiles = useCurrentOpenFiles();
+  const hasOpenFile = openFiles.length > 0;
+  const showSidebar = useIDE((s) => s.showSidebar);
+  const showFiles = useIDE((s) => s.showFiles);
+
+  if (isMobile) {
+    return (
+      <div className="flex min-h-0 flex-1 gap-2 overflow-hidden">
+        <Workspace />
+      </div>
+    );
+  }
+
+  const layoutId = `ide-layout-${showSidebar ? "s" : ""}${showFiles ? "f" : ""}${hasOpenFile ? "e" : ""}`;
+  const workspaceDefault = hasOpenFile
+    ? showSidebar && showFiles
+      ? "32%"
+      : "48%"
+    : showSidebar && showFiles
+      ? "66%"
+      : showSidebar || showFiles
+        ? "82%"
+        : "100%";
+
+  return (
+    <PanelGroup orientation="horizontal" id={layoutId} className="flex min-h-0 flex-1">
+      {showSidebar && (
+        <>
+          <Panel defaultSize="16%" minSize="180px" maxSize="30%" className="flex min-w-0">
+            <Sidebar />
+          </Panel>
+          <PanelResizeHandle className="group relative w-2 shrink-0 cursor-col-resize transition-colors hover:bg-accent/40">
+            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/60 group-hover:bg-primary/50" />
+          </PanelResizeHandle>
+        </>
+      )}
+      <Panel defaultSize={workspaceDefault} minSize="320px" className="flex min-w-0">
+        <Workspace />
+      </Panel>
+      {hasOpenFile && (
+        <>
+          <PanelResizeHandle className="group relative w-2 shrink-0 cursor-col-resize transition-colors hover:bg-accent/40">
+            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/60 group-hover:bg-primary/50" />
+          </PanelResizeHandle>
+          <Panel defaultSize="34%" minSize="320px" className="flex min-w-0">
+            <EditorPanel />
+          </Panel>
+        </>
+      )}
+      {showFiles && (
+        <>
+          <PanelResizeHandle className="group relative w-2 shrink-0 cursor-col-resize transition-colors hover:bg-accent/40">
+            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/60 group-hover:bg-primary/50" />
+          </PanelResizeHandle>
+          <Panel defaultSize="18%" minSize="200px" maxSize="35%" className="flex min-w-0">
+            <FilesPanel />
+          </Panel>
+        </>
+      )}
+    </PanelGroup>
+  );
+}
