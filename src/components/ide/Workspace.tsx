@@ -11,7 +11,7 @@ import {
   type TerminalKind,
   type WorkspaceTerminal,
 } from "@/store/ide";
-import { Thread } from "@/components/assistant-ui/thread";
+import { UnifiedChat } from "@/components/ide/unified-chat";
 import {
   AgentSessionView,
   SessionModeToggle,
@@ -331,10 +331,7 @@ export function Workspace() {
       />
       <div className="min-h-0 flex-1 overflow-hidden">
         {sessions.length === 0 || !activeSession ? (
-          // Empty state: render the central composer (assistant-ui Thread) so the
-          // user can type a prompt directly. Submit → taskLauncherAdapter →
-          // store.createTaskFromPrompt → new task + session-tab in this Workspace.
-          <Thread />
+          <UnifiedChat />
         ) : hasPinned ? (
           <PanelGroup orientation="horizontal" className="h-full">
             <Panel minSize={20} defaultSize={Math.round(100 / (pinnedSessions.length + 1))}>

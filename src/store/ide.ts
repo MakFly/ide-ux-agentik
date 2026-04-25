@@ -52,10 +52,6 @@ export type WorkspaceTerminal = {
   // task.sessionId === WorkspaceTerminal.id, so taskId is the link back to
   // the parent task row.
   taskId?: string;
-  // Conversation aggregation (Wave 3): points to the root task of the
-  // conversation thread. Immutable for the lifetime of this tab.
-  // If undefined, treated as taskId (backward-compat for legacy sessions).
-  conversationRootTaskId?: string;
 };
 
 export type Worktree = {
@@ -849,7 +845,6 @@ function buildSessionTabFor(
       workspaceId: task.workspaceId,
       lastCommand: TITLE_BY_KIND[cliKind],
       taskId: task.id,
-      conversationRootTaskId: task.id,
     };
     const idx = existing.findIndex((t) => t.id === sessionId);
     return idx >= 0 ? existing.map((t, i) => (i === idx ? tab : t)) : [...existing, tab];
@@ -857,9 +852,7 @@ function buildSessionTabFor(
 
   // CHILD task — find the existing tab for the conversation root and
   // update its taskId to point to the latest task in the chain.
-  const rootTab = existing.find(
-    (t) => (t.conversationRootTaskId ?? t.taskId) === conversationRootTaskId,
-  );
+  const rootTab = existing.find((t) => t.taskId === conversationRootTaskId);
   if (!rootTab) return existing; // shouldn't happen, fail closed
   return existing.map((t) =>
     t.id === rootTab.id ? { ...t, taskId: task.id, status: tabStatus, title: titleFor } : t,
