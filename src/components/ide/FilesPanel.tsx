@@ -164,102 +164,23 @@ export function FilesPanel() {
         {filesTab === "files" &&
           (!fileTreeLoading || Object.keys(fileTree).length > 0 || rootFiles.length > 0) && (
             <>
-              {Object.entries(fileTree).map(([name, children]) => {
-                const open = !!expandedFolders[name];
-                const folderSt = getFolderStatus(name);
-                return (
-                  <div key={name}>
-                    <div className="group flex items-center">
-                      <div
-                        onClick={() => toggleFolder(name)}
-                        className="flex flex-1 cursor-pointer items-center gap-1.5 px-3 py-[3px] text-[13px] text-foreground hover:bg-accent/40"
-                      >
-                        {open ? (
-                          <ChevronDown className="h-3 w-3 text-muted-foreground" />
-                        ) : (
-                          <ChevronRight className="h-3 w-3 text-muted-foreground" />
-                        )}
-                        <FileTypeIcon name={name} isDir isOpen={open} />
-                        <span className="font-mono">{name}</span>
-                      </div>
-                      <div className="flex items-center gap-0.5 pr-2">
-                        <span className="transition-opacity group-hover:opacity-0">
-                          {statusBadge(folderSt)}
-                        </span>
-                        <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setFileDialogFor(name);
-                            }}
-                            className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-                            title="New file in folder"
-                          >
-                            <FilePlus className="h-3 w-3" />
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (confirm(`Delete folder "${name}"?`)) {
-                                deleteEntry(null, name);
-                                toast.success(`Folder "${name}" deleted`);
-                              }
-                            }}
-                            className="rounded p-0.5 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
-                            title="Delete folder"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {open &&
-                      children.map((c) => {
-                        const subKey = `${name}/${c}`;
-                        const isFolder = c.endsWith("/");
-                        const subOpen = isFolder && !!expandedFolders[subKey];
-                        return (
-                          <div key={c} className="group flex items-center">
-                            <div
-                              onClick={() => {
-                                if (isFolder) {
-                                  toggleFolder(subKey);
-                                } else {
-                                  openFile(`${name}/${c}`);
-                                }
-                              }}
-                              className="flex flex-1 cursor-pointer items-center gap-1.5 py-[3px] pl-[36px] pr-3 text-[12.5px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-                            >
-                              <FileTypeIcon
-                                name={c.replace(/\/$/, "")}
-                                isDir={isFolder}
-                                isOpen={subOpen}
-                              />
-                              <span className="font-mono">{c}</span>
-                            </div>
-                            {isFolder
-                              ? statusBadge(getFolderStatus(subKey))
-                              : statusBadge(gitStatus.get(`${name}/${c}`))}
-                            {!c.endsWith("/") && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deleteEntry(name, c);
-                                  toast.success(`Deleted ${name}/${c}`);
-                                }}
-                                className="mr-2 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/20 hover:text-destructive group-hover:opacity-100"
-                                title="Delete file"
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </button>
-                            )}
-                          </div>
-                        );
-                      })}
-                  </div>
-                );
-              })}
+              {Object.entries(fileTree)
+                .filter(([k]) => !k.includes("/"))
+                .map(([name]) => (
+                  <DirNode
+                    key={name}
+                    path={name}
+                    depth={0}
+                    fileTree={fileTree}
+                    expandedFolders={expandedFolders}
+                    toggleFolder={toggleFolder}
+                    openFile={openFile}
+                    deleteEntry={deleteEntry}
+                    gitStatus={gitStatus}
+                    getFolderStatus={getFolderStatus}
+                    setFileDialogFor={setFileDialogFor}
+                  />
+                ))}
 
               {rootFiles.map((f) => (
                 <div key={f} className="group flex items-center">
@@ -400,5 +321,153 @@ export function FilesPanel() {
         }}
       />
     </aside>
+  );
+}
+
+type DirNodeProps = {
+  path: string;
+  depth: number;
+  fileTree: Record<string, string[]>;
+  expandedFolders: Record<string, boolean>;
+  toggleFolder: (path: string) => void;
+  openFile: (path: string) => void;
+  deleteEntry: (parent: string | null, name: string) => Promise<void> | void;
+  gitStatus: Map<string, GitFileStatus>;
+  getFolderStatus: (path: string) => GitFileStatus | null;
+  setFileDialogFor: (path: string | null) => void;
+};
+
+function DirNode(props: DirNodeProps) {
+  const {
+    path,
+    depth,
+    fileTree,
+    expandedFolders,
+    toggleFolder,
+    openFile,
+    deleteEntry,
+    gitStatus,
+    getFolderStatus,
+    setFileDialogFor,
+  } = props;
+  const open = !!expandedFolders[path];
+  const folderSt = getFolderStatus(path);
+  const name = path.split("/").pop() ?? path;
+  const children = fileTree[path] ?? [];
+  const indent = 12 + depth * 14;
+
+  const renderStatus = (status: GitFileStatus | null | undefined) => {
+    if (!status || status === "clean") return null;
+    const letter =
+      status === "modified" ? "M" : status === "added" ? "A" : status === "deleted" ? "D" : "?";
+    return (
+      <span
+        className={cn(
+          "mr-1 font-mono text-[10px] uppercase",
+          status === "modified" && "text-status-warn",
+          status === "added" && "text-status-add",
+          status === "deleted" && "text-status-del",
+          status === "untracked" && "text-muted-foreground",
+        )}
+      >
+        {letter}
+      </span>
+    );
+  };
+
+  return (
+    <div>
+      <div className="group flex items-center">
+        <div
+          onClick={() => toggleFolder(path)}
+          style={{ paddingLeft: `${indent}px` }}
+          className="flex flex-1 cursor-pointer items-center gap-1.5 py-[3px] pr-3 text-[13px] text-foreground hover:bg-accent/40"
+        >
+          {open ? (
+            <ChevronDown className="h-3 w-3 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-3 w-3 text-muted-foreground" />
+          )}
+          <FileTypeIcon name={name} isDir isOpen={open} />
+          <span className="font-mono">{name}</span>
+        </div>
+        <div className="flex items-center gap-0.5 pr-2">
+          <span className="transition-opacity group-hover:opacity-0">{renderStatus(folderSt)}</span>
+          <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setFileDialogFor(path);
+              }}
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+              title="New file in folder"
+            >
+              <FilePlus className="h-3 w-3" />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (confirm(`Delete folder "${path}"?`)) {
+                  void deleteEntry(null, path);
+                  toast.success(`Folder "${path}" deleted`);
+                }
+              }}
+              className="rounded p-0.5 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
+              title="Delete folder"
+            >
+              <Trash2 className="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {open &&
+        children.map((c) => {
+          const isFolder = c.endsWith("/");
+          const cleanName = c.replace(/\/$/, "");
+          const childPath = `${path}/${cleanName}`;
+          if (isFolder) {
+            return (
+              <DirNode
+                key={c}
+                path={childPath}
+                depth={depth + 1}
+                fileTree={fileTree}
+                expandedFolders={expandedFolders}
+                toggleFolder={toggleFolder}
+                openFile={openFile}
+                deleteEntry={deleteEntry}
+                gitStatus={gitStatus}
+                getFolderStatus={getFolderStatus}
+                setFileDialogFor={setFileDialogFor}
+              />
+            );
+          }
+          return (
+            <div key={c} className="group flex items-center">
+              <div
+                onClick={() => openFile(childPath)}
+                style={{ paddingLeft: `${indent + 22}px` }}
+                className="flex flex-1 cursor-pointer items-center gap-1.5 py-[3px] pr-3 text-[12.5px] text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+              >
+                <FileTypeIcon name={cleanName} />
+                <span className="font-mono">{cleanName}</span>
+              </div>
+              {renderStatus(gitStatus.get(childPath))}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void deleteEntry(path, cleanName);
+                  toast.success(`Deleted ${childPath}`);
+                }}
+                className="mr-2 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/20 hover:text-destructive group-hover:opacity-100"
+                title="Delete file"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+          );
+        })}
+    </div>
   );
 }

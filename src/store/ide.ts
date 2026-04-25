@@ -1226,17 +1226,23 @@ export const useIDE = create<State>()(
           };
         }),
 
-      toggleFolder: (name) =>
-        set((s) => {
-          const key = scopeKey(s.activeWorkspaceId, s.activeBranchId);
-          const current = s.expandedFoldersByScope[key] ?? {};
-          return {
-            expandedFoldersByScope: {
-              ...s.expandedFoldersByScope,
-              [key]: { ...current, [name]: !current[name] },
-            },
-          };
-        }),
+      toggleFolder: (name) => {
+        const sk = scopeKey(get().activeWorkspaceId, get().activeBranchId);
+        const current = get().expandedFoldersByScope[sk] ?? {};
+        const wasOpen = !!current[name];
+        set((s) => ({
+          expandedFoldersByScope: {
+            ...s.expandedFoldersByScope,
+            [sk]: { ...current, [name]: !wasOpen },
+          },
+        }));
+        if (!wasOpen) {
+          const children = get().fileTree[name];
+          if (!children || children.length === 0) {
+            void get().loadChildren(sk, name);
+          }
+        }
+      },
 
       toggleFiles: () => set((s) => ({ showFiles: !s.showFiles })),
       toggleSidebar: () => set((s) => ({ showSidebar: !s.showSidebar })),
