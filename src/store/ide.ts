@@ -379,6 +379,8 @@ type State = {
   ) => Promise<void>;
   upsertTask: (task: import("@/lib/fs/remote-agent").Task) => void;
   removeTaskById: (taskId: string) => void;
+  /** Lazily create session in DB when user opens task conversation (idempotent). */
+  openTaskSession: (taskId: string) => Promise<void>;
 };
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -834,11 +836,13 @@ function buildSessionTabFor(
   const tabStatus: WorkspaceTerminal["status"] = task.status === "running" ? "busy" : "ready";
   const cliKind = (task.cli as TerminalKind) ?? "codex";
   const titleFor = task.title?.slice(0, 40) || TITLE_BY_KIND[cliKind];
+  // Generate deterministic sessionId if not yet persisted (lazy session creation)
+  const sessionId = task.sessionId || `${task.id}-session`;
 
   if (task.id === conversationRootTaskId) {
-    // ROOT task — create or update tab keyed on task.sessionId.
+    // ROOT task — create or update tab keyed on sessionId (deterministic or from DB).
     const tab: WorkspaceTerminal = {
-      id: task.sessionId,
+      id: sessionId,
       kind: cliKind,
       title: titleFor,
       status: tabStatus,
@@ -847,7 +851,7 @@ function buildSessionTabFor(
       taskId: task.id,
       conversationRootTaskId: task.id,
     };
-    const idx = existing.findIndex((t) => t.id === task.sessionId);
+    const idx = existing.findIndex((t) => t.id === sessionId);
     return idx >= 0 ? existing.map((t, i) => (i === idx ? tab : t)) : [...existing, tab];
   }
 
@@ -1920,12 +1924,14 @@ export const useIDE = create<State>()(
           const { [workspaceId]: _worktrees, ...restWorktrees } = cur.worktreesByWorkspaceId;
           const { [workspaceId]: _activeBranch, ...restActiveBranch } =
             cur.activeBranchIdByWorkspaceId;
+          const { [workspaceId]: _provider, ...restProviders } = cur.agentProvidersByWorkspaceId;
           return {
             workspaces: cur.workspaces.filter((w) => w.id !== workspaceId),
             branchesByWorkspaceId: restBranches,
             sessionsByWorkspaceId: restSessions,
             worktreesByWorkspaceId: restWorktrees,
             activeBranchIdByWorkspaceId: restActiveBranch,
+            agentProvidersByWorkspaceId: restProviders,
           };
         });
         if (workspace) {
@@ -2156,8 +2162,9 @@ export const useIDE = create<State>()(
           );
           await provider.connect();
 
-          // Wave 3: taskCreate now returns { id, sessionId } atomically.
-          const { id: taskId, sessionId } = await provider.taskCreate({
+          // taskCreate now returns { id, sessionId } but doesn't persist it yet.
+          // We'll use a deterministic sessionId based on taskId.
+          const { id: taskId } = await provider.taskCreate({
             workspaceId: workspace.id,
             title: prompt.split("\n")[0].slice(0, 60) || "Untitled task",
             prompt,
@@ -2165,22 +2172,18 @@ export const useIDE = create<State>()(
             model,
             effort,
           });
-          console.info(
-            `[store.createTaskFromPrompt] taskCreate ok id=${taskId} sessionId=${sessionId}`,
-          );
+          console.info(`[store.createTaskFromPrompt] taskCreate ok id=${taskId}`);
 
           await provider.taskStart(taskId);
           console.info(`[store.createTaskFromPrompt] taskStart ok id=${taskId}`);
 
-          // Surface the task as an in-Workspace session tab (id = sessionId,
-          // taskId = back-pointer for AgentSessionView). The transcript panel
-          // renders inline; no modal dialog auto-open.
+          // Surface the task as an in-Workspace session tab.
+          // Use deterministic sessionId for persistence on first open.
           const cliKind = cli as TerminalKind;
-          // Synthesize a Task object for buildSessionTabFor — at this point we don't have
-          // the full Task back yet, only { id, sessionId } from taskCreate.
+          const sessionId = `${taskId}-session`;
           const synthTask: import("@/lib/fs/remote-agent").Task = {
             id: taskId,
-            sessionId,
+            sessionId: null, // Not yet persisted in DB
             workspaceId: workspace.id,
             title: prompt.split("\n")[0].slice(0, 40),
             prompt,
@@ -2318,6 +2321,55 @@ export const useIDE = create<State>()(
           }));
         } catch (err) {
           console.warn(`[store.tasks] loadTaskLogs failed for ${taskId}:`, err);
+        }
+      },
+
+      openTaskSession: async (taskId) => {
+        const state = get();
+        // Find which workspace owns this task.
+        let workspace: Workspace | undefined;
+        for (const [wsId, tasks] of Object.entries(state.tasksByWorkspaceId)) {
+          if (tasks.some((t) => t.id === taskId)) {
+            workspace = state.workspaces.find((w) => w.id === wsId);
+            break;
+          }
+        }
+        if (!workspace || workspace.source.kind !== "remote-agent") return;
+
+        const sessionId = `${taskId}-session`;
+        try {
+          const provider =
+            state.agentProvidersByWorkspaceId[workspace.id] ??
+            new RemoteAgentProvider(
+              workspace.source.label,
+              workspace.source.url,
+              workspace.source.token,
+            );
+          if (!state.agentProvidersByWorkspaceId[workspace.id]) {
+            await provider.connect();
+            set((s) => ({
+              agentProvidersByWorkspaceId: {
+                ...s.agentProvidersByWorkspaceId,
+                [workspace.id]: provider,
+              },
+            }));
+          }
+
+          // Lazily create session in DB if not already present (idempotent)
+          const taskList = await provider.taskList({ workspaceId: workspace.id });
+          const task = taskList.find((t) => t.id === taskId);
+          if (!task?.sessionId) {
+            await provider.sessionsCreate({
+              id: sessionId,
+              workspaceId: workspace.id,
+              cli: task?.cli ?? "codex",
+              title: task?.title,
+            });
+            // Link the session to the task
+            await provider.taskUpdate(taskId, { sessionId });
+          }
+        } catch (err) {
+          console.warn(`[store.tasks] openTaskSession failed for ${taskId}:`, err);
         }
       },
 

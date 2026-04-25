@@ -52,10 +52,15 @@ function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; n
   const [detailOpen, setDetailOpen] = useState(false);
   const setActiveSession = useIDE((s) => s.setActiveSession);
   const setActiveAgent = useIDE((s) => s.setActiveAgent);
-  const activateInWorkspace = () => {
+  const openTaskSession = useIDE((s) => s.openTaskSession);
+  const activateInWorkspace = async () => {
+    // Lazily create session in DB if not yet persisted
+    await openTaskSession(task.id);
+
     // If this is a child task, find its conversation's root session-tab.
-    // Otherwise, use the task's own sessionId.
-    let targetSessionId = task.sessionId;
+    // Otherwise, use the task's own sessionId (or deterministic fallback).
+    const deterministicSessionId = `${task.id}-session`;
+    let targetSessionId = task.sessionId || deterministicSessionId;
     if (task.parentSessionId) {
       // Child task: find the conversation's session-tab via conversationRootTaskId.
       const tasksByWs = useIDE.getState().tasksByWorkspaceId[workspace.id] ?? [];

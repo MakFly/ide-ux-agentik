@@ -762,33 +762,22 @@ const methods: Record<string, Handler> = {
       `[task.create] id=${taskId} sessionId=${sessionId} ws=${wid} cli=${c} model=${m ?? "(default)"} effort=${eff ?? "(default)"} title="${t.slice(0, 60)}"`,
     );
 
-    // Atomically create both session and task in a single transaction
-    const { taskId: createdTaskId, sessionId: createdSessionId } = tasksRepo.createWithSession(
-      {
-        id: taskId,
-        workspaceId: wid,
-        title: t,
-        prompt: p,
-        cli: c,
-        model: m,
-        effort: eff,
-        parentSessionId: parentSessionId !== undefined ? String(parentSessionId) : undefined,
-      },
-      {
-        id: sessionId,
-        workspaceId: wid,
-        cli: c,
-        title: t,
-      },
-    );
-
-    // Fetch the full task to broadcast
-    const task = tasksRepo.get(createdTaskId)!;
+    // Create task only (session is created lazily when user opens the conversation tab)
+    const createdTask = tasksRepo.create({
+      id: taskId,
+      workspaceId: wid,
+      title: t,
+      prompt: p,
+      cli: c,
+      model: m,
+      effort: eff,
+      parentSessionId: parentSessionId !== undefined ? String(parentSessionId) : undefined,
+    });
 
     broadcastAuthed({
       jsonrpc: "2.0",
       method: "task.created",
-      params: { task, sessionId: createdSessionId },
+      params: { task: createdTask, sessionId },
     });
 
     return { id: taskId, sessionId };
@@ -1122,6 +1111,17 @@ const methods: Record<string, Handler> = {
       params: { taskId },
     });
 
+    return { ok: true };
+  },
+
+  async "task.update"({ taskId, patch }) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.update: taskId is required");
+    if (!patch || typeof patch !== "object") throw new Error("task.update: patch is required");
+    const p = patch as Record<string, unknown>;
+    tasksRepo.update(tid, {
+      session_id: p.sessionId !== undefined ? String(p.sessionId) : undefined,
+    });
     return { ok: true };
   },
 

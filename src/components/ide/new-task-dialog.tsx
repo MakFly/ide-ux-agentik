@@ -174,7 +174,7 @@ export const NewTaskDialog: FC<{
         workspace.source.token,
       );
       await provider.connect();
-      const { id, sessionId } = await provider.taskCreate({
+      const { id } = await provider.taskCreate({
         workspaceId: workspace.id,
         title: finalTitle,
         prompt: p,
@@ -182,7 +182,7 @@ export const NewTaskDialog: FC<{
         model,
         effort,
       });
-      console.info(`[NewTaskDialog] taskCreate ok id=${id} sessionId=${sessionId}`);
+      console.info(`[NewTaskDialog] taskCreate ok id=${id}`);
       await provider.taskStart(id);
       console.info(
         `[NewTaskDialog] taskStart ok id=${id} (${Math.round(performance.now() - t0)}ms)`,
@@ -190,7 +190,9 @@ export const NewTaskDialog: FC<{
       // Surface the freshly-spawned task as the active tab in <Workspace>.
       // upsertTask (via onTaskCreated broadcast) mirrors the session-tab; this
       // just selects it so the user lands on the transcript.
-      setActiveSession(sessionId);
+      // Use deterministic sessionId since it's not yet persisted in DB.
+      const deterministicSessionId = `${id}-session`;
+      setActiveSession(deterministicSessionId);
       setActiveAgent(cli);
       toast.success("Task dispatched");
       onOpenChange(false);

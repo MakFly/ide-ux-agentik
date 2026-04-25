@@ -48,7 +48,7 @@ export type Task = {
   baseRef: string | null;
   exitCode: number | null;
   errorMessage: string | null;
-  sessionId: string;
+  sessionId: string | null;
   createdAt: number;
   startedAt: number | null;
   endedAt: number | null;
@@ -562,6 +562,19 @@ export class RemoteAgentProvider implements FsProvider {
 
   async taskRemoveWorktree(id: string, deleteBranch?: boolean): Promise<void> {
     await this.call<void>("task.removeWorktree", { id, deleteBranch });
+  }
+
+  async taskUpdate(taskId: string, patch: { sessionId?: string }): Promise<void> {
+    await this.call<void>("task.update", { taskId, patch });
+  }
+
+  async sessionsCreate(params: {
+    id: string;
+    workspaceId: string;
+    cli: string;
+    title?: string;
+  }): Promise<void> {
+    await this.call<void>("sessions.create", params);
   }
 
   onTaskCreated(cb: (task: Task) => void): () => void {
