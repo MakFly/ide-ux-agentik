@@ -22,6 +22,13 @@ function rpc<T>(provider: RemoteAgentProvider, method: string, params: unknown):
 }
 
 export const persistence = {
+  system: {
+    /** Server DB stamp — regenerated when the SQLite file is wiped (make db-reset).
+     *  Clients compare it to detect server resets and self-flush their caches. */
+    dbStamp(provider: RemoteAgentProvider): Promise<{ stamp: string }> {
+      return rpc<{ stamp: string }>(provider, "system.dbStamp", {});
+    },
+  },
   sessions: {
     list(provider: RemoteAgentProvider, workspaceId: string): Promise<DbSession[]> {
       return rpc<DbSession[]>(provider, "sessions.list", { workspaceId });

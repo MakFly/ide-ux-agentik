@@ -1,67 +1,22 @@
-import { getStorage } from "./index";
-import type { Org, User } from "../types/org";
-import type { Workspace } from "../../store/ide";
+/**
+ * Wipe legacy localStorage keys from the era when org/user/workspaces lived
+ * on the client. Single source of truth is now the agent SQLite (see
+ * server-adapter.ts). Runs once at boot, silently.
+ */
 
-export async function migrateLegacyStore(): Promise<{ migrated: boolean; workspaceCount: number }> {
-  if (typeof window === "undefined") {
-    return { migrated: false, workspaceCount: 0 };
+const LEGACY_PREFIXES = ["ide.org.", "ide.user.", "ide.ws."];
+
+export function dropLegacyClientStore(): { removed: number } {
+  if (typeof window === "undefined") return { removed: 0 };
+  const toRemove: string[] = [];
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const k = window.localStorage.key(i);
+    if (!k) continue;
+    if (LEGACY_PREFIXES.some((p) => k.startsWith(p))) toRemove.push(k);
   }
-
-  const storage = getStorage();
-  const existingOrg = await storage.getOrg();
-  if (existingOrg) {
-    return { migrated: false, workspaceCount: 0 };
+  for (const k of toRemove) window.localStorage.removeItem(k);
+  if (toRemove.length > 0) {
+    console.info(`[storage] dropped ${toRemove.length} legacy client-side keys`);
   }
-
-  const legacyJson = window.localStorage.getItem("ide-ux-agentik");
-  if (!legacyJson) {
-    return { migrated: false, workspaceCount: 0 };
-  }
-
-  let legacyState: unknown;
-  try {
-    legacyState = JSON.parse(legacyJson);
-  } catch {
-    return { migrated: false, workspaceCount: 0 };
-  }
-
-  const state = legacyState as { state?: { workspaces?: unknown[] } } | undefined;
-  const workspaces = (state?.state?.workspaces ?? []) as Array<Workspace & { orgId?: string }>;
-
-  if (!Array.isArray(workspaces) || workspaces.length === 0) {
-    return { migrated: false, workspaceCount: 0 };
-  }
-
-  const orgId = crypto.randomUUID?.() || generateId();
-  const org: Org = {
-    id: orgId,
-    name: "Personal",
-    slug: "personal",
-    createdAt: Date.now(),
-  };
-
-  const user: User = {
-    id: crypto.randomUUID?.() || generateId(),
-    displayName: "You",
-    defaultAgent: "claude",
-  };
-
-  await storage.putOrg(org);
-  await storage.putUser(user);
-
-  for (const ws of workspaces) {
-    const migratedWs: Workspace = {
-      ...ws,
-      orgId,
-    };
-    await storage.putWorkspace(orgId, migratedWs);
-  }
-
-  window.localStorage.removeItem("ide-ux-agentik");
-
-  return { migrated: true, workspaceCount: workspaces.length };
-}
-
-function generateId(): string {
-  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+  return { removed: toRemove.length };
 }

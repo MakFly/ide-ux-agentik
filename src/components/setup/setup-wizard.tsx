@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { storage } from "@/lib/storage";
+import { storage, setEndpoint, resetProviderCache } from "@/lib/storage";
 import type { Org, User } from "@/lib/types/org";
 import type { Workspace } from "@/store/ide";
 import type { WorkspaceSource } from "@/lib/fs";
@@ -84,20 +84,19 @@ export function SetupWizard() {
 
   const handleAgentNext = () => {
     if (!agentDraft) {
-      toast.error("URL and token are required");
+      toast.error("Agent URL and token are required (no localStorage fallback)");
       return;
     }
     const url = agentDraft.url.trim();
     const token = agentDraft.token.trim();
     if (!url || !token) {
-      toast.error("URL and token are required");
+      toast.error("Agent URL and token are required");
       return;
     }
-    setStep(4);
-  };
-
-  const handleAgentSkip = () => {
-    setAgentDraft(null);
+    // Persist the endpoint immediately so the storage layer (server-backed)
+    // can talk to the agent for the rest of the wizard.
+    setEndpoint({ url, token, label: agentDraft.label.trim() || new URL(url).host });
+    resetProviderCache();
     setStep(4);
   };
 
@@ -186,12 +185,7 @@ export function SetupWizard() {
           )}
 
           {step === 3 && (
-            <StepAgent
-              value={agentDraft}
-              onChange={setAgentDraft}
-              onNext={handleAgentNext}
-              onSkip={handleAgentSkip}
-            />
+            <StepAgent value={agentDraft} onChange={setAgentDraft} onNext={handleAgentNext} />
           )}
 
           {step === 4 && (
@@ -215,16 +209,6 @@ export function SetupWizard() {
             >
               Back
             </Button>
-
-            {step < 4 && (
-              <>
-                {step === 3 && (
-                  <Button variant="ghost" onClick={handleAgentSkip} disabled={busy}>
-                    Skip for now
-                  </Button>
-                )}
-              </>
-            )}
 
             {step === 4 && (
               <Button

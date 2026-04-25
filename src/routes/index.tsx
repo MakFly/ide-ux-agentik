@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { useOrg, useUser } from "@/hooks/use-storage";
-import { migrateLegacyStore } from "@/lib/storage/migrate";
+import { dropLegacyClientStore } from "@/lib/storage/migrate";
 import { SetupWizard } from "@/components/setup/setup-wizard";
 
 export const Route = createFileRoute("/")({
@@ -14,7 +14,7 @@ function Index() {
   const navigate = useNavigate({ from: "/" });
 
   useEffect(() => {
-    void migrateLegacyStore();
+    dropLegacyClientStore();
   }, []);
 
   useEffect(() => {

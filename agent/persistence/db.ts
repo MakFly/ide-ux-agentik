@@ -224,9 +224,169 @@ export function openDb(): Database.Database {
 
   _db = new Database(DB_PATH);
   _db.exec(DDL);
+  // Single source-of-truth stamp: regenerated when the DB file is wiped
+  // (make db-reset). Clients compare and self-flush their localStorage caches
+  // when the stamp changes.
+  _db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('db_stamp', ?)`).run(randomUUID());
   console.log(`[persistence] db opened at ${DB_PATH}`);
   return _db;
 }
+
+export const metaRepo = {
+  getDbStamp(): string {
+    const row = openDb().prepare(`SELECT value FROM meta WHERE key = 'db_stamp'`).get() as
+      | { value: string }
+      | undefined;
+    if (!row) throw new Error("meta.db_stamp missing — schema not initialized");
+    return row.value;
+  },
+};
+
+// ─── Org / User / Workspaces (formerly client localStorage) ──────────────────
+
+export type DbOrg = {
+  id: string;
+  name: string;
+  slug: string;
+  logo_url: string | null;
+  created_at: number;
+};
+
+export type DbUser = {
+  id: string;
+  display_name: string;
+  email: string | null;
+  default_agent: string;
+};
+
+export type DbWorkspaceRow = {
+  id: string;
+  org_id: string;
+  name: string;
+  letter: string;
+  color: string;
+  git_url: string | null;
+  root_path: string | null;
+  source_kind: string;
+  source_url: string | null;
+  source_token: string | null;
+  source_label: string | null;
+  source_handle_id: string | null;
+  source_name: string | null;
+  created_at: number;
+};
+
+export const orgsRepo = {
+  /** Single-tenant for now: any insert/upsert overwrites the previous row. */
+  get(): DbOrg | null {
+    return (openDb().prepare(`SELECT * FROM orgs LIMIT 1`).get() as DbOrg | undefined) ?? null;
+  },
+  put(org: { id: string; name: string; slug: string; logoUrl?: string; createdAt: number }): DbOrg {
+    openDb()
+      .prepare(
+        `INSERT INTO orgs (id, name, slug, logo_url, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           slug = excluded.slug,
+           logo_url = excluded.logo_url`,
+      )
+      .run(org.id, org.name, org.slug, org.logoUrl ?? null, org.createdAt);
+    return this.get()!;
+  },
+};
+
+export const usersRepo = {
+  get(): DbUser | null {
+    return (openDb().prepare(`SELECT * FROM users LIMIT 1`).get() as DbUser | undefined) ?? null;
+  },
+  put(user: { id: string; displayName: string; email?: string; defaultAgent: string }): DbUser {
+    openDb()
+      .prepare(
+        `INSERT INTO users (id, display_name, email, default_agent)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           display_name = excluded.display_name,
+           email = excluded.email,
+           default_agent = excluded.default_agent`,
+      )
+      .run(user.id, user.displayName, user.email ?? null, user.defaultAgent);
+    return this.get()!;
+  },
+};
+
+type WorkspaceUpsertParams = {
+  id: string;
+  orgId: string;
+  name: string;
+  letter: string;
+  color: string;
+  gitUrl?: string;
+  rootPath?: string;
+  source: {
+    kind: string;
+    url?: string;
+    token?: string;
+    label?: string;
+    handleId?: string;
+    name?: string;
+  };
+  createdAt?: number;
+};
+
+export const workspacesRepo = {
+  list(orgId: string): DbWorkspaceRow[] {
+    return openDb()
+      .prepare(`SELECT * FROM workspaces WHERE org_id = ? ORDER BY created_at ASC`)
+      .all(orgId) as DbWorkspaceRow[];
+  },
+  put(ws: WorkspaceUpsertParams): DbWorkspaceRow {
+    const createdAt = ws.createdAt ?? Date.now();
+    openDb()
+      .prepare(
+        `INSERT INTO workspaces (
+            id, org_id, name, letter, color, git_url, root_path,
+            source_kind, source_url, source_token, source_label,
+            source_handle_id, source_name, created_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            org_id = excluded.org_id,
+            name = excluded.name,
+            letter = excluded.letter,
+            color = excluded.color,
+            git_url = excluded.git_url,
+            root_path = excluded.root_path,
+            source_kind = excluded.source_kind,
+            source_url = excluded.source_url,
+            source_token = excluded.source_token,
+            source_label = excluded.source_label,
+            source_handle_id = excluded.source_handle_id,
+            source_name = excluded.source_name`,
+      )
+      .run(
+        ws.id,
+        ws.orgId,
+        ws.name,
+        ws.letter,
+        ws.color,
+        ws.gitUrl ?? null,
+        ws.rootPath ?? null,
+        ws.source.kind,
+        ws.source.url ?? null,
+        ws.source.token ?? null,
+        ws.source.label ?? null,
+        ws.source.handleId ?? null,
+        ws.source.name ?? null,
+        createdAt,
+      );
+    return openDb().prepare(`SELECT * FROM workspaces WHERE id = ?`).get(ws.id) as DbWorkspaceRow;
+  },
+  delete(id: string): { ok: true } {
+    openDb().prepare(`DELETE FROM workspaces WHERE id = ?`).run(id);
+    return { ok: true };
+  },
+};
 
 export function closeDb(): void {
   if (_db) {

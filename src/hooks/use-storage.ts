@@ -1,23 +1,33 @@
 import { useEffect, useState } from "react";
-import { getStorage } from "../lib/storage";
+import { getStorage, StorageNotConnected, getEndpoint } from "../lib/storage";
 import type { Org, User } from "../lib/types/org";
 import type { Workspace } from "../store/ide";
+
+/** Swallow `StorageNotConnected` (no agent endpoint configured yet → wizard). */
+function isNotConnected(err: unknown): boolean {
+  return err instanceof StorageNotConnected;
+}
 
 export function useOrg() {
   const [org, setOrg] = useState<Org | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const fetch = async () => {
+    void (async () => {
       try {
-        const storage = getStorage();
-        const data = await storage.getOrg();
+        if (!getEndpoint()) {
+          setOrg(null);
+          return;
+        }
+        const data = await getStorage().getOrg();
         setOrg(data);
+      } catch (err) {
+        if (!isNotConnected(err)) console.warn("[useOrg] failed:", err);
+        setOrg(null);
       } finally {
         setLoading(false);
       }
-    };
-    fetch();
+    })();
   }, []);
 
   return { org, loading };
@@ -28,16 +38,21 @@ export function useUser() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const fetch = async () => {
+    void (async () => {
       try {
-        const storage = getStorage();
-        const data = await storage.getUser();
+        if (!getEndpoint()) {
+          setUser(null);
+          return;
+        }
+        const data = await getStorage().getUser();
         setUser(data);
+      } catch (err) {
+        if (!isNotConnected(err)) console.warn("[useUser] failed:", err);
+        setUser(null);
       } finally {
         setLoading(false);
       }
-    };
-    fetch();
+    })();
   }, []);
 
   return { user, loading };
@@ -51,9 +66,11 @@ export function useWorkspaces(orgId: string | null) {
     if (!orgId) return;
     setLoading(true);
     try {
-      const storage = getStorage();
-      const data = await storage.getWorkspaces(orgId);
+      const data = await getStorage().getWorkspaces(orgId);
       setWorkspaces(data);
+    } catch (err) {
+      if (!isNotConnected(err)) console.warn("[useWorkspaces] refresh failed:", err);
+      setWorkspaces([]);
     } finally {
       setLoading(false);
     }
@@ -65,17 +82,8 @@ export function useWorkspaces(orgId: string | null) {
       setLoading(false);
       return;
     }
-
-    const fetch = async () => {
-      try {
-        const storage = getStorage();
-        const data = await storage.getWorkspaces(orgId);
-        setWorkspaces(data);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetch();
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orgId]);
 
   return { workspaces, loading, refresh };

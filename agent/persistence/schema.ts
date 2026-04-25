@@ -3,6 +3,45 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA synchronous = NORMAL;
 
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS orgs (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  slug       TEXT NOT NULL,
+  logo_url   TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id            TEXT PRIMARY KEY,
+  display_name  TEXT NOT NULL,
+  email         TEXT,
+  default_agent TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+  id            TEXT PRIMARY KEY,
+  org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  name          TEXT NOT NULL,
+  letter        TEXT NOT NULL,
+  color         TEXT NOT NULL,
+  git_url       TEXT,
+  root_path     TEXT,
+  source_kind   TEXT NOT NULL,
+  source_url    TEXT,
+  source_token  TEXT,
+  source_label  TEXT,
+  source_handle_id TEXT,
+  source_name   TEXT,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspaces_org ON workspaces(org_id, created_at);
+
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,

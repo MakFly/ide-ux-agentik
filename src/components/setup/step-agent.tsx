@@ -20,10 +20,9 @@ type StepAgentProps = {
   value: AgentDraft;
   onChange: (agent: AgentDraft) => void;
   onNext: () => void;
-  onSkip: () => void;
 };
 
-export function StepAgent({ value, onChange, onNext, onSkip }: StepAgentProps) {
+export function StepAgent({ value, onChange, onNext }: StepAgentProps) {
   const [testBusy, setTestBusy] = useState(false);
 
   useEffect(() => {

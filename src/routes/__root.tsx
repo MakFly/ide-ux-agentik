@@ -109,9 +109,6 @@ function RootComponent() {
 
   useEffect(() => {
     hydrate();
-    // dev-bootstrap is now run from the /org/$id layout, AFTER per-org workspaces
-    // have been hydrated from storage — otherwise it racey-creates a fresh
-    // workspace every reload, orphaning persisted tasks.
     // If Codex auth is older than 23h, silently refresh it in the background.
     const s = useIDE.getState();
     if (s.codexAuth) {

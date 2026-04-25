@@ -4,8 +4,8 @@
  * work out-of-the-box in the web build.
  *
  * - Generates a fresh random token per run.
- * - Injects VITE_DEV_AGENT_URL + VITE_DEV_AGENT_TOKEN into Vite's env so the UI
- *   auto-registers a `local-dev` remote-agent workspace on first load.
+ * - Prints the URL+token in the banner so you can paste them into the Setup
+ *   Wizard or "New CLI" dialog. No auto-registration — the user always opts in.
  * - Forwards SIGINT/SIGTERM to both children, dies cleanly.
  *
  * Tauri path: unused. The Tauri shell spawns CLIs via Rust `invoke` — no agent.
@@ -73,6 +73,10 @@ const agent = spawn(
 agent.stdout.on("data", (d) => prefix(process.stdout, agentTag, d));
 agent.stderr.on("data", (d) => prefix(process.stderr, agentTag, d));
 
+// VITE_DEV_AGENT_* are exposed only as a *prefill* for the Setup Wizard
+// (Agent step) — a convenience so the user doesn't retype URL+token. They no
+// longer trigger any auto-registration; the user must always click through the
+// wizard / "New CLI" to actually create the workspace.
 const vite = spawn("vite", ["dev"], {
   stdio: ["inherit", "pipe", "pipe"],
   env: {

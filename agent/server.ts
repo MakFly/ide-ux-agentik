@@ -35,6 +35,10 @@ import {
   blobsRepo,
   tasksRepo,
   taskLogsRepo,
+  metaRepo,
+  orgsRepo,
+  usersRepo,
+  workspacesRepo,
   type DbTask,
 } from "./persistence/db.ts";
 import { importCodexRollouts } from "./persistence/import-codex.ts";
@@ -111,6 +115,34 @@ function validateExtraArgs(cli: string, args: string[]): string[] {
     }
   }
   return out;
+}
+
+function rowToWorkspace(row: import("./persistence/db.ts").DbWorkspaceRow) {
+  let source: Record<string, unknown>;
+  if (row.source_kind === "remote-agent") {
+    source = {
+      kind: "remote-agent",
+      url: row.source_url,
+      token: row.source_token,
+      label: row.source_label,
+    };
+  } else if (row.source_kind === "local-web") {
+    source = { kind: "local-web", handleId: row.source_handle_id, name: row.source_name };
+  } else if (row.source_kind === "mock") {
+    source = { kind: "mock", id: row.source_handle_id };
+  } else {
+    source = { kind: row.source_kind };
+  }
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    name: row.name,
+    letter: row.letter,
+    color: row.color,
+    gitUrl: row.git_url ?? undefined,
+    rootPath: row.root_path ?? undefined,
+    source,
+  };
 }
 
 function slugify(s: string): string {
@@ -1152,6 +1184,108 @@ const methods: Record<string, Handler> = {
   },
 
   // ─── Persistence RPC ──────────────────────────────────────────────────────
+
+  async "system.dbStamp"() {
+    return { stamp: metaRepo.getDbStamp() };
+  },
+
+  // ─── Org / User / Workspaces (single source of truth — no localStorage) ───
+
+  async "org.get"() {
+    const row = orgsRepo.get();
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      logoUrl: row.logo_url ?? undefined,
+      createdAt: row.created_at,
+    };
+  },
+
+  async "org.put"({ org }) {
+    if (!org || typeof org !== "object") throw new Error("org.put: org payload required");
+    const o = org as {
+      id: string;
+      name: string;
+      slug: string;
+      logoUrl?: string;
+      createdAt: number;
+    };
+    const row = orgsRepo.put(o);
+    return {
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      logoUrl: row.logo_url ?? undefined,
+      createdAt: row.created_at,
+    };
+  },
+
+  async "user.get"() {
+    const row = usersRepo.get();
+    if (!row) return null;
+    return {
+      id: row.id,
+      displayName: row.display_name,
+      email: row.email ?? undefined,
+      defaultAgent: row.default_agent,
+    };
+  },
+
+  async "user.put"({ user }) {
+    if (!user || typeof user !== "object") throw new Error("user.put: user payload required");
+    const u = user as {
+      id: string;
+      displayName: string;
+      email?: string;
+      defaultAgent: string;
+    };
+    const row = usersRepo.put(u);
+    return {
+      id: row.id,
+      displayName: row.display_name,
+      email: row.email ?? undefined,
+      defaultAgent: row.default_agent,
+    };
+  },
+
+  async "workspaces.list"({ orgId }) {
+    const oid = String(orgId ?? "").trim();
+    if (!oid) throw new Error("workspaces.list: orgId is required");
+    return workspacesRepo.list(oid).map((row) => rowToWorkspace(row));
+  },
+
+  async "workspaces.put"({ workspace }) {
+    if (!workspace || typeof workspace !== "object")
+      throw new Error("workspaces.put: workspace payload required");
+    const w = workspace as Record<string, unknown>;
+    const src = (w.source ?? {}) as Record<string, unknown>;
+    const row = workspacesRepo.put({
+      id: String(w.id ?? "").trim(),
+      orgId: String(w.orgId ?? "").trim(),
+      name: String(w.name ?? "").trim(),
+      letter: String(w.letter ?? "").trim(),
+      color: String(w.color ?? "").trim(),
+      gitUrl: w.gitUrl !== undefined ? String(w.gitUrl) : undefined,
+      rootPath: w.rootPath !== undefined ? String(w.rootPath) : undefined,
+      source: {
+        kind: String(src.kind ?? "").trim(),
+        url: src.url !== undefined ? String(src.url) : undefined,
+        token: src.token !== undefined ? String(src.token) : undefined,
+        label: src.label !== undefined ? String(src.label) : undefined,
+        handleId: src.handleId !== undefined ? String(src.handleId) : undefined,
+        name: src.name !== undefined ? String(src.name) : undefined,
+      },
+    });
+    return rowToWorkspace(row);
+  },
+
+  async "workspaces.delete"({ id }) {
+    const wid = String(id ?? "").trim();
+    if (!wid) throw new Error("workspaces.delete: id is required");
+    return workspacesRepo.delete(wid);
+  },
 
   async "sessions.list"({ workspaceId }) {
     const id = String(workspaceId ?? "").trim();
