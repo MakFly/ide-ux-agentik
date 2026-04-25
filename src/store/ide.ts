@@ -809,6 +809,56 @@ function resolveConversationRoot(
   return cur.id;
 }
 
+const TITLE_BY_KIND: Record<TerminalKind, string> = {
+  codex: "Codex",
+  claude: "Claude Code",
+  opencode: "OpenCode",
+  gemini: "Gemini",
+};
+
+/**
+ * Mirror a single Task into the existing WorkspaceTerminal[] list, parent-aware.
+ * - Root task (no parentSessionId) → create or update its own tab.
+ * - Child task (parentSessionId set) → update the conversation root's tab in place,
+ *   keeping the tab id stable (= root.sessionId) but pointing taskId at the latest child.
+ */
+function buildSessionTabFor(
+  task: import("@/lib/fs/remote-agent").Task,
+  allTasks: import("@/lib/fs/remote-agent").Task[],
+  existing: WorkspaceTerminal[],
+): WorkspaceTerminal[] {
+  const conversationRootTaskId = resolveConversationRoot(task, allTasks);
+  const tabStatus: WorkspaceTerminal["status"] = task.status === "running" ? "busy" : "ready";
+  const cliKind = (task.cli as TerminalKind) ?? "codex";
+  const titleFor = task.title?.slice(0, 40) || TITLE_BY_KIND[cliKind];
+
+  if (task.id === conversationRootTaskId) {
+    // ROOT task — create or update tab keyed on task.sessionId.
+    const tab: WorkspaceTerminal = {
+      id: task.sessionId,
+      kind: cliKind,
+      title: titleFor,
+      status: tabStatus,
+      workspaceId: task.workspaceId,
+      lastCommand: TITLE_BY_KIND[cliKind],
+      taskId: task.id,
+      conversationRootTaskId: task.id,
+    };
+    const idx = existing.findIndex((t) => t.id === task.sessionId);
+    return idx >= 0 ? existing.map((t, i) => (i === idx ? tab : t)) : [...existing, tab];
+  }
+
+  // CHILD task — find the existing tab for the conversation root and
+  // update its taskId to point to the latest task in the chain.
+  const rootTab = existing.find(
+    (t) => (t.conversationRootTaskId ?? t.taskId) === conversationRootTaskId,
+  );
+  if (!rootTab) return existing; // shouldn't happen, fail closed
+  return existing.map((t) =>
+    t.id === rootTab.id ? { ...t, taskId: task.id, status: tabStatus, title: titleFor } : t,
+  );
+}
+
 export const useIDE = create<State>()(
   persist<State>(
     (set, get) => ({
@@ -1910,29 +1960,14 @@ export const useIDE = create<State>()(
             const dismissed = new Set(s.dismissedTaskIds);
             const visibleTasks = tasks.filter((t) => !dismissed.has(t.id));
             // Mirror live tasks as session-tabs so the Workspace surfaces them
-            // after refresh. 1:1 invariant: WorkspaceTerminal.id === task.sessionId.
-            const titleByKind: Record<TerminalKind, string> = {
-              codex: "Codex",
-              claude: "Claude Code",
-              opencode: "OpenCode",
-              gemini: "Gemini",
-            };
-            const existingSessions = s.sessionsByWorkspaceId[workspaceId] ?? [];
-            const byId = new Map(existingSessions.map((t) => [t.id, t]));
-            for (const task of visibleTasks) {
-              const cliKind = (task.cli as TerminalKind) ?? "codex";
-              const status: WorkspaceTerminal["status"] =
-                task.status === "running" ? "busy" : "ready";
-              const tab: WorkspaceTerminal = {
-                id: task.sessionId,
-                kind: cliKind,
-                title: task.title?.slice(0, 40) || titleByKind[cliKind],
-                status,
-                workspaceId,
-                lastCommand: titleByKind[cliKind],
-                taskId: task.id,
-              };
-              byId.set(task.sessionId, tab);
+            // after refresh. Sort by createdAt ASC so root tasks are processed
+            // before their children (ensures conversation aggregation works).
+            const sorted = [...visibleTasks].sort(
+              (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
+            );
+            let nextSessions = s.sessionsByWorkspaceId[workspaceId] ?? [];
+            for (const t of sorted) {
+              nextSessions = buildSessionTabFor(t, sorted, nextSessions);
             }
             return {
               tasksByWorkspaceId: {
@@ -1941,7 +1976,7 @@ export const useIDE = create<State>()(
               },
               sessionsByWorkspaceId: {
                 ...s.sessionsByWorkspaceId,
-                [workspaceId]: Array.from(byId.values()),
+                [workspaceId]: nextSessions,
               },
             };
           });
@@ -1977,10 +2012,23 @@ export const useIDE = create<State>()(
               .then((fresh) => {
                 set((s) => {
                   const dismissed = new Set(s.dismissedTaskIds);
+                  const visibleTasks = fresh.filter((t) => !dismissed.has(t.id));
+                  // Rebuild session-tabs from fresh list (parent-aware).
+                  const sorted = [...visibleTasks].sort(
+                    (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
+                  );
+                  let nextSessions = s.sessionsByWorkspaceId[workspaceId] ?? [];
+                  for (const t of sorted) {
+                    nextSessions = buildSessionTabFor(t, sorted, nextSessions);
+                  }
                   return {
                     tasksByWorkspaceId: {
                       ...s.tasksByWorkspaceId,
-                      [workspaceId]: fresh.filter((t) => !dismissed.has(t.id)),
+                      [workspaceId]: visibleTasks,
+                    },
+                    sessionsByWorkspaceId: {
+                      ...s.sessionsByWorkspaceId,
+                      [workspaceId]: nextSessions,
                     },
                   };
                 });
@@ -2114,33 +2162,37 @@ export const useIDE = create<State>()(
           // Surface the task as an in-Workspace session tab (id = sessionId,
           // taskId = back-pointer for AgentSessionView). The transcript panel
           // renders inline; no modal dialog auto-open.
-          const titleByKind: Record<TerminalKind, string> = {
-            codex: "Codex",
-            claude: "Claude Code",
-            opencode: "OpenCode",
-            gemini: "Gemini",
-          };
           const cliKind = cli as TerminalKind;
-          const sessionTab: WorkspaceTerminal = {
-            id: sessionId,
-            kind: cliKind,
-            title: prompt.split("\n")[0].slice(0, 40) || titleByKind[cliKind],
-            status: "busy",
+          // Synthesize a Task object for buildSessionTabFor — at this point we don't have
+          // the full Task back yet, only { id, sessionId } from taskCreate.
+          const synthTask: import("@/lib/fs/remote-agent").Task = {
+            id: taskId,
+            sessionId,
             workspaceId: workspace.id,
-            lastCommand: titleByKind[cliKind],
-            taskId,
-            conversationRootTaskId: taskId,
+            title: prompt.split("\n")[0].slice(0, 40),
+            prompt,
+            cli,
+            model: model ?? null,
+            effort: effort ?? null,
+            status: "running",
+            worktreePath: null,
+            branchName: null,
+            baseRef: null,
+            exitCode: null,
+            errorMessage: null,
+            parentSessionId: null,
+            createdAt: Date.now(),
+            startedAt: Date.now(),
+            endedAt: null,
           };
           set((s) => {
-            const current = s.sessionsByWorkspaceId[workspace.id] ?? [];
-            // Avoid double-push if the task event broadcast already seeded a tab.
-            const dedup = current.some((t) => t.id === sessionId)
-              ? current.map((t) => (t.id === sessionId ? sessionTab : t))
-              : [...current, sessionTab];
+            const allTasks = s.tasksByWorkspaceId[workspace.id] ?? [];
+            const existing = s.sessionsByWorkspaceId[workspace.id] ?? [];
+            const nextSessions = buildSessionTabFor(synthTask, [...allTasks, synthTask], existing);
             return {
               sessionsByWorkspaceId: {
                 ...s.sessionsByWorkspaceId,
-                [workspace.id]: dedup,
+                [workspace.id]: nextSessions,
               },
               activeSessionIdByWorkspaceId: {
                 ...s.activeSessionIdByWorkspaceId,
@@ -2163,60 +2215,8 @@ export const useIDE = create<State>()(
           const nextTasks = idx >= 0 ? [...tasks] : [...tasks, task];
           if (idx >= 0) nextTasks[idx] = task;
 
-          // Conversation aggregation: determine if this is a root task or a child.
-          const conversationRootTaskId = resolveConversationRoot(task, nextTasks);
-
-          const titleByKind: Record<TerminalKind, string> = {
-            codex: "Codex",
-            claude: "Claude Code",
-            opencode: "OpenCode",
-            gemini: "Gemini",
-          };
-          const cliKind = (task.cli as TerminalKind) ?? "codex";
-          const tabStatus: WorkspaceTerminal["status"] =
-            task.status === "running" ? "busy" : "ready";
-
           const existingSessions = s.sessionsByWorkspaceId[task.workspaceId] ?? [];
-          let nextSessions = existingSessions;
-
-          if (!task.parentSessionId) {
-            // Root task: create or update its session-tab (1:1 invariant).
-            const sessionTab: WorkspaceTerminal = {
-              id: task.sessionId,
-              kind: cliKind,
-              title: task.title?.slice(0, 40) || titleByKind[cliKind],
-              status: tabStatus,
-              workspaceId: task.workspaceId,
-              lastCommand: titleByKind[cliKind],
-              taskId: task.id,
-              conversationRootTaskId: task.id,
-            };
-            const tabIdx = nextSessions.findIndex((t) => t.id === task.sessionId);
-            nextSessions =
-              tabIdx >= 0
-                ? nextSessions.map((t) => (t.id === task.sessionId ? sessionTab : t))
-                : [...nextSessions, sessionTab];
-          } else {
-            // Child task: update the conversation's existing tab (don't create a new one).
-            // Find the session-tab whose conversationRootTaskId matches the conversation root.
-            const rootSessionTab = nextSessions.find(
-              (t) => (t.conversationRootTaskId ?? t.taskId) === conversationRootTaskId,
-            );
-            if (rootSessionTab) {
-              // Update the existing tab to point to this new child task.
-              nextSessions = nextSessions.map((t) =>
-                t.id === rootSessionTab.id
-                  ? {
-                      ...t,
-                      taskId: task.id, // latest task in the conversation
-                      status: tabStatus,
-                      title: task.title?.slice(0, 40) || t.title,
-                    }
-                  : t,
-              );
-            }
-            // If no conversation tab found (shouldn't happen), silently skip creating a tab.
-          }
+          const nextSessions = buildSessionTabFor(task, nextTasks, existingSessions);
 
           return {
             tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [task.workspaceId]: nextTasks },

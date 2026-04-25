@@ -1,6 +1,6 @@
 import { MessageSquare, Terminal as TerminalIcon } from "lucide-react";
 import { PtyTerminal } from "@/components/ide/pty-terminal";
-import { TaskThread } from "@/components/ide/task-thread";
+import { TaskConversation } from "@/components/ide/task-conversation";
 import { codexExtraArgs } from "@/lib/chat/models";
 import { cn } from "@/lib/utils";
 import { useIDE, type TerminalKind, type WorkspaceTerminal } from "@/store/ide";
@@ -62,7 +62,7 @@ export function AgentSessionView({
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <div className={cn("h-full w-full", mode !== "chat" && "hidden")}>
           {task && workspace ? (
-            <TaskThread key={session.id} task={task} workspace={workspace} />
+            <TaskConversation key={session.id} task={task} workspace={workspace} />
           ) : (
             <div className="flex h-full items-center justify-center text-[12px] text-muted-foreground">
               Task not found — session may have been removed.
