@@ -2122,6 +2122,26 @@ export const useIDE = create<State>()(
 
       setActiveTask: (id) => {
         set({ activeTaskId: id });
+        if (!id) return;
+        const state = get();
+        // Locate the workspace that owns this task to also activate its session tab.
+        for (const [wsId, tasks] of Object.entries(state.tasksByWorkspaceId)) {
+          const t = tasks.find((task) => task.id === id);
+          if (t) {
+            const sessionId = t.sessionId ?? `${id}-session`;
+            set((s) => ({
+              activeSessionIdByWorkspaceId: {
+                ...s.activeSessionIdByWorkspaceId,
+                [wsId]: sessionId,
+              },
+            }));
+            break;
+          }
+        }
+        if (!state.taskEventsByTaskId[id]) {
+          void state.loadTaskLogs(id);
+        }
+        void state.openTaskSession(id);
       },
 
       setTaskDetailDialogOpen: (taskId) => {
@@ -2206,6 +2226,10 @@ export const useIDE = create<State>()(
             const existing = s.sessionsByWorkspaceId[workspace.id] ?? [];
             const nextSessions = buildSessionTabFor(synthTask, [...allTasks, synthTask], existing);
             return {
+              tasksByWorkspaceId: {
+                ...s.tasksByWorkspaceId,
+                [workspace.id]: [...allTasks, synthTask],
+              },
               sessionsByWorkspaceId: {
                 ...s.sessionsByWorkspaceId,
                 [workspace.id]: nextSessions,
@@ -2215,6 +2239,7 @@ export const useIDE = create<State>()(
                 [workspace.id]: sessionId,
               },
               activeAgent: cliKind,
+              activeTaskId: taskId,
             };
           });
           toast.success("Task created and started");
@@ -2731,6 +2756,54 @@ export const EMPTY_GIT_STATUS: GitStatusMap = new Map();
 export function useCurrentGitStatus(): GitStatusMap {
   const key = useCurrentScopeKey();
   return useIDE((s) => s.gitStatusByScope[key] ?? EMPTY_GIT_STATUS);
+}
+
+// ─── Task-centric selectors (Wave 1) ─────────────────────────────────────────
+// `activeTaskId` is the primary navigation pointer. Thread renders the task
+// it points to; sidebar highlights it; URL ?task=<id> mirrors it.
+
+import type { Task as RemoteTask, TaskLogEntry } from "@/lib/fs/remote-agent";
+
+const EMPTY_TASK_EVENTS: TaskLogEntry[] = [];
+
+export function useActiveTaskId(): string | null {
+  return useIDE((s) => s.activeTaskId);
+}
+
+export function useActiveTask(): RemoteTask | null {
+  return useIDE((s) => {
+    if (!s.activeTaskId) return null;
+    for (const tasks of Object.values(s.tasksByWorkspaceId)) {
+      const found = tasks.find((t) => t.id === s.activeTaskId);
+      if (found) return found;
+    }
+    return null;
+  });
+}
+
+export function useActiveTaskEvents(): TaskLogEntry[] {
+  return useIDE((s) =>
+    s.activeTaskId
+      ? (s.taskEventsByTaskId[s.activeTaskId] ?? EMPTY_TASK_EVENTS)
+      : EMPTY_TASK_EVENTS,
+  );
+}
+
+export function useActiveTaskWorkspace(): Workspace | null {
+  return useIDE((s) => {
+    if (!s.activeTaskId) return null;
+    for (const [wsId, tasks] of Object.entries(s.tasksByWorkspaceId)) {
+      if (tasks.some((t) => t.id === s.activeTaskId)) {
+        return s.workspaces.find((w) => w.id === wsId) ?? null;
+      }
+    }
+    return null;
+  });
+}
+
+/** Alias for setActiveTask — Multica-style vocabulary. Lazy-loads logs + session. */
+export function useSelectTask(): (taskId: string | null) => void {
+  return useIDE((s) => s.setActiveTask);
 }
 
 function generateAssistantReply(prompt: string): string {

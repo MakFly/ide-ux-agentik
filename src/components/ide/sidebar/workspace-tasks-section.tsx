@@ -52,8 +52,10 @@ function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; n
   const [detailOpen, setDetailOpen] = useState(false);
   const setActiveSession = useIDE((s) => s.setActiveSession);
   const setActiveAgent = useIDE((s) => s.setActiveAgent);
+  const setActiveTask = useIDE((s) => s.setActiveTask);
   const openTaskSession = useIDE((s) => s.openTaskSession);
   const activateInWorkspace = async () => {
+    setActiveTask(task.id);
     // Lazily create session in DB if not yet persisted
     await openTaskSession(task.id);
 
