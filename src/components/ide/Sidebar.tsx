@@ -16,6 +16,7 @@ import {
 import { AddWorkspaceDialog } from "@/components/ide/add-workspace-dialog";
 import { PromptDialog } from "@/components/ide/prompt-dialog";
 import { TasksSection } from "@/components/ide/sidebar/tasks-section";
+import { WorkspaceTasksSection } from "@/components/ide/sidebar/workspace-tasks-section";
 import { SessionsSection } from "@/components/ide/sidebar/sessions-section";
 import { WorktreesSection } from "@/components/ide/sidebar/worktrees-section";
 import { BranchesSkeleton } from "@/components/ide/skeletons/sidebar-skeletons";
@@ -132,61 +133,67 @@ export function Sidebar() {
 
       <div className="flex-1 overflow-y-auto">
         <Accordion type="multiple" defaultValue={defaultOpen} className="flex flex-col gap-0">
-          {/* Branches of active project */}
-          <AccordionItem value="branches" className="border-b-0">
-            <div className="flex items-center pr-2">
-              <AccordionTrigger className="flex-1 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground hover:no-underline hover:text-foreground">
-                <span className="flex items-center gap-2">
-                  Branches
-                  {activeWorkspace && (
-                    <span className="font-mono text-[10px] normal-case tracking-normal text-muted-foreground/70">
-                      · {activeWorkspace.name} project
+          {activeWorkspace?.source.kind === "remote-agent" ? (
+            <WorkspaceTasksSection />
+          ) : (
+            <>
+              {/* Branches of active project */}
+              <AccordionItem value="branches" className="border-b-0">
+                <div className="flex items-center pr-2">
+                  <AccordionTrigger className="flex-1 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground hover:no-underline hover:text-foreground">
+                    <span className="flex items-center gap-2">
+                      Branches
+                      {activeWorkspace && (
+                        <span className="font-mono text-[10px] normal-case tracking-normal text-muted-foreground/70">
+                          · {activeWorkspace.name} project
+                        </span>
+                      )}
+                      <span className="rounded bg-accent/60 px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-foreground">
+                        {currentBranches.length}
+                      </span>
                     </span>
-                  )}
-                  <span className="rounded bg-accent/60 px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-foreground">
-                    {currentBranches.length}
-                  </span>
-                </span>
-              </AccordionTrigger>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setBranchDialogOpen(true);
-                }}
-                className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-                title="New branch"
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
-            </div>
-            <AccordionContent className="pb-1 pt-0">
-              <div className={SIDEBAR_SECTION_SCROLL_AREA_CLASS}>
-                {branchesLoading && currentBranches.length === 0 ? (
-                  <BranchesSkeleton />
-                ) : (
-                  <>
-                    {currentBranches.map((b) => (
-                      <BranchRow key={b.id} branch={b} active={b.id === activeBranchId} />
-                    ))}
-                    {!branchesLoading && currentBranches.length === 0 && (
-                      <div className="mx-3 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
-                        No branches.
-                      </div>
+                  </AccordionTrigger>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setBranchDialogOpen(true);
+                    }}
+                    className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                    title="New branch"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <AccordionContent className="pb-1 pt-0">
+                  <div className={SIDEBAR_SECTION_SCROLL_AREA_CLASS}>
+                    {branchesLoading && currentBranches.length === 0 ? (
+                      <BranchesSkeleton />
+                    ) : (
+                      <>
+                        {currentBranches.map((b) => (
+                          <BranchRow key={b.id} branch={b} active={b.id === activeBranchId} />
+                        ))}
+                        {!branchesLoading && currentBranches.length === 0 && (
+                          <div className="mx-3 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
+                            No branches.
+                          </div>
+                        )}
+                      </>
                     )}
-                  </>
-                )}
-              </div>
-            </AccordionContent>
-          </AccordionItem>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
 
-          {/* Agent sessions of active project */}
-          <SessionsSection />
+              {/* Agent sessions of active project */}
+              <SessionsSection />
 
-          {/* Worktrees of active project */}
-          <WorktreesSection />
+              {/* Worktrees of active project */}
+              <WorktreesSection />
 
-          {/* Tasks of active branch */}
-          <TasksSection branchName={activeBranch?.name} />
+              {/* Tasks of active branch */}
+              <TasksSection branchName={activeBranch?.name} />
+            </>
+          )}
         </Accordion>
       </div>
 

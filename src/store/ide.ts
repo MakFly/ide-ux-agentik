@@ -185,6 +185,10 @@ type State = {
   // Tasks keyed by worktree (was: branchId). DO NOT touch ScopeKey-keyed fields below.
   tasksByWorktreeId: Record<string, WorkTask[]>;
 
+  // Tasks keyed by workspaceId — for remote-agent tasks UI.
+  tasksByWorkspaceId: Record<string, import("@/lib/fs/remote-agent").Task[]>;
+  activeTaskId: string | null;
+
   // Messages keyed by sessionId (was: messagesByScope keyed by ScopeKey).
   messagesBySessionId: Record<string, ChatMessage[]>;
 
@@ -335,6 +339,11 @@ type State = {
   hydrateSessionsFromDb: () => Promise<void>;
   setCurrentOrgId: (id: string) => void;
   hydrateWorkspacesFromStorage: (orgId: string) => Promise<void>;
+
+  hydrateTasks: (workspaceId: string) => Promise<void>;
+  setActiveTask: (id: string | null) => void;
+  upsertTask: (task: import("@/lib/fs/remote-agent").Task) => void;
+  removeTaskById: (taskId: string) => void;
 };
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -767,6 +776,8 @@ export const useIDE = create<State>()(
       expandedFoldersByScope: INITIAL_SCOPE ? { [INITIAL_SCOPE]: { crates: true } } : {},
       activeWorktreeIdByScope: INITIAL_SCOPE ? { [INITIAL_SCOPE]: "wt-sc-main" } : {},
       tasksByWorktreeId: buildInitialTasksByWorktreeId(),
+      tasksByWorkspaceId: {},
+      activeTaskId: null,
       worktreesByWorkspaceId: initialWorktrees,
       sessionsByWorkspaceId: {},
       activeSessionIdByWorkspaceId: {},
@@ -1823,6 +1834,81 @@ export const useIDE = create<State>()(
         } catch (e) {
           console.warn("Failed to hydrate workspaces from storage:", e);
         }
+      },
+
+      hydrateTasks: async (workspaceId) => {
+        const state = get();
+        const workspace = state.workspaces.find((w) => w.id === workspaceId);
+        if (!workspace || workspace.source.kind !== "remote-agent") return;
+
+        try {
+          const provider = new RemoteAgentProvider(
+            workspace.source.label,
+            workspace.source.url,
+            workspace.source.token,
+          );
+          await provider.connect();
+          const tasks = await provider.taskList({ workspaceId });
+
+          set((s) => ({
+            tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [workspaceId]: tasks },
+          }));
+
+          provider.onTaskCreated((task) => {
+            get().upsertTask(task);
+          });
+
+          provider.onTaskEvent((e) => {
+            console.debug("[store] task.event:", e);
+          });
+
+          provider.onTaskEnded((e) => {
+            set((s) => ({
+              tasksByWorkspaceId: {
+                ...s.tasksByWorkspaceId,
+                [workspaceId]: (s.tasksByWorkspaceId[workspaceId] ?? []).map((t) =>
+                  t.id === e.taskId
+                    ? { ...t, status: e.status, exitCode: e.exitCode, errorMessage: e.errorMessage }
+                    : t,
+                ),
+              },
+            }));
+          });
+        } catch (err) {
+          console.warn(`[store] hydrateTasks failed for workspace ${workspaceId}:`, err);
+        }
+      },
+
+      setActiveTask: (id) => {
+        set({ activeTaskId: id });
+      },
+
+      upsertTask: (task) => {
+        set((s) => {
+          const tasks = s.tasksByWorkspaceId[task.workspaceId] ?? [];
+          const idx = tasks.findIndex((t) => t.id === task.id);
+          if (idx >= 0) {
+            const next = [...tasks];
+            next[idx] = task;
+            return { tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [task.workspaceId]: next } };
+          }
+          return {
+            tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [task.workspaceId]: [...tasks, task] },
+          };
+        });
+      },
+
+      removeTaskById: (taskId) => {
+        set((s) => {
+          const next: typeof s.tasksByWorkspaceId = {};
+          for (const [wsId, tasks] of Object.entries(s.tasksByWorkspaceId)) {
+            next[wsId] = tasks.filter((t) => t.id !== taskId);
+          }
+          return {
+            tasksByWorkspaceId: next,
+            activeTaskId: s.activeTaskId === taskId ? null : s.activeTaskId,
+          };
+        });
       },
 
       createFolder: (name) => {
