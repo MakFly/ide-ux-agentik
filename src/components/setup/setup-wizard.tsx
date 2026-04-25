@@ -200,6 +200,7 @@ export function SetupWizard() {
               onChange={setWorkspaceDraft}
               onFinish={handleWorkspaceFinish}
               busy={busy}
+              connectedAgent={agentDraft}
             />
           )}
 
