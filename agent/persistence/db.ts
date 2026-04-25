@@ -120,8 +120,10 @@ function migrateIfNeeded(db: Database.Database): void {
     console.log(`[persistence] migration: added tasks.effort`);
   }
 
-  // Migration: enforce tasks.session_id NOT NULL UNIQUE ON DELETE CASCADE
-  // Detect old schema by checking if session_id is nullable or lacks UNIQUE
+  // Migration: relax tasks.session_id to nullable (lazy session creation).
+  // After the task-centric refactor, sessions are created on first open, not
+  // atomically with the task. Detect the legacy strict schema and recreate
+  // the tasks table with a nullable session_id.
   const taskTable = db.prepare(`PRAGMA table_info(tasks)`).all() as {
     cid: number;
     name: string;
@@ -132,13 +134,9 @@ function migrateIfNeeded(db: Database.Database): void {
   }[];
   const sessionIdCol = taskTable.find((col) => col.name === "session_id");
 
-  if (sessionIdCol && (sessionIdCol.notnull === 0 || !sessionIdCol.pk)) {
-    // Need to recreate tasks table with new constraint
-    console.info("[persistence] migration: enforcing tasks.session_id NOT NULL UNIQUE ...");
+  if (sessionIdCol && sessionIdCol.notnull === 1) {
+    console.info("[persistence] migration: relaxing tasks.session_id to nullable ...");
 
-    // FKs must be OFF outside the transaction (SQLite forbids toggling inside a tx).
-    // Old rows may have session_id pointing to deleted sessions (legacy bug pre-Wave 1).
-    // We filter them out below; FKs OFF lets the recreate proceed without trip-wire.
     db.pragma("foreign_keys = OFF");
 
     const run = db.transaction(() => {
@@ -158,18 +156,16 @@ function migrateIfNeeded(db: Database.Database): void {
           base_ref TEXT,
           exit_code INTEGER,
           error_message TEXT,
-          session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+          session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
           created_at INTEGER NOT NULL,
           started_at INTEGER,
           ended_at INTEGER
         )
       `);
 
-      // Copy only rows whose session_id resolves to an existing session row.
-      // Drops both NULL session_ids and dangling pointers.
-      // Explicit column list — old `tasks` may have model/effort at the end (added via
-      // earlier ALTER) while tasks_new has them between cli and status. `SELECT *`
-      // would silently misalign positional values → FK + UNIQUE violations.
+      // Explicit column list — old `tasks` may have model/effort at the end
+      // (added via earlier ALTER) while tasks_new places them between cli and
+      // status. SELECT * would silently misalign columns.
       db.exec(`
         INSERT INTO tasks_new (
           id, workspace_id, parent_session_id, title, prompt, cli, model, effort,
@@ -177,25 +173,15 @@ function migrateIfNeeded(db: Database.Database): void {
           session_id, created_at, started_at, ended_at
         )
         SELECT
-          t.id, t.workspace_id, t.parent_session_id, t.title, t.prompt, t.cli,
-          t.model, t.effort, t.status, t.worktree_path, t.branch_name, t.base_ref,
-          t.exit_code, t.error_message, t.session_id, t.created_at, t.started_at,
-          t.ended_at
-        FROM tasks t
-        INNER JOIN sessions s ON s.id = t.session_id
+          id, workspace_id, parent_session_id, title, prompt, cli,
+          model, effort, status, worktree_path, branch_name, base_ref,
+          exit_code, error_message, session_id, created_at, started_at, ended_at
+        FROM tasks
       `);
-
-      const totalOld = (db.prepare(`SELECT COUNT(*) as cnt FROM tasks`).get() as { cnt: number })
-        .cnt;
-      const kept = (db.prepare(`SELECT COUNT(*) as cnt FROM tasks_new`).get() as { cnt: number })
-        .cnt;
-      const dropped = totalOld - kept;
 
       db.exec(`DROP TABLE tasks`);
       db.exec(`ALTER TABLE tasks_new RENAME TO tasks`);
 
-      // Sweep task_logs that referenced the dropped tasks (FKs were OFF, so the
-      // ON DELETE CASCADE on task_logs.task_id never fired).
       const logsDeleted = db
         .prepare(`DELETE FROM task_logs WHERE task_id NOT IN (SELECT id FROM tasks)`)
         .run().changes;
@@ -207,17 +193,10 @@ function migrateIfNeeded(db: Database.Database): void {
         CREATE INDEX IF NOT EXISTS idx_tasks_workspace_status
           ON tasks(workspace_id, status, created_at DESC)
       `);
-
-      if (dropped > 0) {
-        console.info(
-          `[persistence] migration: dropped ${dropped} orphaned task rows (NULL or dangling session_id)`,
-        );
-      }
     });
 
     try {
       run();
-      // Verify integrity before re-enabling FKs.
       const violations = db.pragma("foreign_key_check") as unknown[];
       if (violations.length > 0) {
         throw new Error(
@@ -227,7 +206,7 @@ function migrateIfNeeded(db: Database.Database): void {
     } finally {
       db.pragma("foreign_keys = ON");
     }
-    console.info("[persistence] migration completed: tasks.session_id is now NOT NULL UNIQUE");
+    console.info("[persistence] migration completed: tasks.session_id is now nullable");
   }
 }
 
