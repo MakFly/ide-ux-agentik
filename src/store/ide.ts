@@ -231,6 +231,9 @@ type State = {
   /** Incremented by tickClearSession() to force ChatView remount with empty history. */
   sessionClearTickByWorkspace: Record<string, number>;
 
+  // Runtime-only (not persisted): Keep providers alive for task event listeners.
+  agentProvidersByWorkspaceId: Record<string, RemoteAgentProvider>;
+
   // Global prefs
   theme: Theme;
   showFiles: boolean;
@@ -889,6 +892,7 @@ export const useIDE = create<State>()(
       activeSessionIdByWorkspaceId: {},
       pinnedSessionIdsByWorkspaceId: {},
       sessionClearTickByWorkspace: {},
+      agentProvidersByWorkspaceId: {},
 
       theme: readStoredTheme(),
       showFiles: true,
@@ -1954,6 +1958,15 @@ export const useIDE = create<State>()(
             workspace.source.token,
           );
           await provider.connect();
+
+          // Persist the provider to keep event listeners alive
+          set((s) => ({
+            agentProvidersByWorkspaceId: {
+              ...s.agentProvidersByWorkspaceId,
+              [workspaceId]: provider,
+            },
+          }));
+
           const tasks = await provider.taskList({ workspaceId });
 
           set((s) => {
