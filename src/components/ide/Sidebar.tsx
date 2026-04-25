@@ -1,5 +1,7 @@
-import { FolderPlus, HelpCircle, Plus, Settings, Star, GitBranch } from "lucide-react";
-import { useState } from "react";
+import { Building2, FolderPlus, HelpCircle, Plus, Settings, Star, GitBranch } from "lucide-react";
+import { useContext, useState } from "react";
+import { OrgContext } from "@/routes/org/$id";
+
 import { toast } from "sonner";
 import { Link, useNavigate } from "@tanstack/react-router";
 
@@ -17,6 +19,21 @@ import { TasksSection } from "@/components/ide/sidebar/tasks-section";
 import { SessionsSection } from "@/components/ide/sidebar/sessions-section";
 import { WorktreesSection } from "@/components/ide/sidebar/worktrees-section";
 import { BranchesSkeleton } from "@/components/ide/skeletons/sidebar-skeletons";
+
+function OrgSettingsLink() {
+  const org = useContext(OrgContext);
+  if (!org) return null;
+  return (
+    <Link
+      to="/org/$id/settings"
+      params={{ id: org.id }}
+      className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+      title={`${org.name} settings`}
+    >
+      <Building2 className="h-4 w-4" />
+    </Link>
+  );
+}
 
 const SIDEBAR_SECTION_SCROLL_AREA_CLASS =
   "scrollbar-visible max-h-[min(20rem,40vh)] overflow-y-auto pb-1 pr-1";
@@ -183,6 +200,8 @@ export function Sidebar() {
         >
           <Settings className="h-4 w-4" />
         </Link>
+        <OrgSettingsLink />
+
         <button
           onClick={() => setWorkspaceDialogOpen(true)}
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
