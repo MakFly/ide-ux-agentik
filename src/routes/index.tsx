@@ -13,6 +13,7 @@ import { StatusBar } from "@/components/ide/StatusBar";
 import { TerminalPanel } from "@/components/ide/terminal-panel";
 import { EditorPanel } from "@/components/ide/editor-panel";
 import { useIDE, useCurrentActiveTab, useCurrentOpenFiles } from "@/store/ide";
+import { MOCK_ENABLED } from "@/lib/env";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useNavigate } from "@tanstack/react-router";
@@ -182,8 +183,11 @@ function Index() {
     navigate({
       search: (prev) => ({
         ...prev,
-        workspace: activeWorkspaceId === "ws-sc" ? undefined : activeWorkspaceId,
-        branch: activeBranchId === "b1" ? undefined : activeBranchId,
+        workspace:
+          MOCK_ENABLED && activeWorkspaceId === "ws-sc"
+            ? undefined
+            : activeWorkspaceId || undefined,
+        branch: MOCK_ENABLED && activeBranchId === "b1" ? undefined : activeBranchId || undefined,
         tab: activeTab === "overview" ? undefined : activeTab,
       }),
       replace: true,

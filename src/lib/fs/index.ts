@@ -2,6 +2,7 @@ import type { FsProvider, WorkspaceSource } from "./types";
 import { MockProvider } from "./mock";
 import { LocalWebProvider, loadHandle } from "./local-web";
 import { RemoteAgentProvider } from "./remote-agent";
+import { MOCK_ENABLED } from "@/lib/env";
 
 export * from "./types";
 export { pickDirectory } from "./local-web";
@@ -31,6 +32,11 @@ export async function providerFor(
   let provider: FsProvider;
   switch (src.kind) {
     case "mock":
+      if (!MOCK_ENABLED) {
+        console.warn(
+          `[providerFor] mock workspace "${label}" requested but VITE_ENABLE_MOCK is off`,
+        );
+      }
       provider = new MockProvider(label, mockTree);
       break;
     case "local-web": {

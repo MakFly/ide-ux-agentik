@@ -561,7 +561,7 @@ function isMockWorkspace(workspaces: Workspace[], workspaceId: string): boolean 
   return ws?.source.kind === "mock";
 }
 
-const INITIAL_SCOPE = scopeKey("ws-sc", "b1");
+const INITIAL_SCOPE = MOCK_ENABLED ? scopeKey("ws-sc", "b1") : scopeKey("", "");
 
 let gitDebounceHandle: ReturnType<typeof setTimeout> | null = null;
 function scheduleGitRefresh(
@@ -739,17 +739,19 @@ export const useIDE = create<State>()(
   persist<State>(
     (set, get) => ({
       workspaces: initialWorkspaces,
-      activeWorkspaceId: "ws-sc",
-      activeBranchId: "b1",
+      activeWorkspaceId: MOCK_ENABLED ? "ws-sc" : "",
+      activeBranchId: MOCK_ENABLED ? "b1" : "",
 
-      branchesByWorkspaceId: initialBranchesByWorkspaceId,
-      activeBranchIdByWorkspaceId: { "ws-sc": "b1", "ws-landing": "l1" },
+      branchesByWorkspaceId: MOCK_ENABLED ? initialBranchesByWorkspaceId : {},
+      activeBranchIdByWorkspaceId: (MOCK_ENABLED
+        ? { "ws-sc": "b1", "ws-landing": "l1" }
+        : {}) as Record<string, string>,
 
       messagesBySessionId: {},
       openFilesByScope: {},
-      activeTabByScope: { [INITIAL_SCOPE]: "overview" },
-      expandedFoldersByScope: { [INITIAL_SCOPE]: { crates: true } },
-      activeWorktreeIdByScope: { [INITIAL_SCOPE]: "wt-sc-main" },
+      activeTabByScope: INITIAL_SCOPE ? { [INITIAL_SCOPE]: "overview" } : {},
+      expandedFoldersByScope: INITIAL_SCOPE ? { [INITIAL_SCOPE]: { crates: true } } : {},
+      activeWorktreeIdByScope: INITIAL_SCOPE ? { [INITIAL_SCOPE]: "wt-sc-main" } : {},
       tasksByWorktreeId: buildInitialTasksByWorktreeId(),
       worktreesByWorkspaceId: initialWorktrees,
       sessionsByWorkspaceId: {},
@@ -840,13 +842,11 @@ export const useIDE = create<State>()(
       },
 
       // Legacy flat fields — kept for retrocompat with FilesPanel (consumers exist, do not remove).
-      fileTree: MOCK_FILE_TREE,
-      rootFiles: MOCK_ROOT_FILES,
+      fileTree: MOCK_ENABLED ? MOCK_FILE_TREE : {},
+      rootFiles: MOCK_ENABLED ? MOCK_ROOT_FILES : [],
 
       // Scoped tree structure — Vague 2 le peuplera via loadRoot
-      treeByScope: {
-        [INITIAL_SCOPE]: makeScopeRootNode(INITIAL_SCOPE),
-      },
+      treeByScope: INITIAL_SCOPE ? { [INITIAL_SCOPE]: makeScopeRootNode(INITIAL_SCOPE) } : {},
       loadingPaths: {},
 
       gitStatusByScope: {},
