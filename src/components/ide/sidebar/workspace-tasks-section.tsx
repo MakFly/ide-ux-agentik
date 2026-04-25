@@ -78,7 +78,7 @@ function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; n
         cur = parent;
       }
       // Now cur is the root task; find its session-tab
-      const rootTab = allSessions.find((s) => s.taskId === cur.id);
+      const rootTab = allSessions.find((s) => s.taskRootId === cur.id || s.taskId === cur.id);
       if (rootTab) targetSessionId = rootTab.id;
     }
     setActiveSession(targetSessionId);

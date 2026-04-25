@@ -145,4 +145,17 @@ CREATE TABLE IF NOT EXISTS task_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id, ts);
+
+CREATE TABLE IF NOT EXISTS task_sessions (
+  task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  role       TEXT NOT NULL DEFAULT 'peer',
+  created_at INTEGER NOT NULL,
+  closed_at  INTEGER,
+  UNIQUE(task_id, session_id),
+  PRIMARY KEY (task_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_sessions_task ON task_sessions(task_id, role, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_sessions_session ON task_sessions(session_id);
 `;

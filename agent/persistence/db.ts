@@ -87,6 +87,14 @@ export type DbTaskLog = {
   data_json: string;
 };
 
+export type DbTaskSession = {
+  task_id: string;
+  session_id: string;
+  role: "primary" | "peer";
+  created_at: number;
+  closed_at: number | null;
+};
+
 export const DB_DIR = path.join(os.homedir(), ".ide-ux-agentik");
 const DB_PATH = path.join(DB_DIR, "data.sqlite");
 const BLOBS_DIR = path.join(DB_DIR, "blobs");
@@ -207,6 +215,71 @@ function migrateIfNeeded(db: Database.Database): void {
       db.pragma("foreign_keys = ON");
     }
     console.info("[persistence] migration completed: tasks.session_id is now nullable");
+  }
+
+  // Migration: create task_sessions table if missing and backfill from tasks.session_id.
+  const taskSessionsExists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='task_sessions'`)
+    .get();
+  if (!taskSessionsExists) {
+    console.info("[persistence] migration: creating task_sessions table ...");
+
+    db.pragma("foreign_keys = OFF");
+
+    const run = db.transaction(() => {
+      db.exec(`
+        CREATE TABLE task_sessions (
+          task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          role       TEXT NOT NULL DEFAULT 'peer',
+          created_at INTEGER NOT NULL,
+          closed_at  INTEGER,
+          UNIQUE(task_id, session_id),
+          PRIMARY KEY (task_id, session_id)
+        )
+      `);
+
+      db.exec(`
+        CREATE INDEX idx_task_sessions_task ON task_sessions(task_id, role, created_at)
+      `);
+
+      db.exec(`
+        CREATE INDEX idx_task_sessions_session ON task_sessions(session_id)
+      `);
+
+      // Backfill: for each task with session_id NOT NULL, insert into task_sessions as primary.
+      const tasksWithSession = db
+        .prepare(`SELECT id, session_id, created_at FROM tasks WHERE session_id IS NOT NULL`)
+        .all() as { id: string; session_id: string; created_at: number }[];
+
+      for (const row of tasksWithSession) {
+        db.prepare(
+          `
+          INSERT OR IGNORE INTO task_sessions (task_id, session_id, role, created_at)
+          VALUES (?, ?, 'primary', ?)
+        `,
+        ).run(row.id, row.session_id, row.created_at);
+      }
+
+      if (tasksWithSession.length > 0) {
+        console.info(
+          `[persistence] migration: backfilled ${tasksWithSession.length} task_sessions rows`,
+        );
+      }
+    });
+
+    try {
+      run();
+      const violations = db.pragma("foreign_key_check") as unknown[];
+      if (violations.length > 0) {
+        throw new Error(
+          `[persistence] migration left FK violations: ${JSON.stringify(violations)}`,
+        );
+      }
+    } finally {
+      db.pragma("foreign_keys = ON");
+    }
+    console.info("[persistence] migration completed: task_sessions table created");
   }
 }
 
@@ -947,5 +1020,53 @@ export const taskLogsRepo = {
         DbTaskLog
       >(`SELECT * FROM task_logs WHERE task_id = ? ORDER BY ts LIMIT ?`)
       .all(taskId, limit);
+  },
+};
+
+// ─── Task Sessions ────────────────────────────────────────────────────────────
+
+export const taskSessionsRepo = {
+  list(taskId: string): DbTaskSession[] {
+    const db = openDb();
+    return db
+      .prepare<
+        [string],
+        DbTaskSession
+      >(`SELECT * FROM task_sessions WHERE task_id = ? ORDER BY created_at ASC`)
+      .all(taskId);
+  },
+
+  attach(taskId: string, sessionId: string, role: "primary" | "peer"): DbTaskSession {
+    const db = openDb();
+    const now = Date.now();
+    db.prepare<[string, string, string, number]>(
+      `INSERT INTO task_sessions (task_id, session_id, role, created_at)
+       VALUES (?, ?, ?, ?)`,
+    ).run(taskId, sessionId, role, now);
+    return db
+      .prepare<
+        [string, string],
+        DbTaskSession
+      >(`SELECT * FROM task_sessions WHERE task_id = ? AND session_id = ?`)
+      .get(taskId, sessionId)!;
+  },
+
+  detach(sessionId: string): void {
+    const db = openDb();
+    db.prepare<[number, string]>(
+      `UPDATE task_sessions SET closed_at = ? WHERE session_id = ? AND closed_at IS NULL`,
+    ).run(Date.now(), sessionId);
+  },
+
+  primaryFor(taskId: string): DbTaskSession | null {
+    const db = openDb();
+    return (
+      db
+        .prepare<
+          [string, string],
+          DbTaskSession
+        >(`SELECT * FROM task_sessions WHERE task_id = ? AND role = 'primary' LIMIT 1`)
+        .get(taskId) ?? null
+    );
   },
 };

@@ -158,6 +158,9 @@ export class RemoteAgentProvider implements FsProvider {
       errorMessage: string | null;
     }) => void
   >();
+  private taskSessionAttachedListeners = new Set<
+    (e: { taskId: string; sessionId: string; role: "peer"; cli: string }) => void
+  >();
   private taskWorktreeRemovedListeners = new Set<(e: { taskId: string }) => void>();
   private connecting: Promise<void> | null = null;
   private reconnectAttempts = 0;
@@ -199,6 +202,7 @@ export class RemoteAgentProvider implements FsProvider {
           this.taskStartedListeners.clear();
           this.taskEventListeners.clear();
           this.taskEndedListeners.clear();
+          this.taskSessionAttachedListeners.clear();
           this.taskWorktreeRemovedListeners.clear();
           return;
         }
@@ -264,6 +268,7 @@ export class RemoteAgentProvider implements FsProvider {
       this.taskStartedListeners.clear();
       this.taskEventListeners.clear();
       this.taskEndedListeners.clear();
+      this.taskSessionAttachedListeners.clear();
       this.taskWorktreeRemovedListeners.clear();
       this.reconnectAttempts = 0;
       return;
@@ -395,6 +400,22 @@ export class RemoteAgentProvider implements FsProvider {
       for (const cb of this.taskEndedListeners) {
         try {
           cb({ taskId, status, exitCode, errorMessage });
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
+    if ("method" in msg && msg.method === "task.sessionAttached") {
+      const { taskId, sessionId, role, cli } = msg.params as {
+        taskId: string;
+        sessionId: string;
+        role: "peer";
+        cli: string;
+      };
+      for (const cb of this.taskSessionAttachedListeners) {
+        try {
+          cb({ taskId, sessionId, role, cli });
         } catch {
           /* ignore */
         }
@@ -625,6 +646,27 @@ export class RemoteAgentProvider implements FsProvider {
     await this.call<void>("task.update", { taskId, patch });
   }
 
+  async taskSessionList(params: { taskId: string }): Promise<
+    Array<{
+      sessionId: string;
+      role: "primary" | "peer";
+      createdAt: number;
+      closedAt: number | null;
+      cli: string;
+    }>
+  > {
+    return this.call("task.sessionList", params);
+  }
+
+  async taskAttachSession(params: {
+    taskId: string;
+    cli: string;
+    model?: string;
+    effort?: string;
+  }): Promise<{ taskId: string; sessionId: string; role: "peer" }> {
+    return this.call("task.attachSession", params);
+  }
+
   async sessionsCreate(params: {
     id: string;
     workspaceId: string;
@@ -666,6 +708,13 @@ export class RemoteAgentProvider implements FsProvider {
   ): () => void {
     this.taskEndedListeners.add(cb);
     return () => this.taskEndedListeners.delete(cb);
+  }
+
+  onTaskSessionAttached(
+    cb: (e: { taskId: string; sessionId: string; role: "peer"; cli: string }) => void,
+  ): () => void {
+    this.taskSessionAttachedListeners.add(cb);
+    return () => this.taskSessionAttachedListeners.delete(cb);
   }
 
   onTaskWorktreeRemoved(cb: (e: { taskId: string }) => void): () => void {

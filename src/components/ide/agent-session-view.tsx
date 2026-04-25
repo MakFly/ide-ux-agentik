@@ -48,9 +48,10 @@ export function AgentSessionView({
   const workspace = useIDE((s) => s.workspaces.find((w) => w.id === session.workspaceId));
   const workspaceSource = workspace?.source as WorkspaceSource | undefined;
   const task = useIDE((s) => {
-    if (!session.taskId) return null;
+    const taskId = session.taskRootId || session.taskId;
+    if (!taskId) return null;
     const list = s.tasksByWorkspaceId[session.workspaceId] ?? [];
-    return list.find((t) => t.id === session.taskId) ?? null;
+    return list.find((t) => t.id === taskId) ?? null;
   });
 
   return (

@@ -48,9 +48,11 @@ export type WorkspaceTerminal = {
   worktreeId?: string;
   lastCommand: string;
   // When set, this session was spawned by a task and the panel renders
-  // <TaskTranscript /> instead of ChatView. Invariant since Wave 1+2:
-  // task.sessionId === WorkspaceTerminal.id, so taskId is the link back to
-  // the parent task row.
+  // <TaskTranscript /> instead of ChatView. This is the root task that owns the worktree.
+  taskRootId?: string;
+  // List of session IDs attached to this task. First (cliSessions[0]) is primary.
+  cliSessions?: string[];
+  // @deprecated: replaced by taskRootId. Kept for backward compatibility reading.
   taskId?: string;
 };
 
@@ -844,18 +846,21 @@ function buildSessionTabFor(
       status: tabStatus,
       workspaceId: task.workspaceId,
       lastCommand: TITLE_BY_KIND[cliKind],
-      taskId: task.id,
+      taskRootId: task.id,
+      cliSessions: [sessionId],
     };
     const idx = existing.findIndex((t) => t.id === sessionId);
     return idx >= 0 ? existing.map((t, i) => (i === idx ? tab : t)) : [...existing, tab];
   }
 
   // CHILD task — find the existing tab for the conversation root and
-  // update its taskId to point to the latest task in the chain.
-  const rootTab = existing.find((t) => t.taskId === conversationRootTaskId);
+  // update its taskRootId to point to the latest task in the chain.
+  const rootTab = existing.find(
+    (t) => t.taskRootId === conversationRootTaskId || t.taskId === conversationRootTaskId,
+  );
   if (!rootTab) return existing; // shouldn't happen, fail closed
   return existing.map((t) =>
-    t.id === rootTab.id ? { ...t, taskId: task.id, status: tabStatus, title: titleFor } : t,
+    t.id === rootTab.id ? { ...t, taskRootId: task.id, status: tabStatus, title: titleFor } : t,
   );
 }
 
@@ -2130,6 +2135,27 @@ export const useIDE = create<State>()(
           provider.onTaskWorktreeRemoved((e) => {
             console.debug("[store.tasks] worktreeRemoved", e.taskId);
             get().removeTaskById(e.taskId);
+          });
+
+          provider.onTaskSessionAttached((e) => {
+            console.debug("[store.tasks] sessionAttached", e.taskId, e.sessionId, e.role);
+            set((s) => {
+              const sessions = s.sessionsByWorkspaceId[workspaceId] ?? [];
+              // Find the tab for this taskRootId and add the new sessionId to cliSessions
+              return {
+                sessionsByWorkspaceId: {
+                  ...s.sessionsByWorkspaceId,
+                  [workspaceId]: sessions.map((session) =>
+                    session.taskRootId === e.taskId
+                      ? {
+                          ...session,
+                          cliSessions: [...(session.cliSessions ?? []), e.sessionId],
+                        }
+                      : session,
+                  ),
+                },
+              };
+            });
           });
         } catch (err) {
           console.warn(`[store] hydrateTasks failed for workspace ${workspaceId}:`, err);

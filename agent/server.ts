@@ -35,6 +35,7 @@ import {
   blobsRepo,
   tasksRepo,
   taskLogsRepo,
+  taskSessionsRepo,
   metaRepo,
   orgsRepo,
   usersRepo,
@@ -829,6 +830,9 @@ const methods: Record<string, Handler> = {
       sessionId,
     });
 
+    // Attach the primary session to the task.
+    taskSessionsRepo.attach(taskId, sessionId, "primary");
+
     broadcastAuthed({
       jsonrpc: "2.0",
       method: "task.created",
@@ -852,6 +856,183 @@ const methods: Record<string, Handler> = {
       since: typeof since === "number" ? since : undefined,
       limit: typeof limit === "number" ? Math.min(limit, 5000) : 1000,
     });
+  },
+
+  async "task.sessionList"({ taskId }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.sessionList: taskId is required");
+
+    const rows = taskSessionsRepo.list(tid);
+    return Promise.all(
+      rows.map(async (row) => {
+        const session = sessionsRepo.getById(row.session_id);
+        return {
+          sessionId: row.session_id,
+          role: row.role,
+          createdAt: row.created_at,
+          closedAt: row.closed_at,
+          cli: session?.cli ?? "unknown",
+        };
+      }),
+    );
+  },
+
+  async "task.attachSession"({ taskId, cli, model, effort }, ctx) {
+    const tid = String(taskId ?? "").trim();
+    const c = String(cli ?? "").trim();
+    const m = model !== undefined && model !== null ? String(model).trim() || undefined : undefined;
+    const eff =
+      effort !== undefined && effort !== null ? String(effort).trim() || undefined : undefined;
+
+    if (!tid) throw new Error("task.attachSession: taskId is required");
+    if (!c) throw new Error("task.attachSession: cli is required");
+    if (!ALLOWED_CHAT_FLAGS[c]) throw new Error(`task.attachSession: unsupported cli "${c}"`);
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.attachSession: task not found: ${tid}`);
+
+    if (!task.worktree_path || !task.branch_name) {
+      throw new Error(`task.attachSession: task worktree not ready for task ${tid}`);
+    }
+
+    const sessionId = randomUUID();
+    console.info(`[task.attachSession] id=${tid} sessionId=${sessionId} cli=${c}`);
+
+    // Create session for the peer CLI.
+    sessionsRepo.create({
+      id: sessionId,
+      workspaceId: task.workspace_id,
+      cli: c,
+      title: `${task.title} (${c})`,
+    });
+
+    // Attach to task as peer.
+    taskSessionsRepo.attach(tid, sessionId, "peer");
+
+    // Spawn the peer CLI in the same worktree.
+    const worktreePath = task.worktree_path;
+    const safeExtra: string[] = [];
+    if (m) {
+      safeExtra.push("--model", m);
+    }
+    if (eff) {
+      if (c === "codex") {
+        safeExtra.push("-c", `model_reasoning_effort=${eff}`);
+      } else {
+        safeExtra.push("--effort", eff);
+      }
+    }
+
+    let execCmd: string;
+    let execArgs: string[];
+    if (c === "codex") {
+      execCmd = "codex";
+      execArgs = ["exec", "--json", ...safeExtra];
+    } else if (c === "claude") {
+      execCmd = "claude";
+      execArgs = ["-p", "", "--output-format", "stream-json", "--verbose", ...safeExtra];
+    } else {
+      throw new Error(`unsupported cli "${c}"`);
+    }
+
+    const mergedEnv = safeEnv();
+
+    console.info(
+      `[task.attachSession] id=${tid} sessionId=${sessionId} exec="${execCmd} ${execArgs.slice(0, 3).join(" ")}…" cwd=${worktreePath}`,
+    );
+    const proc = cpSpawn(execCmd, execArgs, {
+      cwd: worktreePath,
+      env: mergedEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const taskSession: TaskSession = { id: sessionId, taskId: tid, sessionId, proc, alive: true };
+    ctx.taskSessions.set(sessionId, taskSession);
+
+    let buf = "";
+    proc.stdout?.setEncoding("utf8");
+    proc.stdout?.on("data", (chunk: string) => {
+      buf += chunk;
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let evt: unknown;
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          evt = { type: "raw", text: line };
+        }
+        broadcastAuthed({
+          jsonrpc: "2.0",
+          method: "task.event",
+          params: { taskId: tid, event: evt },
+        });
+        taskLogsRepo.append(tid, "info", "stdout", evt);
+      }
+    });
+
+    proc.stderr?.setEncoding("utf8");
+    proc.stderr?.on("data", (chunk: string) => {
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.event",
+        params: { taskId: tid, event: { type: "stderr", text: chunk } },
+      });
+      taskLogsRepo.append(tid, "warn", "stderr", { text: chunk });
+    });
+
+    proc.on("exit", (code, signal) => {
+      if (!taskSession.alive) return;
+      taskSession.alive = false;
+
+      if (buf.trim()) {
+        try {
+          const evt = JSON.parse(buf.trim());
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.event",
+            params: { taskId: tid, event: evt },
+          });
+          taskLogsRepo.append(tid, "info", "stdout", evt);
+        } catch {
+          /* ignore malformed trailing line */
+        }
+        buf = "";
+      }
+
+      console.info(
+        `[task.attachSession.exit] id=${tid} sessionId=${sessionId} code=${code} signal=${signal ?? "none"}`,
+      );
+      taskSessionsRepo.detach(sessionId);
+
+      ctx.taskSessions.delete(sessionId);
+    });
+
+    proc.on("error", (err) => {
+      if (!taskSession.alive) return;
+      taskSession.alive = false;
+      const errorMsg = err.message;
+      console.error(`[task.attachSession] proc error id=${tid}: ${errorMsg}`);
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.event",
+        params: { taskId: tid, event: { type: "error", message: errorMsg } },
+      });
+      taskLogsRepo.append(tid, "error", "spawn", { message: errorMsg });
+
+      taskSessionsRepo.detach(sessionId);
+      ctx.taskSessions.delete(sessionId);
+    });
+
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.sessionAttached",
+      params: { taskId: tid, sessionId, role: "peer", cli: c },
+    });
+
+    return { taskId: tid, sessionId, role: "peer" };
   },
 
   async "task.start"({ id }, ctx) {
