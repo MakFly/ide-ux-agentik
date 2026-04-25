@@ -61,6 +61,8 @@ const SAFE_ENV_KEYS = [
   "LOGNAME",
   "PWD",
   "HOSTNAME",
+  "SSH_AUTH_SOCK",
+  "GIT_SSH_COMMAND",
 ] as const;
 
 function safeEnv(extra: Record<string, string> = {}): Record<string, string> {
@@ -154,11 +156,19 @@ type ChatSession = {
   alive: boolean;
 };
 
+type GitCloneSession = {
+  id: string;
+  proc: ChildProcess;
+  alive: boolean;
+  dest: string;
+};
+
 type Ctx = {
   authed: boolean;
   watchers: Map<string, FSWatcher>;
   ptySessions: Map<string, PtySession>;
   chatSessions: Map<string, ChatSession>;
+  gitCloneSessions: Map<string, GitCloneSession>;
   ws: { send: (d: string) => void };
 };
 
@@ -585,6 +595,174 @@ const methods: Record<string, Handler> = {
     const args = staged ? ["diff", "--cached"] : ["diff"];
     const { stdout } = await gitExec(args, cwd);
     return { patch: stdout };
+  },
+
+  async "git.clone"({ url, dest, env }, ctx) {
+    const repoUrl = String(url ?? "").trim();
+    const destPath = String(dest ?? "").trim();
+
+    if (!repoUrl) throw new Error("git.clone: url is required");
+    if (!destPath) throw new Error("git.clone: dest is required");
+
+    const urlRegex = /^(https:\/\/|git@|ssh:\/\/)/;
+    if (!urlRegex.test(repoUrl)) {
+      throw new Error(
+        `git.clone: invalid url scheme (must be https://, git@, or ssh://): ${repoUrl}`,
+      );
+    }
+
+    const resolved = path.resolve(destPath);
+    const homeDir = process.env.HOME || "/root";
+    if (!resolved.startsWith(homeDir)) {
+      throw new Error(`git.clone: dest must be under HOME directory: ${destPath}`);
+    }
+    if (resolved.includes("..")) {
+      throw new Error(`git.clone: dest cannot contain ..: ${destPath}`);
+    }
+
+    let exists = false;
+    try {
+      await fs.stat(resolved);
+      exists = true;
+    } catch {
+      /* does not exist yet */
+    }
+    if (exists) {
+      throw new Error(`git.clone: dest already exists: ${resolved}`);
+    }
+
+    const mergedEnv = safeEnv((env as Record<string, string> | undefined) ?? {});
+    mergedEnv.GIT_TERMINAL_PROMPT = "0";
+
+    const id = randomUUID();
+    const parentDir = path.dirname(resolved);
+    const proc = cpSpawn("git", ["clone", "--progress", repoUrl, resolved], {
+      cwd: parentDir,
+      env: mergedEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const session: GitCloneSession = { id, proc, alive: true, dest: resolved };
+    ctx.gitCloneSessions.set(id, session);
+
+    proc.stdout?.setEncoding("utf8");
+    proc.stdout?.on("data", (chunk: string) => {
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "git.clone.progress",
+          params: { id, stream: "stdout", data: chunk },
+        }),
+      );
+    });
+
+    proc.stderr?.setEncoding("utf8");
+    proc.stderr?.on("data", (chunk: string) => {
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "git.clone.progress",
+          params: { id, stream: "stderr", data: chunk },
+        }),
+      );
+    });
+
+    proc.on("exit", (code, signal) => {
+      if (!session.alive) return;
+      session.alive = false;
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "git.clone.end",
+          params: { id, code, dest: resolved },
+        }),
+      );
+      ctx.gitCloneSessions.delete(id);
+    });
+
+    proc.on("error", (err) => {
+      if (!session.alive) return;
+      session.alive = false;
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "git.clone.progress",
+          params: { id, stream: "stderr", data: err.message },
+        }),
+      );
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "git.clone.end",
+          params: { id, code: null, dest: resolved },
+        }),
+      );
+      ctx.gitCloneSessions.delete(id);
+    });
+
+    return { id, dest: resolved };
+  },
+
+  async "git.clone.cancel"({ id }, ctx) {
+    const session = ctx.gitCloneSessions.get(String(id));
+    if (!session) throw new Error(`git.clone session not found: ${id}`);
+    try {
+      session.proc.kill("SIGTERM");
+    } catch {
+      /* ignore */
+    }
+    session.alive = false;
+    ctx.gitCloneSessions.delete(String(id));
+    return { ok: true };
+  },
+
+  async "git.detectInstall"({ dir }) {
+    const dirPath = String(dir ?? "").trim();
+    if (!dirPath) throw new Error("git.detectInstall: dir is required");
+
+    const resolved = path.resolve(dirPath);
+    const homeDir = process.env.HOME || "/root";
+    if (!resolved.startsWith(homeDir)) {
+      throw new Error(`git.detectInstall: dir must be under HOME directory: ${dirPath}`);
+    }
+    if (resolved.includes("..")) {
+      throw new Error(`git.detectInstall: dir cannot contain ..: ${dirPath}`);
+    }
+
+    try {
+      await fs.stat(resolved);
+    } catch {
+      return null;
+    }
+
+    const probes = [
+      { file: "bun.lockb", tool: "bun", args: ["install"] },
+      { file: "bun.lock", tool: "bun", args: ["install"] },
+      { file: "pnpm-lock.yaml", tool: "pnpm", args: ["install"] },
+      { file: "yarn.lock", tool: "yarn", args: ["install"] },
+      { file: "package-lock.json", tool: "npm", args: ["install"] },
+      { file: "pyproject.toml", tool: "uv", args: ["sync"] },
+      { file: "Cargo.toml", tool: "cargo", args: ["build"] },
+      { file: "go.mod", tool: "go", args: ["mod", "download"] },
+    ];
+
+    for (const probe of probes) {
+      try {
+        await fs.stat(path.join(resolved, probe.file));
+        return { tool: probe.tool, args: probe.args };
+      } catch {
+        /* not found, continue */
+      }
+    }
+
+    try {
+      await fs.stat(path.join(resolved, "package.json"));
+      return { tool: "bun", args: ["install"] };
+    } catch {
+      /* no package.json either */
+    }
+
+    return null;
   },
 
   // ─── Persistence RPC ──────────────────────────────────────────────────────
@@ -1162,6 +1340,7 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
     watchers: new Map<string, FSWatcher>(),
     ptySessions: new Map<string, PtySession>(),
     chatSessions: new Map<string, ChatSession>(),
+    gitCloneSessions: new Map<string, GitCloneSession>(),
     ws: { send: (d: string) => ws.send(d) },
   };
   contexts.set(ws, ctx);
@@ -1238,6 +1417,14 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
       }
     }
     ctx.chatSessions.clear();
+    for (const session of ctx.gitCloneSessions.values()) {
+      try {
+        session.proc.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+    }
+    ctx.gitCloneSessions.clear();
     if (ctx.authTimeout) clearTimeout(ctx.authTimeout);
   });
 });
