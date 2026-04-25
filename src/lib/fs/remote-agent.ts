@@ -1,4 +1,10 @@
-import { FsError, type FsEntry, type FsProvider, type FsUnsubscribe, type FsWatchEvent } from "./types";
+import {
+  FsError,
+  type FsEntry,
+  type FsProvider,
+  type FsUnsubscribe,
+  type FsWatchEvent,
+} from "./types";
 
 export type PtySpawnParams = {
   cmd?: string;
@@ -92,9 +98,20 @@ export class RemoteAgentProvider implements FsProvider {
   private pending = new Map<JsonRpcId, Pending>();
   private watchers = new Map<string, (ev: FsWatchEvent) => void>();
   private ptyDataListeners = new Map<string, Set<(data: string) => void>>();
-  private ptyExitListeners = new Map<string, Set<(code: number | null, signal: string | null) => void>>();
+  private ptyExitListeners = new Map<
+    string,
+    Set<(code: number | null, signal: string | null) => void>
+  >();
   private chatEventListeners = new Map<string, Set<(event: ChatEvent) => void>>();
-  private chatEndListeners = new Map<string, Set<(code: number | null, signal: string | null) => void>>();
+  private chatEndListeners = new Map<
+    string,
+    Set<(code: number | null, signal: string | null) => void>
+  >();
+  private cloneProgressListeners = new Map<
+    string,
+    Set<(chunk: { stream: "stdout" | "stderr"; data: string }) => void>
+  >();
+  private cloneEndListeners = new Map<string, Set<(r: { code: number; dest: string }) => void>>();
   private connecting: Promise<void> | null = null;
 
   constructor(
@@ -123,24 +140,35 @@ export class RemoteAgentProvider implements FsProvider {
       });
       ws.addEventListener("close", () => {
         // 1. Reject any outstanding RPC call so awaiters fail fast.
-        for (const p of this.pending.values()) p.reject(new FsError("Agent connection closed", "io"));
+        for (const p of this.pending.values())
+          p.reject(new FsError("Agent connection closed", "io"));
         this.pending.clear();
         // 2. Synthesize terminal events for every in-flight stream so async
         //    consumers (codex-adapter generator, xterm PTY loop) can unblock.
         for (const [, listeners] of this.chatEndListeners) {
           for (const cb of listeners) {
-            try { cb(null, "closed"); } catch { /* consumer threw — still clear */ }
+            try {
+              cb(null, "closed");
+            } catch {
+              /* consumer threw — still clear */
+            }
           }
         }
         for (const [, listeners] of this.ptyExitListeners) {
           for (const cb of listeners) {
-            try { cb(null, "closed"); } catch { /* ignore */ }
+            try {
+              cb(null, "closed");
+            } catch {
+              /* ignore */
+            }
           }
         }
         this.chatEventListeners.clear();
         this.chatEndListeners.clear();
         this.ptyDataListeners.clear();
         this.ptyExitListeners.clear();
+        this.cloneProgressListeners.clear();
+        this.cloneEndListeners.clear();
       });
       ws.addEventListener("open", async () => {
         try {
@@ -192,7 +220,11 @@ export class RemoteAgentProvider implements FsProvider {
       return;
     }
     if ("method" in msg && msg.method === "pty.exit") {
-      const { id, code, signal } = msg.params as { id: string; code: number | null; signal: string | null };
+      const { id, code, signal } = msg.params as {
+        id: string;
+        code: number | null;
+        signal: string | null;
+      };
       for (const cb of this.ptyExitListeners.get(id) ?? []) cb(code, signal);
       this.ptyDataListeners.delete(id);
       this.ptyExitListeners.delete(id);
@@ -204,10 +236,33 @@ export class RemoteAgentProvider implements FsProvider {
       return;
     }
     if ("method" in msg && msg.method === "chat.end") {
-      const { id, code, signal } = msg.params as { id: string; code: number | null; signal: string | null };
+      const { id, code, signal } = msg.params as {
+        id: string;
+        code: number | null;
+        signal: string | null;
+      };
       for (const cb of this.chatEndListeners.get(id) ?? []) cb(code, signal);
       this.chatEventListeners.delete(id);
       this.chatEndListeners.delete(id);
+    }
+    if ("method" in msg && msg.method === "git.clone.progress") {
+      const { id, stream, data } = msg.params as {
+        id: string;
+        stream: "stdout" | "stderr";
+        data: string;
+      };
+      for (const cb of this.cloneProgressListeners.get(id) ?? []) cb({ stream, data });
+      return;
+    }
+    if ("method" in msg && msg.method === "git.clone.end") {
+      const { id, code, dest } = msg.params as {
+        id: string;
+        code: number;
+        dest: string;
+      };
+      for (const cb of this.cloneEndListeners.get(id) ?? []) cb({ code, dest });
+      this.cloneProgressListeners.delete(id);
+      this.cloneEndListeners.delete(id);
     }
   }
 
@@ -265,9 +320,15 @@ export class RemoteAgentProvider implements FsProvider {
     const { id } = await this.call<{ id: string }>("pty.spawn", params);
     return {
       id,
-      write: (data) => { this.call<void>("pty.write", { id, data }).catch(() => {}); },
-      resize: (cols, rows) => { this.call<void>("pty.resize", { id, cols, rows }).catch(() => {}); },
-      kill: (signal) => { this.call<void>("pty.kill", { id, signal }).catch(() => {}); },
+      write: (data) => {
+        this.call<void>("pty.write", { id, data }).catch(() => {});
+      },
+      resize: (cols, rows) => {
+        this.call<void>("pty.resize", { id, cols, rows }).catch(() => {});
+      },
+      kill: (signal) => {
+        this.call<void>("pty.kill", { id, signal }).catch(() => {});
+      },
       onData: (cb) => this.onPtyData(id, cb),
       onExit: (cb) => this.onPtyExit(id, cb),
     };
@@ -296,7 +357,9 @@ export class RemoteAgentProvider implements FsProvider {
     return this.call("exec.run", params);
   }
 
-  async ptyList(): Promise<{ sessions: Array<{ id: string; cmd: string; cwd: string; alive: boolean }> }> {
+  async ptyList(): Promise<{
+    sessions: Array<{ id: string; cmd: string; cwd: string; alive: boolean }>;
+  }> {
     return this.call("pty.list", {});
   }
 
@@ -306,23 +369,46 @@ export class RemoteAgentProvider implements FsProvider {
     return () => this.chatEventListeners.get(id)?.delete(cb);
   }
 
-  private onChatEnd(id: string, cb: (code: number | null, signal: string | null) => void): () => void {
+  private onChatEnd(
+    id: string,
+    cb: (code: number | null, signal: string | null) => void,
+  ): () => void {
     if (!this.chatEndListeners.has(id)) this.chatEndListeners.set(id, new Set());
     this.chatEndListeners.get(id)!.add(cb);
     return () => this.chatEndListeners.get(id)?.delete(cb);
+  }
+
+  onCloneProgress(
+    id: string,
+    cb: (chunk: { stream: "stdout" | "stderr"; data: string }) => void,
+  ): () => void {
+    if (!this.cloneProgressListeners.has(id)) this.cloneProgressListeners.set(id, new Set());
+    this.cloneProgressListeners.get(id)!.add(cb);
+    return () => this.cloneProgressListeners.get(id)?.delete(cb);
+  }
+
+  onCloneEnd(id: string, cb: (r: { code: number; dest: string }) => void): () => void {
+    if (!this.cloneEndListeners.has(id)) this.cloneEndListeners.set(id, new Set());
+    this.cloneEndListeners.get(id)!.add(cb);
+    return () => this.cloneEndListeners.get(id)?.delete(cb);
   }
 
   async chatSpawn(params: ChatSpawnParams): Promise<ChatHandle> {
     const { id } = await this.call<{ id: string }>("chat.spawn", params);
     return {
       id,
-      kill: (signal) => { this.call<void>("chat.kill", { id, signal }).catch(() => {}); },
+      kill: (signal) => {
+        this.call<void>("chat.kill", { id, signal }).catch(() => {});
+      },
       onEvent: (cb) => this.onChatEvent(id, cb),
       onEnd: (cb) => this.onChatEnd(id, cb),
     };
   }
 
-  async gitStatus(workspacePath: string): Promise<{ branch: string; files: Array<{ path: string; staged: boolean; unstaged: boolean; kind: string }> }> {
+  async gitStatus(workspacePath: string): Promise<{
+    branch: string;
+    files: Array<{ path: string; staged: boolean; unstaged: boolean; kind: string }>;
+  }> {
     return this.call("git.status", { workspacePath });
   }
 
@@ -330,12 +416,31 @@ export class RemoteAgentProvider implements FsProvider {
     return this.call("git.stage", { workspacePath, paths });
   }
 
-  async gitCommit(workspacePath: string, message: string): Promise<{ sha: string | null; message: string }> {
+  async gitCommit(
+    workspacePath: string,
+    message: string,
+  ): Promise<{ sha: string | null; message: string }> {
     return this.call("git.commit", { workspacePath, message });
   }
 
   async gitDiff(workspacePath: string, staged?: boolean): Promise<{ patch: string }> {
     return this.call("git.diff", { workspacePath, staged: staged ?? false });
+  }
+
+  async gitClone(
+    url: string,
+    dest: string,
+    env?: Record<string, string>,
+  ): Promise<{ id: string; dest: string }> {
+    return this.call("git.clone", { url, dest, env });
+  }
+
+  async gitDetectInstall(dir: string): Promise<null | { tool: string; args: string[] }> {
+    return this.call("git.detectInstall", { dir });
+  }
+
+  async gitCloneCancel(id: string): Promise<void> {
+    await this.call<void>("git.clone.cancel", { id });
   }
 
   watch(path: string, cb: (ev: FsWatchEvent) => void): FsUnsubscribe {

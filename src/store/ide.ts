@@ -6,6 +6,7 @@ import { providerFor, FsError, type FsEntry } from "@/lib/fs";
 import { computeStatus, type GitStatusMap } from "@/lib/git/status";
 import { persistence } from "@/lib/persistence/client";
 import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
+import { MOCK_ENABLED } from "@/lib/env";
 
 export type BranchStatus = "active" | "warn" | "loading" | "dot" | "none";
 
@@ -433,24 +434,26 @@ const initialBranchesByWorkspaceId: Record<string, Branch[]> = {
   ],
 };
 
-const initialWorkspaces: Workspace[] = [
-  {
-    id: "ws-sc",
-    letter: "S",
-    name: "superconductor",
-    color: "oklch(0.45 0.18 270)",
-    gitUrl: "https://github.com/superconductor/superconductor",
-    source: { kind: "mock", id: "ws-sc" },
-  },
-  {
-    id: "ws-landing",
-    letter: "L",
-    name: "landing",
-    color: "oklch(0.55 0.13 60)",
-    gitUrl: "https://github.com/superconductor/landing",
-    source: { kind: "mock", id: "ws-landing" },
-  },
-];
+const initialWorkspaces: Workspace[] = MOCK_ENABLED
+  ? [
+      {
+        id: "ws-sc",
+        letter: "S",
+        name: "superconductor",
+        color: "oklch(0.45 0.18 270)",
+        gitUrl: "https://github.com/superconductor/superconductor",
+        source: { kind: "mock", id: "ws-sc" },
+      },
+      {
+        id: "ws-landing",
+        letter: "L",
+        name: "landing",
+        color: "oklch(0.55 0.13 60)",
+        gitUrl: "https://github.com/superconductor/landing",
+        source: { kind: "mock", id: "ws-landing" },
+      },
+    ]
+  : [];
 
 // Mini mock tree for workspaces with kind="mock" — fallback until Vague 2 loads real data
 const MOCK_FILE_TREE: Record<string, string[]> = {
@@ -584,63 +587,65 @@ function getDefaultWorktreeId(
   return worktrees.find((wt) => wt.branchId === branchId)?.id ?? worktrees[0]?.id;
 }
 
-const initialWorktrees: Record<string, Worktree[]> = {
-  "ws-sc": [
-    {
-      id: "wt-sc-main",
-      workspaceId: "ws-sc",
-      branchId: "b1",
-      name: "main",
-      path: "/worktrees/superconductor/master",
-      baseBranch: "master",
-      status: "ready",
-      terminals: createTerminalSet("wt-sc-main"),
-    },
-    {
-      id: "wt-sc-meta",
-      workspaceId: "ws-sc",
-      branchId: "b2",
-      name: "meta-chat",
-      path: "/worktrees/superconductor/feat-meta-chat",
-      baseBranch: "master",
-      status: "syncing",
-      terminals: createTerminalSet("wt-sc-meta"),
-    },
-    {
-      id: "wt-sc-workspace-sidebar",
-      workspaceId: "ws-sc",
-      branchId: "b6",
-      name: "workspace-sidebar-state",
-      path: "/worktrees/superconductor/fix-workspace-sidebar-state",
-      baseBranch: "master",
-      status: "dirty",
-      locked: true,
-      terminals: createTerminalSet("wt-sc-workspace-sidebar"),
-    },
-  ],
-  "ws-landing": [
-    {
-      id: "wt-landing-main",
-      workspaceId: "ws-landing",
-      branchId: "l1",
-      name: "main",
-      path: "/worktrees/landing/main",
-      baseBranch: "main",
-      status: "ready",
-      terminals: createTerminalSet("wt-landing-main"),
-    },
-    {
-      id: "wt-landing-marketing",
-      workspaceId: "ws-landing",
-      branchId: "l2",
-      name: "marketing-landing-page",
-      path: "/worktrees/landing/feat-marketing-landing-page",
-      baseBranch: "main",
-      status: "ready",
-      terminals: createTerminalSet("wt-landing-marketing"),
-    },
-  ],
-};
+const initialWorktrees: Record<string, Worktree[]> = MOCK_ENABLED
+  ? {
+      "ws-sc": [
+        {
+          id: "wt-sc-main",
+          workspaceId: "ws-sc",
+          branchId: "b1",
+          name: "main",
+          path: "/worktrees/superconductor/master",
+          baseBranch: "master",
+          status: "ready",
+          terminals: createTerminalSet("wt-sc-main"),
+        },
+        {
+          id: "wt-sc-meta",
+          workspaceId: "ws-sc",
+          branchId: "b2",
+          name: "meta-chat",
+          path: "/worktrees/superconductor/feat-meta-chat",
+          baseBranch: "master",
+          status: "syncing",
+          terminals: createTerminalSet("wt-sc-meta"),
+        },
+        {
+          id: "wt-sc-workspace-sidebar",
+          workspaceId: "ws-sc",
+          branchId: "b6",
+          name: "workspace-sidebar-state",
+          path: "/worktrees/superconductor/fix-workspace-sidebar-state",
+          baseBranch: "master",
+          status: "dirty",
+          locked: true,
+          terminals: createTerminalSet("wt-sc-workspace-sidebar"),
+        },
+      ],
+      "ws-landing": [
+        {
+          id: "wt-landing-main",
+          workspaceId: "ws-landing",
+          branchId: "l1",
+          name: "main",
+          path: "/worktrees/landing/main",
+          baseBranch: "main",
+          status: "ready",
+          terminals: createTerminalSet("wt-landing-main"),
+        },
+        {
+          id: "wt-landing-marketing",
+          workspaceId: "ws-landing",
+          branchId: "l2",
+          name: "marketing-landing-page",
+          path: "/worktrees/landing/feat-marketing-landing-page",
+          baseBranch: "main",
+          status: "ready",
+          terminals: createTerminalSet("wt-landing-marketing"),
+        },
+      ],
+    }
+  : {};
 
 // Migrate old tasksByBranchId seed → tasksByWorktreeId by matching branchId on worktrees.
 function buildInitialTasksByWorktreeId(): Record<string, WorkTask[]> {
@@ -852,13 +857,11 @@ export const useIDE = create<State>()(
         if (!ws) return;
 
         try {
-          const provider =
-            ws.source.kind === "mock"
-              ? await (async () => {
-                  const { MockProvider } = await import("@/lib/fs/mock");
-                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-                })()
-              : await providerFor(ws.source, ws.name);
+          const provider = await providerFor(
+            ws.source,
+            ws.name,
+            ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
+          );
 
           const status = await computeStatus(provider);
           set((s) => ({
@@ -883,15 +886,11 @@ export const useIDE = create<State>()(
         }));
 
         try {
-          const source =
-            ws.source.kind === "mock" ? { kind: "mock" as const, id: ws.source.id } : ws.source;
-          const provider =
-            ws.source.kind === "mock"
-              ? await (async () => {
-                  const { MockProvider } = await import("@/lib/fs/mock");
-                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-                })()
-              : await providerFor(source, ws.name);
+          const provider = await providerFor(
+            ws.source,
+            ws.name,
+            ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
+          );
 
           const raw = await provider.list("");
           const entries = sortEntries(raw);
@@ -950,13 +949,11 @@ export const useIDE = create<State>()(
         }));
 
         try {
-          const provider =
-            ws.source.kind === "mock"
-              ? await (async () => {
-                  const { MockProvider } = await import("@/lib/fs/mock");
-                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-                })()
-              : await providerFor(ws.source, ws.name);
+          const provider = await providerFor(
+            ws.source,
+            ws.name,
+            ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
+          );
 
           const raw = await provider.list(path);
           const entries = sortEntries(raw);
@@ -1004,13 +1001,11 @@ export const useIDE = create<State>()(
         const fullPath = parentPath ? `${parentPath}/${name}` : name;
 
         try {
-          const provider =
-            ws.source.kind === "mock"
-              ? await (async () => {
-                  const { MockProvider } = await import("@/lib/fs/mock");
-                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-                })()
-              : await providerFor(ws.source, ws.name);
+          const provider = await providerFor(
+            ws.source,
+            ws.name,
+            ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
+          );
 
           if (type === "dir") {
             await provider.mkdir(fullPath);
@@ -1042,13 +1037,11 @@ export const useIDE = create<State>()(
         const parentPath = parts.slice(0, -1).join("/");
 
         try {
-          const provider =
-            ws.source.kind === "mock"
-              ? await (async () => {
-                  const { MockProvider } = await import("@/lib/fs/mock");
-                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-                })()
-              : await providerFor(ws.source, ws.name);
+          const provider = await providerFor(
+            ws.source,
+            ws.name,
+            ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
+          );
 
           await provider.remove(path);
 
@@ -1850,13 +1843,11 @@ export const useIDE = create<State>()(
 
         (async () => {
           try {
-            const provider =
-              ws.source.kind === "mock"
-                ? await (async () => {
-                    const { MockProvider } = await import("@/lib/fs/mock");
-                    return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-                  })()
-                : await providerFor(ws.source, ws.name);
+            const provider = await providerFor(
+              ws.source,
+              ws.name,
+              ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
+            );
 
             const text = await provider.readFile(path);
 
@@ -1903,13 +1894,11 @@ export const useIDE = create<State>()(
         if (!ws) return;
 
         try {
-          const provider =
-            ws.source.kind === "mock"
-              ? await (async () => {
-                  const { MockProvider } = await import("@/lib/fs/mock");
-                  return new MockProvider(ws.name, MOCK_PROVIDER_TREE);
-                })()
-              : await providerFor(ws.source, ws.name);
+          const provider = await providerFor(
+            ws.source,
+            ws.name,
+            ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
+          );
 
           await provider.writeFile(tab.path, tab.content);
 

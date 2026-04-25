@@ -19,7 +19,11 @@ function keyOf(src: WorkspaceSource): string {
   }
 }
 
-export async function providerFor(src: WorkspaceSource, label: string): Promise<FsProvider> {
+export async function providerFor(
+  src: WorkspaceSource,
+  label: string,
+  mockTree?: Record<string, string | Record<string, unknown>>,
+): Promise<FsProvider> {
   const k = keyOf(src);
   const cached = cache.get(k);
   if (cached) return cached;
@@ -27,7 +31,7 @@ export async function providerFor(src: WorkspaceSource, label: string): Promise<
   let provider: FsProvider;
   switch (src.kind) {
     case "mock":
-      provider = new MockProvider(label);
+      provider = new MockProvider(label, mockTree);
       break;
     case "local-web": {
       const handle = await loadHandle(src.handleId);
@@ -52,4 +56,5 @@ export function dropProvider(src: WorkspaceSource) {
   }
 }
 
-export const isLocalWebSupported = () => typeof window !== "undefined" && "showDirectoryPicker" in window;
+export const isLocalWebSupported = () =>
+  typeof window !== "undefined" && "showDirectoryPicker" in window;
