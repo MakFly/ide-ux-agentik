@@ -1,5 +1,5 @@
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
-import { createContext } from "react";
+import { createContext, useEffect, useState } from "react";
 import { z } from "zod";
 import type { Org } from "@/lib/types/org";
 import { getStorage } from "@/lib/storage";
@@ -21,20 +21,36 @@ const searchSchema = z.object({
 export const Route = createFileRoute("/org/$id")({
   component: OrgPage,
   validateSearch: searchSchema,
-  beforeLoad: async ({ params }) => {
-    const storage = getStorage();
-    const org = await storage.getOrg();
-    if (!org || org.id !== params.id) {
-      throw redirect({ to: "/" });
-    }
-    return { org };
-  },
 });
 
 function OrgPage() {
-  const { org } = Route.useLoaderData();
+  const { id: paramId } = Route.useParams();
   const search = Route.useSearch();
   const navigate = useNavigate({ from: "/org/$id" });
+  const [org, setOrg] = useState<Org | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchOrg = async () => {
+      const storage = getStorage();
+      const fetchedOrg = await storage.getOrg();
+      if (!fetchedOrg || fetchedOrg.id !== paramId) {
+        navigate({ to: "/", replace: true });
+        return;
+      }
+      setOrg(fetchedOrg);
+      setLoading(false);
+    };
+    void fetchOrg();
+  }, [paramId, navigate]);
+
+  if (loading) {
+    return <div className="h-svh w-screen bg-background" />;
+  }
+
+  if (!org) {
+    return null;
+  }
 
   const handleNavigate = (nextSearch: Record<string, any>) => {
     navigate({
