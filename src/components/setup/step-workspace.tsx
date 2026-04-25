@@ -23,13 +23,13 @@ export function StepWorkspace({ value, onChange, onFinish, busy }: StepWorkspace
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-xl font-semibold text-slate-900">Create your first workspace</h2>
-        <p className="mt-2 text-sm text-slate-600">
+        <h2 className="text-xl font-semibold text-foreground">Create your first workspace</h2>
+        <p className="mt-2 text-sm text-muted-foreground">
           A workspace is a project folder or remote agent where you'll work. You can add more later.
         </p>
       </div>
 
-      <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+      <div className="rounded-lg border border-border bg-muted/40 p-4">
         <AddWorkspaceForm onSubmit={handleSubmit} onCancel={undefined} />
       </div>
 

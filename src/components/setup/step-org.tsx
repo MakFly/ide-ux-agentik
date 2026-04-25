@@ -48,8 +48,8 @@ export function StepOrg({ value, onChange, onNext }: StepOrgProps) {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-xl font-semibold text-slate-900">Create your organization</h2>
-        <p className="mt-2 text-sm text-slate-600">
+        <h2 className="text-xl font-semibold text-foreground">Create your organization</h2>
+        <p className="mt-2 text-sm text-muted-foreground">
           Give your workspace a name. This represents your team or project.
         </p>
       </div>
@@ -81,7 +81,7 @@ export function StepOrg({ value, onChange, onNext }: StepOrgProps) {
             onKeyDown={handleKeyDown}
             className="mt-2"
           />
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-muted-foreground">
             Auto-derived from name, editable. Use lowercase and hyphens only.
           </p>
         </div>

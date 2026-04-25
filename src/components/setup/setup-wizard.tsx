@@ -155,21 +155,30 @@ export function SetupWizard() {
   const progress = (step / 4) * 100;
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 p-4">
+    <div className="relative flex min-h-svh items-center justify-center overflow-hidden bg-background p-4 text-foreground">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-10 opacity-60 [background:radial-gradient(60%_50%_at_50%_0%,oklch(var(--primary-l,0.55)_var(--primary-c,0.15)_var(--primary-h,260)/0.10)_0%,transparent_70%),radial-gradient(40%_40%_at_85%_100%,oklch(var(--primary-l,0.55)_var(--primary-c,0.15)_var(--primary-h,260)/0.06)_0%,transparent_70%)]"
+      />
       <div className="w-full max-w-2xl">
-        {/* Progress strip */}
+        {/* Wordmark + progress */}
         <div className="mb-6">
-          <div className="mb-2 flex items-center justify-between">
-            <h1 className="text-sm font-medium text-slate-700">
-              Step {step} of 4 — {stepNames[step]}
+          <p className="mb-3 font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            ide-ux-agentik · setup
+          </p>
+          <div className="mb-2 flex items-baseline justify-between">
+            <h1 className="text-sm font-medium text-foreground">
+              Step {step} of 4 <span className="text-muted-foreground">— {stepNames[step]}</span>
             </h1>
-            <span className="text-xs text-slate-500">{Math.round(progress)}%</span>
+            <span className="font-mono text-[11px] text-muted-foreground">
+              {Math.round(progress)}%
+            </span>
           </div>
           <Progress value={progress} className="h-1" />
         </div>
 
         {/* Wizard card */}
-        <Card className="border-slate-200 bg-white p-8 shadow-lg">
+        <Card className="border-border bg-card p-8 shadow-lg">
           {step === 1 && <StepOrg value={orgDraft} onChange={setOrgDraft} onNext={handleOrgNext} />}
 
           {step === 2 && (
@@ -195,7 +204,7 @@ export function SetupWizard() {
           )}
 
           {/* Navigation buttons */}
-          <div className="mt-8 flex items-center justify-between border-t border-slate-200 pt-6">
+          <div className="mt-8 flex items-center justify-between border-t border-border pt-6">
             <Button
               variant="outline"
               onClick={() => {

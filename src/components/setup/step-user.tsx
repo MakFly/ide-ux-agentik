@@ -8,10 +8,23 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+type AgentKey = "codex" | "claude" | "opencode" | "gemini";
+
+const AGENT_META: Record<AgentKey, { label: string; iconSrc: string }> = {
+  codex: { label: "Codex", iconSrc: "/agents/codex.svg" },
+  claude: { label: "Claude", iconSrc: "/agents/claude-code.svg" },
+  opencode: { label: "OpenCode", iconSrc: "/agents/opencode.ico" },
+  gemini: { label: "Gemini", iconSrc: "/agents/gemini.svg" },
+};
+
+function AgentIcon({ src, label }: { src: string; label: string }) {
+  return <img src={src} alt={label} width={16} height={16} className="h-4 w-4 shrink-0" />;
+}
+
 type UserDraft = {
   displayName: string;
   email?: string;
-  defaultAgent: "codex" | "claude" | "opencode" | "gemini";
+  defaultAgent: AgentKey;
 };
 
 type StepUserProps = {
@@ -40,7 +53,7 @@ export function StepUser({ value, onChange, onNext }: StepUserProps) {
     });
   };
 
-  const handleAgentChange = (defaultAgent: "codex" | "claude" | "opencode" | "gemini") => {
+  const handleAgentChange = (defaultAgent: AgentKey) => {
     onChange({
       ...value,
       defaultAgent,
@@ -59,8 +72,8 @@ export function StepUser({ value, onChange, onNext }: StepUserProps) {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-xl font-semibold text-slate-900">Your profile</h2>
-        <p className="mt-2 text-sm text-slate-600">
+        <h2 className="text-xl font-semibold text-foreground">Your profile</h2>
+        <p className="mt-2 text-sm text-muted-foreground">
           Tell us about yourself. You can change these later.
         </p>
       </div>
@@ -97,18 +110,35 @@ export function StepUser({ value, onChange, onNext }: StepUserProps) {
 
         <div>
           <Label htmlFor="default-agent">Default AI Assistant</Label>
-          <Select value={value.defaultAgent} onValueChange={handleAgentChange}>
+          <Select
+            value={value.defaultAgent}
+            onValueChange={(v) => handleAgentChange(v as AgentKey)}
+          >
             <SelectTrigger id="default-agent" className="mt-2">
-              <SelectValue />
+              <SelectValue>
+                <span className="flex items-center gap-2">
+                  <AgentIcon
+                    src={AGENT_META[value.defaultAgent].iconSrc}
+                    label={AGENT_META[value.defaultAgent].label}
+                  />
+                  {AGENT_META[value.defaultAgent].label}
+                </span>
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="codex">Codex</SelectItem>
-              <SelectItem value="claude">Claude</SelectItem>
-              <SelectItem value="opencode">OpenCode</SelectItem>
-              <SelectItem value="gemini">Gemini</SelectItem>
+              {(Object.keys(AGENT_META) as AgentKey[]).map((key) => (
+                <SelectItem key={key} value={key}>
+                  <span className="flex items-center gap-2">
+                    <AgentIcon src={AGENT_META[key].iconSrc} label={AGENT_META[key].label} />
+                    {AGENT_META[key].label}
+                  </span>
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
-          <p className="mt-1 text-xs text-slate-500">Your preferred AI to use in workspaces.</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Your preferred AI to use in workspaces.
+          </p>
         </div>
       </div>
 

@@ -89,8 +89,8 @@ export function StepAgent({ value, onChange, onNext, onSkip }: StepAgentProps) {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-xl font-semibold text-slate-900">Connect a remote agent (optional)</h2>
-        <p className="mt-2 text-sm text-slate-600">
+        <h2 className="text-xl font-semibold text-foreground">Connect a remote agent (optional)</h2>
+        <p className="mt-2 text-sm text-muted-foreground">
           Link to a remote Codex agent server for enhanced capabilities. You can skip this for now.
         </p>
       </div>
@@ -107,7 +107,7 @@ export function StepAgent({ value, onChange, onNext, onSkip }: StepAgentProps) {
             className="mt-2"
             autoFocus
           />
-          <p className="mt-1 text-xs text-slate-500">WebSocket URL (ws:// or wss://)</p>
+          <p className="mt-1 text-xs text-muted-foreground">WebSocket URL (ws:// or wss://)</p>
         </div>
 
         <div>
@@ -121,7 +121,7 @@ export function StepAgent({ value, onChange, onNext, onSkip }: StepAgentProps) {
             onKeyDown={handleKeyDown}
             className="mt-2"
           />
-          <p className="mt-1 text-xs text-slate-500">Authentication token for the agent</p>
+          <p className="mt-1 text-xs text-muted-foreground">Authentication token for the agent</p>
         </div>
 
         <div>
@@ -134,7 +134,7 @@ export function StepAgent({ value, onChange, onNext, onSkip }: StepAgentProps) {
             onKeyDown={handleKeyDown}
             className="mt-2"
           />
-          <p className="mt-1 text-xs text-slate-500">Display name for this agent</p>
+          <p className="mt-1 text-xs text-muted-foreground">Display name for this agent</p>
         </div>
       </div>
 
