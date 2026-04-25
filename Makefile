@@ -1,10 +1,14 @@
-.PHONY: help dev build preview agent agent-dev agent-token install clean
+.PHONY: help dev build preview agent agent-dev agent-token install clean db-reset db-path
 
 # ─── Config ──────────────────────────────────────────────────────────────
 AGENT_ROOT  ?= $(CURDIR)
 AGENT_PORT  ?= 7421
 AGENT_HOST  ?= 0.0.0.0
 AGENT_TOKEN ?=
+
+# Agent SQLite database (sessions, tasks, messages, file_snapshots, etc.)
+DB_DIR  ?= $(HOME)/.ide-ux-agentik
+DB_FILE ?= $(DB_DIR)/data.sqlite
 
 # ─── Help ────────────────────────────────────────────────────────────────
 help:
@@ -24,6 +28,9 @@ help:
 	@echo "  make agent-dev     run agent rooted on ./ with a random token"
 	@echo ""
 	@echo "  make clean         remove build artifacts"
+	@echo ""
+	@echo "  make db-path       print the agent database path"
+	@echo "  make db-reset      kill agent then wipe ~/.ide-ux-agentik (fresh DB)"
 
 # ─── Frontend ────────────────────────────────────────────────────────────
 install:
@@ -66,3 +73,24 @@ agent-dev:
 # ─── Clean ───────────────────────────────────────────────────────────────
 clean:
 	rm -rf dist .vite node_modules/.vite
+
+# ─── DB ──────────────────────────────────────────────────────────────────
+db-path:
+	@echo "$(DB_FILE)"
+
+# Wipe the agent's SQLite store so the next boot rebuilds the schema from
+# scratch (DDL in agent/persistence/schema.ts). Also kills any stale agent
+# holding the WAL file open. The webapp will redo the setup wizard on
+# next visit (its localStorage is independent — clear it from devtools or
+# via the wizard's reset button if desired).
+db-reset:
+	@PID=$$(lsof -t -i :$(AGENT_PORT) -sTCP:LISTEN 2>/dev/null); \
+		if [ -n "$$PID" ]; then \
+			echo "[db-reset] killing stale agent (pid=$$PID)..."; \
+			kill $$PID 2>/dev/null || true; \
+			sleep 1; \
+		fi; \
+		echo "[db-reset] removing $(DB_FILE) (+ -wal/-shm + blobs/)"; \
+		rm -f "$(DB_FILE)" "$(DB_FILE)-wal" "$(DB_FILE)-shm"; \
+		rm -rf "$(DB_DIR)/blobs"; \
+		echo "[db-reset] done. Restart with 'make agent-dev' or 'bun run dev'."
