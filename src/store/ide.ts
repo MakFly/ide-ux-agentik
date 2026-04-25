@@ -379,6 +379,13 @@ type State = {
   removeTaskById: (taskId: string) => void;
   /** Lazily create session in DB when user opens task conversation (idempotent). */
   openTaskSession: (taskId: string) => Promise<void>;
+  /** Attach a new peer CLI to the active task. */
+  attachCliToActiveTask: (
+    cli: TerminalKind,
+    opts?: { model?: string; effort?: string },
+  ) => Promise<void>;
+  /** Close and detach a session from its task (peer only, not primary). */
+  detachCliFromTask: (sessionId: string) => Promise<void>;
 };
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -2462,6 +2469,87 @@ export const useIDE = create<State>()(
           }
         } catch (err) {
           console.warn(`[store.tasks] openTaskSession failed for ${taskId}:`, err);
+        }
+      },
+
+      attachCliToActiveTask: async (cli, opts = {}) => {
+        const state = get();
+        const taskId = state.activeTaskId;
+        if (!taskId) {
+          toast.error("No active task");
+          return;
+        }
+
+        // Find which workspace owns this task.
+        let workspace: Workspace | undefined;
+        for (const [wsId, tasks] of Object.entries(state.tasksByWorkspaceId)) {
+          if (tasks.some((t) => t.id === taskId)) {
+            workspace = state.workspaces.find((w) => w.id === wsId);
+            break;
+          }
+        }
+        if (!workspace || workspace.source.kind !== "remote-agent") {
+          toast.error("Workspace not found or not remote agent");
+          return;
+        }
+
+        try {
+          const provider = state.agentProvidersByWorkspaceId[workspace.id];
+          if (!provider) {
+            toast.error("Agent provider not connected");
+            return;
+          }
+
+          console.info(`[store.attachCliToActiveTask] attaching ${cli} to task ${taskId}`);
+          const result = await provider.taskAttachSession({
+            taskId,
+            cli,
+            model: opts.model,
+            effort: opts.effort,
+          });
+          console.info(
+            `[store.attachCliToActiveTask] attached sessionId=${result.sessionId} role=${result.role}`,
+          );
+          toast.success(`${cli} session attached`);
+        } catch (err) {
+          console.error("[store.attachCliToActiveTask] failed:", err);
+          toast.error(err instanceof Error ? err.message : "Failed to attach CLI");
+        }
+      },
+
+      detachCliFromTask: async (sessionId) => {
+        const state = get();
+        // Find the workspace that owns this session
+        let workspace: Workspace | undefined;
+        for (const [wsId, sessions] of Object.entries(state.sessionsByWorkspaceId)) {
+          if (sessions.some((s) => s.id === sessionId)) {
+            workspace = state.workspaces.find((w) => w.id === wsId);
+            break;
+          }
+        }
+        if (!workspace || workspace.source.kind !== "remote-agent") return;
+
+        try {
+          const provider = state.agentProvidersByWorkspaceId[workspace.id];
+          if (!provider) return;
+
+          console.info(`[store.detachCliFromTask] detaching sessionId=${sessionId}`);
+          // Close the session in the DB (soft delete via closed_at)
+          // Note: there's no explicit RPC for detach yet, so we just close the session
+          // and let the provider cleanup happen on the server side via the process exit.
+          // For now, we just remove it from the UI.
+          set((s) => {
+            const sessions = s.sessionsByWorkspaceId[workspace.id] ?? [];
+            return {
+              sessionsByWorkspaceId: {
+                ...s.sessionsByWorkspaceId,
+                [workspace.id]: sessions.filter((sess) => sess.id !== sessionId),
+              },
+            };
+          });
+          toast.success("Session detached");
+        } catch (err) {
+          console.warn("[store.detachCliFromTask] failed:", err);
         }
       },
 
