@@ -10,15 +10,39 @@ import {
 
 type AgentKey = "codex" | "claude" | "opencode" | "gemini";
 
-const AGENT_META: Record<AgentKey, { label: string; iconSrc: string }> = {
-  codex: { label: "Codex", iconSrc: "/agents/codex.svg" },
-  claude: { label: "Claude", iconSrc: "/agents/claude-code.svg" },
-  opencode: { label: "OpenCode", iconSrc: "/agents/opencode.ico" },
-  gemini: { label: "Gemini", iconSrc: "/agents/gemini.svg" },
+// `monochrome: true` = uses currentColor / black SVG; we mask it so it adopts
+// the foreground token (black in light, white in dark). Brand-colored marks
+// (claude, gemini) are kept as-is.
+const AGENT_META: Record<AgentKey, { label: string; iconSrc: string; monochrome: boolean }> = {
+  codex: { label: "Codex", iconSrc: "/agents/codex.svg", monochrome: true },
+  claude: { label: "Claude", iconSrc: "/agents/claude-code.svg", monochrome: false },
+  opencode: { label: "OpenCode", iconSrc: "/agents/opencode.ico", monochrome: true },
+  gemini: { label: "Gemini", iconSrc: "/agents/gemini.svg", monochrome: false },
 };
 
-function AgentIcon({ src, label }: { src: string; label: string }) {
-  return <img src={src} alt={label} width={16} height={16} className="h-4 w-4 shrink-0" />;
+function AgentIcon({ agent }: { agent: AgentKey }) {
+  const meta = AGENT_META[agent];
+  if (meta.monochrome) {
+    return (
+      <span
+        aria-label={meta.label}
+        className="inline-block h-4 w-4 shrink-0 bg-foreground"
+        style={{
+          maskImage: `url(${meta.iconSrc})`,
+          WebkitMaskImage: `url(${meta.iconSrc})`,
+          maskSize: "contain",
+          WebkitMaskSize: "contain",
+          maskRepeat: "no-repeat",
+          WebkitMaskRepeat: "no-repeat",
+          maskPosition: "center",
+          WebkitMaskPosition: "center",
+        }}
+      />
+    );
+  }
+  return (
+    <img src={meta.iconSrc} alt={meta.label} width={16} height={16} className="h-4 w-4 shrink-0" />
+  );
 }
 
 type UserDraft = {
@@ -117,10 +141,7 @@ export function StepUser({ value, onChange, onNext }: StepUserProps) {
             <SelectTrigger id="default-agent" className="mt-2">
               <SelectValue>
                 <span className="flex items-center gap-2">
-                  <AgentIcon
-                    src={AGENT_META[value.defaultAgent].iconSrc}
-                    label={AGENT_META[value.defaultAgent].label}
-                  />
+                  <AgentIcon agent={value.defaultAgent} />
                   {AGENT_META[value.defaultAgent].label}
                 </span>
               </SelectValue>
@@ -129,7 +150,7 @@ export function StepUser({ value, onChange, onNext }: StepUserProps) {
               {(Object.keys(AGENT_META) as AgentKey[]).map((key) => (
                 <SelectItem key={key} value={key}>
                   <span className="flex items-center gap-2">
-                    <AgentIcon src={AGENT_META[key].iconSrc} label={AGENT_META[key].label} />
+                    <AgentIcon agent={key} />
                     {AGENT_META[key].label}
                   </span>
                 </SelectItem>
