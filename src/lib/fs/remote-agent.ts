@@ -1,3 +1,5 @@
+import { toast } from "sonner";
+
 import {
   FsError,
   type FsEntry,
@@ -158,6 +160,8 @@ export class RemoteAgentProvider implements FsProvider {
   >();
   private taskWorktreeRemovedListeners = new Set<(e: { taskId: string }) => void>();
   private connecting: Promise<void> | null = null;
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     readonly label: string,
@@ -183,31 +187,24 @@ export class RemoteAgentProvider implements FsProvider {
       ws.addEventListener("error", () => {
         reject(new FsError(`Cannot reach agent at ${this.url}`, "io"));
       });
-      ws.addEventListener("close", () => {
-        // 1. Reject any outstanding RPC call so awaiters fail fast.
-        for (const p of this.pending.values())
-          p.reject(new FsError("Agent connection closed", "io"));
-        this.pending.clear();
-        // 2. Synthesize terminal events for every in-flight stream so async
-        //    consumers (xterm PTY loop) can unblock.
-        for (const [, listeners] of this.ptyExitListeners) {
-          for (const cb of listeners) {
-            try {
-              cb(null, "closed");
-            } catch {
-              /* ignore */
-            }
-          }
+      ws.addEventListener("close", (ev) => {
+        // Skip reconnect on normal close (codes 1000/1001).
+        if (ev.code === 1000 || ev.code === 1001) {
+          this.pending.clear();
+          this.ptyDataListeners.clear();
+          this.ptyExitListeners.clear();
+          this.cloneProgressListeners.clear();
+          this.cloneEndListeners.clear();
+          this.taskCreatedListeners.clear();
+          this.taskStartedListeners.clear();
+          this.taskEventListeners.clear();
+          this.taskEndedListeners.clear();
+          this.taskWorktreeRemovedListeners.clear();
+          return;
         }
-        this.ptyDataListeners.clear();
-        this.ptyExitListeners.clear();
-        this.cloneProgressListeners.clear();
-        this.cloneEndListeners.clear();
-        this.taskCreatedListeners.clear();
-        this.taskStartedListeners.clear();
-        this.taskEventListeners.clear();
-        this.taskEndedListeners.clear();
-        this.taskWorktreeRemovedListeners.clear();
+
+        // Attempt auto-reconnect with exponential backoff.
+        void this._reconnect();
       });
       ws.addEventListener("open", async () => {
         try {
@@ -225,9 +222,69 @@ export class RemoteAgentProvider implements FsProvider {
   }
 
   async disconnect(): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.ws?.close();
     this.ws = null;
     this.watchers.clear();
+  }
+
+  private async _reconnect(): Promise<void> {
+    const delays = [1000, 2000, 4000, 8000, 16000];
+    const maxAttempts = 5;
+
+    if (this.reconnectAttempts === 0) {
+      toast.loading("Reconnecting to agent…", { id: "agent-reconnect" });
+    }
+
+    if (this.reconnectAttempts >= maxAttempts) {
+      toast.error("Lost connection to agent — refresh the page", {
+        id: "agent-reconnect",
+        duration: Infinity,
+      });
+      // Clear all pending RPCs and listeners on final abandon.
+      for (const p of this.pending.values()) p.reject(new FsError("Agent connection closed", "io"));
+      this.pending.clear();
+      for (const [, listeners] of this.ptyExitListeners) {
+        for (const cb of listeners) {
+          try {
+            cb(null, "closed");
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      this.ptyDataListeners.clear();
+      this.ptyExitListeners.clear();
+      this.cloneProgressListeners.clear();
+      this.cloneEndListeners.clear();
+      this.taskCreatedListeners.clear();
+      this.taskStartedListeners.clear();
+      this.taskEventListeners.clear();
+      this.taskEndedListeners.clear();
+      this.taskWorktreeRemovedListeners.clear();
+      this.reconnectAttempts = 0;
+      return;
+    }
+
+    const delay = delays[this.reconnectAttempts];
+    this.reconnectAttempts++;
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect().then(
+        () => {
+          toast.success("Reconnected", { id: "agent-reconnect" });
+          setTimeout(() => toast.dismiss("agent-reconnect"), 2000);
+          this.reconnectAttempts = 0;
+        },
+        () => {
+          void this._reconnect();
+        },
+      );
+    }, delay);
   }
 
   private onMessage(ev: MessageEvent<string>) {
