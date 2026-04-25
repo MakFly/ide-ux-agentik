@@ -6,6 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useIDE } from "@/store/ide";
 import { providerFor, type FsEntry } from "@/lib/fs";
+import { MOCK_ENABLED } from "@/lib/env";
 
 export type FileMentionPopoverProps = {
   anchorRef: React.RefObject<HTMLElement | null>;
@@ -105,7 +106,7 @@ export function FileMentionPopover({ anchorRef, query, onPick, onClose }: FileMe
   useEffect(() => {
     let cancelled = false;
     const ws = workspaces.find((w) => w.id === activeWorkspaceId);
-    if (!ws) {
+    if (!ws || (ws.source.kind === "mock" && !MOCK_ENABLED)) {
       setLoading(false);
       return;
     }
