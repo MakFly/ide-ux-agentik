@@ -264,7 +264,7 @@ function AgentCliTabs({
   const pinnedIds = usePinnedSessionIds();
   const setActiveSession = useIDE((s) => s.setActiveSession);
   const closeAgentSession = useIDE((s) => s.closeAgentSession);
-  const addAgentSession = useIDE((s) => s.addAgentSession);
+  const openNewTaskDialog = useIDE((s) => s.openNewTaskDialog);
   const pinSession = useIDE((s) => s.pinSession);
   const unpinSession = useIDE((s) => s.unpinSession);
   const currentWorktree = useCurrentWorktree();
@@ -339,7 +339,7 @@ function AgentCliTabs({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48">
             {AGENT_OPTIONS.map((a) => (
-              <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
+              <DropdownMenuItem key={a.id} onSelect={() => openNewTaskDialog(a.id)}>
                 <ProductFavicon agent={a.id} label={a.label} />
                 <span>{a.label}</span>
               </DropdownMenuItem>
@@ -460,7 +460,7 @@ function AgentCliTabs({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48">
             {AGENT_OPTIONS.map((a) => (
-              <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
+              <DropdownMenuItem key={a.id} onSelect={() => openNewTaskDialog(a.id)}>
                 <ProductFavicon agent={a.id} label={a.label} />
                 <span>{a.label}</span>
                 <span className="ml-auto font-mono text-[10px] text-muted-foreground">
@@ -522,13 +522,10 @@ export function Workspace() {
       />
       <div className="min-h-0 flex-1 overflow-hidden">
         {sessions.length === 0 || !activeSession ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
-            <div className="text-[13px] font-medium text-foreground">No CLI running</div>
-            <p className="max-w-sm text-[12.5px] text-muted-foreground">
-              Start a new CLI session from the <span className="font-mono">+ New CLI</span> button
-              above. Each session is bound to the current workspace.
-            </p>
-          </div>
+          // Empty state: render the central composer (assistant-ui Thread) so the
+          // user can type a prompt directly. Submit → taskLauncherAdapter →
+          // store.createTaskFromPrompt → new task + session-tab in this Workspace.
+          <Thread />
         ) : hasPinned ? (
           <PanelGroup orientation="horizontal" className="h-full">
             <Panel minSize={20} defaultSize={Math.round(100 / (pinnedSessions.length + 1))}>
