@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_workspace_status
   ON tasks(workspace_id, status, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_tasks_parent_session_id
+  ON tasks(parent_session_id) WHERE parent_session_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS task_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,

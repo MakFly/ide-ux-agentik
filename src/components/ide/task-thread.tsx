@@ -41,6 +41,14 @@ function eventToItems(entry: TaskLogEntry, cli: string): Item[] {
     }
     if (d.type === "item.completed") {
       const item = d.item ?? {};
+      if (item.type === "reasoning" && typeof item.text === "string") {
+        out.push({
+          id: `e${entry.id}-${entry.ts}`,
+          role: "assistant",
+          text: `<details><summary>🧠 Reasoning</summary>\n\n${item.text}\n\n</details>`,
+        });
+        return out;
+      }
       if (item.type === "assistant_message" && typeof item.text === "string") {
         out.push({ id: `e${entry.id}-${entry.ts}`, role: "assistant", text: item.text });
         return out;
@@ -78,6 +86,15 @@ function eventToItems(entry: TaskLogEntry, cli: string): Item[] {
     if (d.type === "assistant") {
       const msg = d.message ?? {};
       const items = Array.isArray(msg.content) ? msg.content : [];
+      for (const c of items) {
+        if (c?.type === "thinking" && typeof c.thinking === "string") {
+          out.push({
+            id: `e${entry.id}-${entry.ts}-think${out.length}`,
+            role: "assistant",
+            text: `<details><summary>🧠 Thinking</summary>\n\n${c.thinking}\n\n</details>`,
+          });
+        }
+      }
       const textParts = items
         .filter((c: any) => c?.type === "text" && typeof c.text === "string")
         .map((c: any) => c.text as string);
@@ -102,12 +119,59 @@ function eventToItems(entry: TaskLogEntry, cli: string): Item[] {
 }
 
 export function TaskThread({ task, workspace }: { task: Task; workspace: Workspace }) {
-  const events = useIDE((s) => s.taskEventsByTaskId[task.id] ?? EMPTY_EVENTS);
   const loadTaskLogs = useIDE((s) => s.loadTaskLogs);
+  const allTasks = useIDE((s) => s.tasksByWorkspaceId[workspace.id] ?? []);
 
+  // Helper to resolve conversation root and collect all task ids
+  const conversationTaskIds = useMemo<string[]>(() => {
+    // Find conversation root.
+    let cur = task;
+    const seen = new Set<string>();
+    while (cur.parentSessionId) {
+      if (seen.has(cur.id)) break;
+      seen.add(cur.id);
+      const parent = allTasks.find((t) => t.sessionId === cur.parentSessionId);
+      if (!parent) break;
+      cur = parent;
+    }
+    const conversationRoot = cur;
+
+    // Collect all tasks in the conversation (root + descendants).
+    const conversationTasks = [conversationRoot];
+    const queue = [conversationRoot];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const t of allTasks) {
+        if (
+          t.parentSessionId === current.sessionId &&
+          !conversationTasks.some((x) => x.id === t.id)
+        ) {
+          conversationTasks.push(t);
+          queue.push(t);
+        }
+      }
+    }
+    return conversationTasks.map((t) => t.id);
+  }, [task, allTasks]);
+
+  // Aggregate events from the conversation root and all descendants.
+  // Subscribe to all event buffers for tasks in this conversation.
+  const events = useIDE((s) => {
+    const allEvents: TaskLogEntry[] = [];
+    for (const taskId of conversationTaskIds) {
+      const taskEvents = s.taskEventsByTaskId[taskId] ?? [];
+      allEvents.push(...taskEvents);
+    }
+    allEvents.sort((a, b) => a.ts - b.ts);
+    return allEvents;
+  });
+
+  // Re-fetch logs if empty (switch UX: ensures logs are reloaded on tab switch).
   useEffect(() => {
-    void loadTaskLogs(task.id);
-  }, [task.id, loadTaskLogs]);
+    if (events.length === 0) {
+      void loadTaskLogs(task.id);
+    }
+  }, [task.id, events.length, loadTaskLogs]);
 
   // Flatten events to a stable Item list. Prepend the original prompt as the
   // first user message — task events don't replay it (codex/claude consume it
