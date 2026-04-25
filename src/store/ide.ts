@@ -2508,6 +2508,13 @@ export const useIDE = create<State>()(
 // ─── Development test hooks ───────────────────────────────────────────────────
 
 if (import.meta.env.DEV && typeof window !== "undefined") {
+  import("@/lib/chat/codex-conversation-reducer").then(({ reduceCodexEvents }) => {
+    (window as any).__test = {
+      ...(window as any).__test,
+      reduceCodex: reduceCodexEvents,
+    };
+  });
+
   (window as any).__test = {
     seedTask: (task: import("@/lib/fs/remote-agent").Task) => {
       useIDE.getState().upsertTask(task);

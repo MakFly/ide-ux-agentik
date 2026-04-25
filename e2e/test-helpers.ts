@@ -151,3 +151,25 @@ export async function clearAllSessionsInPage(page: Page): Promise<void> {
     });
   });
 }
+
+/**
+ * Push a sequence of codex events into the store for a task.
+ * Useful for simulating a complete event stream (reasoning, tools, etc).
+ */
+export async function pushCodexEventSequenceInPage(
+  page: Page,
+  taskId: string,
+  events: Array<{ ts?: number; data: unknown }>,
+): Promise<void> {
+  await waitForTestAPI(page);
+  await page.evaluate(
+    ({ tid, evts }) => {
+      const api = (window as any).__test;
+      if (!api?.pushTaskEvent) throw new Error("__test.pushTaskEvent not available");
+      for (const e of evts) {
+        api.pushTaskEvent(tid, e.data);
+      }
+    },
+    { tid: taskId, evts: events },
+  );
+}
