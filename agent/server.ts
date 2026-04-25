@@ -809,7 +809,14 @@ const methods: Record<string, Handler> = {
       `[task.create] id=${taskId} sessionId=${sessionId} ws=${wid} cli=${c} model=${m ?? "(default)"} effort=${eff ?? "(default)"} title="${t.slice(0, 60)}"`,
     );
 
-    // Create task only (session is created lazily when user opens the conversation tab)
+    // Create session first to avoid FK violation when creating task
+    sessionsRepo.create({
+      id: sessionId,
+      workspaceId: wid,
+      cli: c,
+      title: t,
+    });
+
     const createdTask = tasksRepo.create({
       id: taskId,
       workspaceId: wid,
@@ -819,6 +826,7 @@ const methods: Record<string, Handler> = {
       model: m,
       effort: eff,
       parentSessionId: parentSessionId !== undefined ? String(parentSessionId) : undefined,
+      sessionId,
     });
 
     broadcastAuthed({

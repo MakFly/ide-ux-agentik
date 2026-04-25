@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ArrowLeft } from "lucide-react";
-import { getStorage } from "@/lib/storage";
+import { getStorage, StorageNotConnected } from "@/lib/storage";
 import type { Org, User } from "@/lib/types/org";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -33,16 +33,25 @@ function OrgSettings() {
 
   useEffect(() => {
     void (async () => {
-      const storage = getStorage();
-      const o = await storage.getOrg();
-      const u = await storage.getUser();
-      if (!o || o.id !== paramId) {
-        navigate({ to: "/", replace: true });
-        return;
+      try {
+        const storage = getStorage();
+        const o = await storage.getOrg();
+        const u = await storage.getUser();
+        if (!o || o.id !== paramId) {
+          navigate({ to: "/", replace: true });
+          return;
+        }
+        setOrg(o);
+        setUser(u);
+        setLoading(false);
+      } catch (error) {
+        if (error instanceof StorageNotConnected) {
+          navigate({ to: "/", replace: true });
+        } else {
+          console.warn("[OrgSettings] Storage error:", error);
+          navigate({ to: "/", replace: true });
+        }
       }
-      setOrg(o);
-      setUser(u);
-      setLoading(false);
     })();
   }, [paramId, navigate]);
 

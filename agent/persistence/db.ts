@@ -784,6 +784,7 @@ type CreateTaskParams = {
   model?: string;
   effort?: string;
   baseRef?: string;
+  sessionId?: string;
 };
 
 export const tasksRepo = {
@@ -791,10 +792,21 @@ export const tasksRepo = {
     const db = openDb();
     const now = Date.now();
     db.prepare<
-      [string, string, string | null, string, string, string, string | null, string | null, number]
+      [
+        string,
+        string,
+        string | null,
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        string | null,
+        number,
+      ]
     >(
-      `INSERT INTO tasks (id, workspace_id, parent_session_id, title, prompt, cli, model, effort, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, parent_session_id, title, prompt, cli, model, effort, session_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       params.id,
       params.workspaceId,
@@ -804,6 +816,7 @@ export const tasksRepo = {
       params.cli,
       params.model ?? null,
       params.effort ?? null,
+      params.sessionId ?? null,
       now,
     );
     return tasksRepo.get(params.id)!;

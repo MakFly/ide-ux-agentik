@@ -1,7 +1,7 @@
 import { createFileRoute, Outlet, useNavigate } from "@tanstack/react-router";
 import { createContext, useEffect, useState } from "react";
 import type { Org } from "@/lib/types/org";
-import { getStorage } from "@/lib/storage";
+import { getStorage, StorageNotConnected } from "@/lib/storage";
 import { useIDE } from "@/store/ide";
 
 export const OrgContext = createContext<Org | null>(null);
@@ -18,17 +18,26 @@ function OrgLayout() {
 
   useEffect(() => {
     void (async () => {
-      const storage = getStorage();
-      const fetchedOrg = await storage.getOrg();
-      if (!fetchedOrg || fetchedOrg.id !== paramId) {
-        navigate({ to: "/", replace: true });
-        return;
+      try {
+        const storage = getStorage();
+        const fetchedOrg = await storage.getOrg();
+        if (!fetchedOrg || fetchedOrg.id !== paramId) {
+          navigate({ to: "/", replace: true });
+          return;
+        }
+        const store = useIDE.getState();
+        store.setCurrentOrgId(paramId);
+        await store.hydrateWorkspacesFromStorage(paramId);
+        setOrg(fetchedOrg);
+        setLoading(false);
+      } catch (error) {
+        if (error instanceof StorageNotConnected) {
+          navigate({ to: "/", replace: true });
+        } else {
+          console.warn("[OrgLayout] Storage error:", error);
+          navigate({ to: "/", replace: true });
+        }
       }
-      const store = useIDE.getState();
-      store.setCurrentOrgId(paramId);
-      await store.hydrateWorkspacesFromStorage(paramId);
-      setOrg(fetchedOrg);
-      setLoading(false);
     })();
   }, [paramId, navigate]);
 

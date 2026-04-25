@@ -2217,9 +2217,7 @@ export const useIDE = create<State>()(
             }));
           }
 
-          // taskCreate now returns { id, sessionId } but doesn't persist it yet.
-          // We'll use a deterministic sessionId based on taskId.
-          const { id: taskId } = await provider.taskCreate({
+          const { id: taskId, sessionId } = await provider.taskCreate({
             workspaceId: workspace.id,
             title: prompt.split("\n")[0].slice(0, 60) || "Untitled task",
             prompt,
@@ -2227,18 +2225,17 @@ export const useIDE = create<State>()(
             model,
             effort,
           });
-          console.info(`[store.createTaskFromPrompt] taskCreate ok id=${taskId}`);
+          console.info(
+            `[store.createTaskFromPrompt] taskCreate ok id=${taskId} sessionId=${sessionId}`,
+          );
 
           await provider.taskStart(taskId);
           console.info(`[store.createTaskFromPrompt] taskStart ok id=${taskId}`);
 
-          // Surface the task as an in-Workspace session tab.
-          // Use deterministic sessionId for persistence on first open.
           const cliKind = cli as TerminalKind;
-          const sessionId = `${taskId}-session`;
           const synthTask: import("@/lib/fs/remote-agent").Task = {
             id: taskId,
-            sessionId: null, // Not yet persisted in DB
+            sessionId,
             workspaceId: workspace.id,
             title: prompt.split("\n")[0].slice(0, 40),
             prompt,
