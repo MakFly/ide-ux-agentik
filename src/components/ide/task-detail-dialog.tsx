@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { RemoteAgentProvider, type Task } from "@/lib/fs/remote-agent";
 import { useIDE, type Workspace } from "@/store/ide";
-import { TaskTranscript } from "@/components/ide/task-transcript";
+import { TaskConversation } from "@/components/ide/task-conversation";
 
 function statusBadge(status: Task["status"]) {
   const map: Record<
@@ -195,13 +195,7 @@ export const TaskDetailDialog: FC<{
             value="transcript"
             className="flex min-h-0 flex-1 flex-col px-5 py-3 data-[state=inactive]:hidden"
           >
-            <TaskTranscript
-              task={task}
-              workspace={workspace}
-              onChildDispatched={() => {
-                /* keep dialog open — user can watch the parent transcript still */
-              }}
-            />
+            <TaskConversation task={task} workspace={workspace} />
           </TabsContent>
         </Tabs>
 
