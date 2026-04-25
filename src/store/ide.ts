@@ -72,6 +72,7 @@ export type Workspace = {
   name: string;
   color: string;
   gitUrl?: string;
+  rootPath?: string;
   source: WorkspaceSource;
 };
 
@@ -240,6 +241,7 @@ type State = {
   tasksLoading: boolean;
   fileTreeLoading: boolean;
   sessionsLoading: boolean;
+  _hydrated: boolean;
   hydrate: () => void;
 
   // Flat legacy fields — kept for retrocompat with FilesPanel (consumers exist, do not remove).
@@ -293,7 +295,11 @@ type State = {
   sendMessage: (content: string) => void;
   addBranch: (workspaceId: string, name: string) => void;
   toggleStar: (branchId: string) => void;
-  addWorkspace: (name: string, source?: WorkspaceSource) => string;
+  addWorkspace: (
+    name: string,
+    source?: WorkspaceSource,
+    opts?: { rootPath?: string; gitUrl?: string },
+  ) => string;
   addTask: (worktreeId: string, title: string, description?: string) => void;
   updateTask: (
     worktreeId: string,
@@ -832,6 +838,7 @@ export const useIDE = create<State>()(
       tasksLoading: true,
       fileTreeLoading: true,
       sessionsLoading: true,
+      _hydrated: false,
       hydrate: () => {
         set({
           branchesLoading: false,
@@ -1388,7 +1395,7 @@ export const useIDE = create<State>()(
           return { branchesByWorkspaceId: next };
         }),
 
-      addWorkspace: (name, source) => {
+      addWorkspace: (name, source, opts) => {
         const id = crypto.randomUUID();
         const branchId = crypto.randomUUID();
         const worktreeId = crypto.randomUUID();
@@ -1408,6 +1415,8 @@ export const useIDE = create<State>()(
               name,
               color,
               source: effectiveSource,
+              ...(opts?.rootPath ? { rootPath: opts.rootPath } : {}),
+              ...(opts?.gitUrl ? { gitUrl: opts.gitUrl } : {}),
             },
           ],
           branchesByWorkspaceId: {
@@ -1965,7 +1974,6 @@ export const useIDE = create<State>()(
       onRehydrateStorage: () => (state, error) => {
         if (error) {
           console.warn("[store] rehydration error:", error);
-          return;
         }
         // Defer one tick: the `useIDE` const isn't bound yet while create()
         // is still returning, and calling useIDE.getState() synchronously
@@ -1973,7 +1981,8 @@ export const useIDE = create<State>()(
         // action already.
         setTimeout(() => {
           try {
-            void state?.hydrateSessionsFromDb();
+            useIDE.setState({ _hydrated: true });
+            if (!error) void state?.hydrateSessionsFromDb();
           } catch (e) {
             console.warn("[store] hydrateSessionsFromDb failed:", e);
           }
@@ -1984,6 +1993,10 @@ export const useIDE = create<State>()(
 );
 
 // ─── Derived-scope hooks ──────────────────────────────────────────────────────
+
+export function useStoreHydrated(): boolean {
+  return useIDE((s) => s._hydrated);
+}
 
 export function useCurrentScopeKey(): ScopeKey {
   const ws = useIDE((s) => s.activeWorkspaceId);

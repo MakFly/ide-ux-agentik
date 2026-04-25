@@ -5,6 +5,7 @@ import { useEffect, useRef } from "react";
 import { z } from "zod";
 import type { TabId } from "@/store/ide";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { OnboardingScreen } from "@/components/ide/onboarding-screen";
 import { TopBar } from "@/components/ide/TopBar";
 import { Sidebar } from "@/components/ide/Sidebar";
 import { Workspace } from "@/components/ide/Workspace";
@@ -12,7 +13,7 @@ import { FilesPanel } from "@/components/ide/FilesPanel";
 import { StatusBar } from "@/components/ide/StatusBar";
 import { TerminalPanel } from "@/components/ide/terminal-panel";
 import { EditorPanel } from "@/components/ide/editor-panel";
-import { useIDE, useCurrentActiveTab, useCurrentOpenFiles } from "@/store/ide";
+import { useIDE, useCurrentActiveTab, useCurrentOpenFiles, useStoreHydrated } from "@/store/ide";
 import { MOCK_ENABLED } from "@/lib/env";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -193,6 +194,18 @@ function Index() {
       replace: true,
     });
   }, [activeWorkspaceId, activeBranchId, activeTab, navigate]);
+
+  const hydrated = useStoreHydrated();
+  if (!hydrated) {
+    return <div className="h-svh w-screen bg-background" />;
+  }
+  if (workspaces.length === 0) {
+    return (
+      <TooltipProvider delayDuration={200}>
+        <OnboardingScreen />
+      </TooltipProvider>
+    );
+  }
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>

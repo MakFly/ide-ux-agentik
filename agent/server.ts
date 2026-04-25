@@ -611,8 +611,10 @@ const methods: Record<string, Handler> = {
       );
     }
 
-    const resolved = path.resolve(destPath);
     const homeDir = process.env.HOME || "/root";
+    const resolved = path.isAbsolute(destPath)
+      ? path.resolve(destPath)
+      : path.resolve(homeDir, destPath);
     if (!resolved.startsWith(homeDir)) {
       throw new Error(`git.clone: dest must be under HOME directory: ${destPath}`);
     }
