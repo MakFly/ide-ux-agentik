@@ -1957,6 +1957,29 @@ export const useIDE = create<State>()(
         const workspace = state.workspaces.find((w) => w.id === workspaceId);
         if (!workspace || workspace.source.kind !== "remote-agent") return;
 
+        // Idempotency guard: if a provider is already wired (Strict Mode runs
+        // effects twice in dev; or another component triggered hydrate), just
+        // re-pull the task list and skip listener re-registration to avoid
+        // duplicate WS event handlers (which double every upsert/event).
+        const existingProvider = state.agentProvidersByWorkspaceId[workspaceId];
+        if (existingProvider) {
+          try {
+            const tasks = await existingProvider.taskList({ workspaceId });
+            set((s) => {
+              const dismissed = new Set(s.dismissedTaskIds);
+              return {
+                tasksByWorkspaceId: {
+                  ...s.tasksByWorkspaceId,
+                  [workspaceId]: tasks.filter((t) => !dismissed.has(t.id)),
+                },
+              };
+            });
+          } catch (err) {
+            console.warn(`[store.tasks] hydrateTasks refresh failed:`, err);
+          }
+          return;
+        }
+
         try {
           const provider = new RemoteAgentProvider(
             workspace.source.label,
@@ -2175,12 +2198,24 @@ export const useIDE = create<State>()(
           console.info(
             `[store.createTaskFromPrompt] creating task ws=${workspace.id} cli=${cli} prompt=${prompt.length} chars`,
           );
-          const provider = new RemoteAgentProvider(
-            workspace.source.label,
-            workspace.source.url,
-            workspace.source.token,
-          );
-          await provider.connect();
+          // Reuse the persisted provider so we don't double-subscribe to WS events
+          // (a fresh provider would mean two task.created/event/ended listeners,
+          // causing every event handler to fire twice → duplicate keys in React).
+          let provider = state.agentProvidersByWorkspaceId[workspace.id];
+          if (!provider) {
+            provider = new RemoteAgentProvider(
+              workspace.source.label,
+              workspace.source.url,
+              workspace.source.token,
+            );
+            await provider.connect();
+            set((s) => ({
+              agentProvidersByWorkspaceId: {
+                ...s.agentProvidersByWorkspaceId,
+                [workspace.id]: provider!,
+              },
+            }));
+          }
 
           // taskCreate now returns { id, sessionId } but doesn't persist it yet.
           // We'll use a deterministic sessionId based on taskId.
@@ -2222,13 +2257,18 @@ export const useIDE = create<State>()(
             endedAt: null,
           };
           set((s) => {
+            // Dedup by id — if the `task.created` WS event already populated
+            // tasksByWorkspaceId before this set runs (race), don't push twice.
             const allTasks = s.tasksByWorkspaceId[workspace.id] ?? [];
+            const tasksWithSynth = allTasks.some((t) => t.id === synthTask.id)
+              ? allTasks
+              : [...allTasks, synthTask];
             const existing = s.sessionsByWorkspaceId[workspace.id] ?? [];
-            const nextSessions = buildSessionTabFor(synthTask, [...allTasks, synthTask], existing);
+            const nextSessions = buildSessionTabFor(synthTask, tasksWithSynth, existing);
             return {
               tasksByWorkspaceId: {
                 ...s.tasksByWorkspaceId,
-                [workspace.id]: [...allTasks, synthTask],
+                [workspace.id]: tasksWithSynth,
               },
               sessionsByWorkspaceId: {
                 ...s.sessionsByWorkspaceId,
@@ -2334,12 +2374,23 @@ export const useIDE = create<State>()(
         }
         if (!workspace || workspace.source.kind !== "remote-agent") return;
         try {
-          const provider = new RemoteAgentProvider(
-            workspace.source.label,
-            workspace.source.url,
-            workspace.source.token,
-          );
-          await provider.connect();
+          // Reuse the persisted provider; creating new ones double-subscribes
+          // every WS event listener.
+          let provider = state.agentProvidersByWorkspaceId[workspace.id];
+          if (!provider) {
+            provider = new RemoteAgentProvider(
+              workspace.source.label,
+              workspace.source.url,
+              workspace.source.token,
+            );
+            await provider.connect();
+            set((s) => ({
+              agentProvidersByWorkspaceId: {
+                ...s.agentProvidersByWorkspaceId,
+                [workspace.id]: provider!,
+              },
+            }));
+          }
           const rows = await provider.taskLogsList({ taskId, limit: 2000 });
           set((s) => ({
             taskEventsByTaskId: { ...s.taskEventsByTaskId, [taskId]: rows },
