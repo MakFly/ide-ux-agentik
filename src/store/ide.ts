@@ -951,7 +951,6 @@ export const useIDE = create<State>()(
         const existingRoot = state.treeByScope[sk];
         const node = existingRoot ? findNodeByPath(existingRoot, path) : undefined;
         if (node?.loaded) return;
-        if (path.includes("/")) return; // FilesPanel n'affiche que 2 niveaux — skip deep
 
         const ws = workspaceForScope(state.workspaces, sk);
         if (!ws) return;
