@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ES2022"],
+    "jsx": "preserve"
+  },
+  "include": ["agent/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

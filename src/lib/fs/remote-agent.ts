@@ -239,9 +239,23 @@ export class RemoteAgentProvider implements FsProvider {
     this.watchers.clear();
   }
 
+  private _clearPending(reason: string): void {
+    for (const p of this.pending.values()) {
+      try {
+        p.reject(new FsError(reason, "io"));
+      } catch {
+        /* ignore */
+      }
+    }
+    this.pending.clear();
+  }
+
   private async _reconnect(): Promise<void> {
     const delays = [1000, 2000, 4000, 8000, 16000];
     const maxAttempts = 5;
+
+    // Reject all in-flight RPCs immediately so callers don't hang during reconnect.
+    this._clearPending("Agent connection lost — reconnecting");
 
     // Skip the toast on the first attempt: short flaps (HMR, brief network
     // blip, dev-agent restart) usually reconnect within ~1s and the toast

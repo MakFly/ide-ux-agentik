@@ -1323,34 +1323,38 @@ export const useIDE = create<State>()(
                   ws.source.token,
                 );
                 await provider.connect();
-                const sessions = await persistence.sessions.list(provider, ws.id);
-                if (sessions.length === 0) {
+                try {
+                  const sessions = await persistence.sessions.list(provider, ws.id);
+                  if (sessions.length === 0) {
+                    anySuccess = true;
+                    continue;
+                  }
+                  const workspaceTerminals = sessions.map((s) => ({
+                    id: s.id,
+                    kind: (s.cli as import("@/store/ide").TerminalKind) ?? "codex",
+                    title: s.title ?? s.cli,
+                    status: (s.status === "busy" ? "busy" : "idle") as "ready" | "busy" | "idle",
+                    workspaceId: ws.id,
+                    lastCommand: s.cli,
+                  }));
+                  const sessionModes: Record<string, "chat" | "terminal"> = {};
+                  for (const s of sessions) {
+                    sessionModes[s.id] = s.mode ?? "chat";
+                  }
+                  set((cur) => ({
+                    sessionsByWorkspaceId: {
+                      ...cur.sessionsByWorkspaceId,
+                      [ws.id]: workspaceTerminals,
+                    },
+                    sessionModeBySessionId: {
+                      ...cur.sessionModeBySessionId,
+                      ...sessionModes,
+                    },
+                  }));
                   anySuccess = true;
-                  continue;
+                } finally {
+                  await provider.disconnect().catch(() => {});
                 }
-                const workspaceTerminals = sessions.map((s) => ({
-                  id: s.id,
-                  kind: (s.cli as import("@/store/ide").TerminalKind) ?? "codex",
-                  title: s.title ?? s.cli,
-                  status: (s.status === "busy" ? "busy" : "idle") as "ready" | "busy" | "idle",
-                  workspaceId: ws.id,
-                  lastCommand: s.cli,
-                }));
-                const sessionModes: Record<string, "chat" | "terminal"> = {};
-                for (const s of sessions) {
-                  sessionModes[s.id] = s.mode ?? "chat";
-                }
-                set((cur) => ({
-                  sessionsByWorkspaceId: {
-                    ...cur.sessionsByWorkspaceId,
-                    [ws.id]: workspaceTerminals,
-                  },
-                  sessionModeBySessionId: {
-                    ...cur.sessionModeBySessionId,
-                    ...sessionModes,
-                  },
-                }));
-                anySuccess = true;
               } catch (e) {
                 if (attempt === MAX_ATTEMPTS) {
                   console.warn(

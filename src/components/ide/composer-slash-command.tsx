@@ -24,22 +24,11 @@ const BUILTINS: SlashCommand[] = [
   { id: "help", label: "/help", description: "Show available commands and usage", kind: "builtin" },
 ];
 
-let _useSkills: (() => Array<{ id: string; name: string; description?: string }>) | null = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  _useSkills = require("@/lib/skills").useSkills;
-} catch {
-  // TODO: replace once agent A4 ships @/lib/skills
-}
-
-let _useMcpServers: (() => Array<{ id: string; name: string; description?: string }>) | null = null;
-try {
-  // eslint-disable name/no-require-imports
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  _useMcpServers = require("@/lib/mcp").useMcpServers;
-} catch {
-  // TODO: replace once agent A10 ships @/lib/mcp
-}
+// @/lib/skills and @/lib/mcp don't exist yet (shipped by agents A4 / A10).
+// We use type-only stubs so TypeScript is happy and the runtime falls back to [].
+type SkillHook = () => Array<{ id: string; name: string; description?: string }>;
+const _useSkills: SkillHook | null = null; // TODO: replace once agent A4 ships @/lib/skills
+const _useMcpServers: SkillHook | null = null; // TODO: replace once agent A10 ships @/lib/mcp
 
 const KIND_ICON: Record<CommandKind, React.ReactNode> = {
   builtin: <Terminal className="size-3.5 text-muted-foreground" />,

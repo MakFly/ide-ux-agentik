@@ -82,6 +82,45 @@ function safeEnv(extra: Record<string, string> = {}): Record<string, string> {
   return { ...base, ...extra };
 }
 
+/**
+ * Allowlist of per-command argument patterns for exec.run.
+ * Commands not listed here accept any args (legacy behaviour — `return` early).
+ * Covered: git, node, bun, bunx, npm (matches DEFAULT_EXEC_ALLOWLIST).
+ */
+const EXEC_ARG_ALLOWLIST: Record<string, RegExp[]> = {
+  git: [/^[a-z][a-z0-9-]+$/i, /^--?[a-z][a-z0-9-]*(=.+)?$/, /^[A-Za-z0-9_./-]+$/, /^HEAD(~\d+)?$/, /^[a-f0-9]{4,40}$/],
+  node: [/^[A-Za-z0-9_./-]+\.(c?js|mjs|ts)$/],
+  bun: [/^run$/, /^[A-Za-z0-9_./-]+$/],
+  bunx: [/^[@A-Za-z0-9_./-]+$/, /^--?[a-z][a-z0-9-]*(=.+)?$/],
+  npm: [/^(install|i|ci|run|test|exec)$/, /^[A-Za-z0-9_@./-]+$/, /^--?[a-z][a-z0-9-]*(=.+)?$/],
+};
+
+function assertExecArgsAllowed(cmd: string, args: string[]): void {
+  const base = path.basename(cmd);
+  const patterns = EXEC_ARG_ALLOWLIST[base];
+  if (!patterns) return; // commands without allowlist accept any args (legacy behaviour)
+  for (const a of args) {
+    if (!patterns.some(rx => rx.test(a))) {
+      throw new Error(`exec.run: arg "${a}" not allowed for "${base}"`);
+    }
+  }
+}
+
+/** Global deduplication guard: prevents the same taskId from being started twice
+ * across concurrent WebSocket connections or rapid re-sends. */
+const globalRunningTaskIds = new Set<string>();
+
+/** Strip any client-supplied env key that is not in the server's SAFE_ENV_KEYS list. */
+function sanitizeClientEnv(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object") return {};
+  const allowed = new Set<string>(SAFE_ENV_KEYS as unknown as string[]);
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (allowed.has(k) && typeof v === "string") out[k] = v;
+  }
+  return out;
+}
+
 const ALLOWED_CHAT_FLAGS: Record<string, ReadonlySet<string>> = {
   codex: new Set(["--model", "-m", "--effort", "--profile", "-c"]),
   claude: new Set([
@@ -648,6 +687,13 @@ const methods: Record<string, Handler> = {
     const spawnCmd = cmd ? String(cmd) : shell;
     assertSpawnAllowed(spawnCmd, PTY_ALLOWLIST, "pty");
     const spawnArgs: string[] = Array.isArray(args) ? (args as string[]) : cmd ? [] : ["-il"];
+
+    // Prevent shell injection via args on shell binaries (interactive mode only).
+    const SHELL_BINARIES = new Set(["bash", "zsh", "sh", "fish"]);
+    const baseName = path.basename(spawnCmd);
+    if (SHELL_BINARIES.has(baseName) && spawnArgs.length > 0) {
+      throw new Error("pty.spawn: shell binaries must not receive args (use interactive mode)");
+    }
     const termCols = typeof cols === "number" ? cols : 80;
     const termRows = typeof rows === "number" ? rows : 24;
 
@@ -659,10 +705,7 @@ const methods: Record<string, Handler> = {
     }
 
     const id = randomUUID();
-    const mergedEnv = safeEnv({
-      TERM: "xterm-256color",
-      ...((env as Record<string, string> | undefined) ?? {}),
-    });
+    const mergedEnv = safeEnv({ TERM: "xterm-256color", ...sanitizeClientEnv(env) });
 
     if (nodePty) {
       const ptyProc = nodePty.spawn(spawnCmd, spawnArgs, {
@@ -686,6 +729,7 @@ const methods: Record<string, Handler> = {
         ctx.ws.send(JSON.stringify({ jsonrpc: "2.0", method: "pty.data", params: { id, data } }));
       });
       ptyProc.onExit(({ exitCode, signal }) => {
+        if (!session.alive) return; // already killed explicitly — skip parasitic broadcast
         session.alive = false;
         ctx.ws.send(
           JSON.stringify({
@@ -1423,8 +1467,15 @@ const methods: Record<string, Handler> = {
     const taskId = String(id ?? "").trim();
     if (!taskId) throw new Error("task.start: id is required");
 
+    // Global deduplication guard across all connections.
+    if (globalRunningTaskIds.has(taskId)) throw new Error(`task.start: task ${taskId} already running`);
+    globalRunningTaskIds.add(taskId);
+
     const task = tasksRepo.get(taskId);
-    if (!task) throw new Error(`task.start: task not found: ${taskId}`);
+    if (!task) {
+      globalRunningTaskIds.delete(taskId);
+      throw new Error(`task.start: task not found: ${taskId}`);
+    }
 
     if (ctx.runningTasks.size >= 3) {
       ctx.pendingTasks.push(taskId);
@@ -1452,6 +1503,7 @@ const methods: Record<string, Handler> = {
       try {
         const currentTask = tasksRepo.get(taskId);
         if (!currentTask) {
+          globalRunningTaskIds.delete(taskId);
           ctx.runningTasks.delete(taskId);
           drainPendingTasks(ctx);
           return;
@@ -1481,6 +1533,7 @@ const methods: Record<string, Handler> = {
             params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
           });
           await autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
+          globalRunningTaskIds.delete(taskId);
           ctx.runningTasks.delete(taskId);
           drainPendingTasks(ctx);
           return;
@@ -1605,6 +1658,7 @@ const methods: Record<string, Handler> = {
           }
 
           ctx.taskSessions.delete(sessionId);
+          globalRunningTaskIds.delete(taskId);
           ctx.runningTasks.delete(taskId);
           drainPendingTasks(ctx);
         });
@@ -1636,6 +1690,7 @@ const methods: Record<string, Handler> = {
           void autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
 
           ctx.taskSessions.delete(sessionId);
+          globalRunningTaskIds.delete(taskId);
           ctx.runningTasks.delete(taskId);
           drainPendingTasks(ctx);
         });
@@ -1656,6 +1711,7 @@ const methods: Record<string, Handler> = {
         if (t?.worktree_path || t?.branch_name) {
           void autoCleanupFailedTask(root, taskId, t?.worktree_path, t?.branch_name);
         }
+        globalRunningTaskIds.delete(taskId);
         ctx.runningTasks.delete(taskId);
         drainPendingTasks(ctx);
       }
@@ -1675,16 +1731,30 @@ const methods: Record<string, Handler> = {
 
     console.info(`[task.cancel] id=${taskId} prev_status=${task.status}`);
 
+    // Kill the primary session (legacy path).
     if (task.session_id) {
       const session = ctx.taskSessions.get(task.session_id);
       if (session) {
-        try {
-          session.proc.kill("SIGTERM");
-        } catch {
-          /* ignore */
-        }
+        try { session.proc.kill("SIGTERM"); } catch { /* ignore */ }
         session.alive = false;
         ctx.taskSessions.delete(task.session_id);
+      }
+    }
+
+    // Also kill any additional sessions attached to this task (peer sessions).
+    const attachedSessions = taskSessionsRepo.list(taskId);
+    for (const ts of attachedSessions) {
+      if (ts.session_id === task.session_id) continue; // already handled above
+      const session = ctx.taskSessions.get(ts.session_id);
+      if (session) {
+        try { session.proc.kill("SIGTERM"); } catch { /* ignore */ }
+        session.alive = false;
+        ctx.taskSessions.delete(ts.session_id);
+        broadcastAuthed({
+          jsonrpc: "2.0",
+          method: "task.ended",
+          params: { taskId, status: "cancelled", exitCode: null },
+        });
       }
     }
 
@@ -1699,6 +1769,7 @@ const methods: Record<string, Handler> = {
       params: { taskId, status: "cancelled", exitCode: null },
     });
 
+    globalRunningTaskIds.delete(taskId);
     ctx.runningTasks.delete(taskId);
     drainPendingTasks(ctx);
 
@@ -2113,13 +2184,14 @@ const methods: Record<string, Handler> = {
   async "exec.run"({ cmd, args, cwd, env, timeoutMs }, _ctx) {
     if (!cmd) throw new Error("exec.run: cmd is required");
     assertSpawnAllowed(String(cmd), EXEC_ALLOWLIST, "exec");
+    assertExecArgsAllowed(String(cmd), Array.isArray(args) ? args as string[] : []);
     let resolvedCwd: string;
     try {
       resolvedCwd = cwd ? safeResolve(String(cwd)) : root;
     } catch {
       resolvedCwd = root;
     }
-    const mergedEnv = safeEnv((env as Record<string, string> | undefined) ?? {});
+    const mergedEnv = safeEnv({ TERM: "xterm-256color", ...sanitizeClientEnv(env) });
     const proc = cpSpawn(String(cmd), Array.isArray(args) ? (args as string[]) : [], {
       cwd: resolvedCwd,
       env: mergedEnv,
@@ -2557,11 +2629,11 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
     }
     ctx.gitCloneSessions.clear();
     for (const session of ctx.taskSessions.values()) {
+      try { session.proc.kill("SIGTERM"); } catch { /* ignore */ }
       try {
-        session.proc.kill("SIGTERM");
-      } catch {
-        /* ignore */
-      }
+        tasksRepo.update(session.taskId, { status: "cancelled", ended_at: Date.now() });
+        globalRunningTaskIds.delete(session.taskId);
+      } catch (e) { console.error("[ws.close] failed to cancel task:", e); }
     }
     ctx.taskSessions.clear();
     if (ctx.authTimeout) clearTimeout(ctx.authTimeout);

@@ -515,7 +515,7 @@ class WriteQueue {
       this.timer = null;
     }
     if (this.buf.length === 0) return;
-    const batch = this.buf.splice(0);
+    const batch = [...this.buf]; // snapshot — don't clear until commit succeeds
     const db = openDb();
     const run = db.transaction(() => {
       for (const entry of batch) {
@@ -529,7 +529,12 @@ class WriteQueue {
         }
       }
     });
-    run();
+    try {
+      run();
+      this.buf.splice(0, batch.length); // only clear after successful commit
+    } catch (e) {
+      console.error("[WriteQueue] flush failed, batch retained for retry:", e);
+    }
   }
 }
 

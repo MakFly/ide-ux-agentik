@@ -15,7 +15,9 @@
     "test": "echo 'No tests configured' && exit 0",
     "test:e2e": "playwright test",
     "test:e2e:agent": "PLAYWRIGHT_WITH_AGENT=1 playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "typecheck": "tsc --noEmit",
+    "typecheck:agent": "tsc -p tsconfig.agent.json --noEmit"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.12.25",
@@ -115,6 +117,7 @@
     "@types/node": "^22.16.5",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.0.4",
     "eslint": "^9.32.0",
     "eslint-config-prettier": "^10.1.1",

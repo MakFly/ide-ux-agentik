@@ -249,7 +249,10 @@ export function PtyTerminal({
       void provider?.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeWorkspaceId, cmd, JSON.stringify(args), resetKey]);
+  }, [activeWorkspaceId, cmd, JSON.stringify(args), resetKey, codexAuth, codexApiKey, extraEnv, injectCodexAuth, injectCodexApiKey, banner]);
+  // NOTE: `extraEnv` must be a stable reference (created with useMemo in the parent) to avoid
+  // re-spawning the PTY on every render. If `extraEnv` is created inline in the parent, add
+  // `useMemo(() => ({ ...envValues }), [...deps])` there to stabilise the reference.
 
   if (!isRemote) {
     return (
