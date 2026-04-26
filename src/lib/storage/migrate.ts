@@ -4,7 +4,7 @@
  * server-adapter.ts). Runs once at boot, silently.
  */
 
-const LEGACY_PREFIXES = ["ide.org.", "ide.user.", "ide.ws."];
+const LEGACY_PREFIXES = ["ide.org.", "ide.user.", "ide.ws.", "ide.agent.", "ide.dbstamp."];
 
 export function dropLegacyClientStore(): { removed: number } {
   if (typeof window === "undefined") return { removed: 0 };

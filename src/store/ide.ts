@@ -2745,7 +2745,19 @@ export const useIDE = create<State>()(
     }),
     {
       name: "ide-ux-agentik",
-      storage: createJSONStorage(() => localStorage),
+      // Memory-only storage: nothing is read from or written to localStorage.
+      // The single source of truth is the agent SQLite (see ServerStorageAdapter
+      // and persistence.* RPCs). The store re-hydrates from the server on each
+      // boot via hydrateSessionsFromDb (kicked off in onRehydrateStorage).
+      storage: createJSONStorage(() => ({
+        getItem: () => null,
+        setItem: () => {
+          /* no-op: zero localStorage policy */
+        },
+        removeItem: () => {
+          /* no-op */
+        },
+      })),
       version: 1,
       migrate: (_persistedState, _version) => _persistedState as State,
       partialize: (state) =>

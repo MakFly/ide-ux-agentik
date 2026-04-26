@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { storage, setEndpoint, resetProviderCache } from "@/lib/storage";
+import { storage, getEndpoint } from "@/lib/storage";
 import { useIDE } from "@/store/ide";
 import type { Org, User } from "@/lib/types/org";
 import type { Workspace } from "@/store/ide";
@@ -84,22 +84,18 @@ export function SetupWizard() {
   };
 
   const handleAgentNext = () => {
-    if (!agentDraft) {
-      toast.error("Agent URL and token are required (no localStorage fallback)");
-      return;
-    }
-    const url = agentDraft.url.trim();
-    const token = agentDraft.token.trim();
-    if (!url || !token) {
-      toast.error("Agent URL and token are required");
-      return;
-    }
-    // Persist the endpoint immediately so the storage layer (server-backed)
-    // can talk to the agent for the rest of the wizard.
-    setEndpoint({ url, token, label: agentDraft.label.trim() || new URL(url).host });
-    resetProviderCache();
+    // Endpoint is now resolved at runtime from VITE_DEV_AGENT_URL/TOKEN
+    // (build-time injection). The form is read-only / informational.
     setStep(4);
   };
+
+  // Skip the agent step entirely when the endpoint is already resolved at
+  // build time — there is nothing for the user to configure here.
+  useEffect(() => {
+    if (step === 3 && getEndpoint()) {
+      setStep(4);
+    }
+  }, [step]);
 
   const handleWorkspaceFinish = async () => {
     if (!workspaceDraft) {
