@@ -1821,7 +1821,22 @@ export const useIDE = create<State>()(
         });
       },
 
-      closeAgentSession: (sessionId) =>
+      closeAgentSession: (sessionId) => {
+        // Persist the kill: without this, hydrateSessionsFromDb resurrects the
+        // tab on every refresh (the row stays in SQLite). Find the workspace
+        // the session belonged to and call sessions.delete via its provider.
+        const stateNow = get();
+        const owningWorkspaceId = Object.entries(stateNow.sessionsByWorkspaceId).find(([, list]) =>
+          list.some((t) => t.id === sessionId),
+        )?.[0];
+        const provider = owningWorkspaceId
+          ? stateNow.agentProvidersByWorkspaceId[owningWorkspaceId]
+          : undefined;
+        if (provider) {
+          void persistence.sessions
+            .delete(provider, sessionId)
+            .catch((err) => console.warn("[closeAgentSession] DB delete failed:", err));
+        }
         set((s) => {
           const nextSessions: Record<string, WorkspaceTerminal[]> = {};
           for (const [wsId, list] of Object.entries(s.sessionsByWorkspaceId)) {
@@ -1848,7 +1863,8 @@ export const useIDE = create<State>()(
             messagesBySessionId: restMessages,
             pinnedSessionIdsByWorkspaceId: nextPinned,
           };
-        }),
+        });
+      },
 
       pinSession: (sessionId) =>
         set((s) => {
