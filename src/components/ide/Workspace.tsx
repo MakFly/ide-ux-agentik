@@ -11,7 +11,7 @@ import {
   type TerminalKind,
   type WorkspaceTerminal,
 } from "@/store/ide";
-import { UnifiedChat } from "@/components/ide/unified-chat";
+import { Thread } from "@/components/assistant-ui/thread";
 import {
   AgentSessionView,
   SessionModeToggle,
@@ -73,7 +73,13 @@ function AgentCliTabs({
   const pinnedIds = usePinnedSessionIds();
   const setActiveSession = useIDE((s) => s.setActiveSession);
   const closeAgentSession = useIDE((s) => s.closeAgentSession);
-  const openNewTaskDialog = useIDE((s) => s.openNewTaskDialog);
+  const setActiveAgent = useIDE((s) => s.setActiveAgent);
+  // Deselect the current session and preset the CLI so the central <Thread />
+  // empty-state takes over (its composer reads activeAgent for placeholder/model).
+  const focusComposer = (cli: TerminalKind) => {
+    setActiveAgent(cli);
+    setActiveSession("");
+  };
   const pinSession = useIDE((s) => s.pinSession);
   const unpinSession = useIDE((s) => s.unpinSession);
   const currentWorktree = useCurrentWorktree();
@@ -148,7 +154,7 @@ function AgentCliTabs({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48">
             {AGENT_OPTIONS.map((a) => (
-              <DropdownMenuItem key={a.id} onSelect={() => openNewTaskDialog(a.id)}>
+              <DropdownMenuItem key={a.id} onSelect={() => focusComposer(a.id)}>
                 <ProductFavicon agent={a.id} label={a.label} />
                 <span>{a.label}</span>
               </DropdownMenuItem>
@@ -269,7 +275,7 @@ function AgentCliTabs({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48">
             {AGENT_OPTIONS.map((a) => (
-              <DropdownMenuItem key={a.id} onSelect={() => openNewTaskDialog(a.id)}>
+              <DropdownMenuItem key={a.id} onSelect={() => focusComposer(a.id)}>
                 <ProductFavicon agent={a.id} label={a.label} />
                 <span>{a.label}</span>
                 <span className="ml-auto font-mono text-[10px] text-muted-foreground">
@@ -332,7 +338,9 @@ export function Workspace() {
       />
       <div className="min-h-0 flex-1 overflow-hidden">
         {sessions.length === 0 || !activeSession ? (
-          <UnifiedChat />
+          // Empty state: render the central composer (assistant-ui Thread). Submit
+          // → taskLauncherAdapter → store.createTaskFromPrompt → new task tab.
+          <Thread />
         ) : hasPinned ? (
           <PanelGroup orientation="horizontal" className="h-full">
             <Panel minSize={20} defaultSize={Math.round(100 / (pinnedSessions.length + 1))}>

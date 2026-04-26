@@ -15,7 +15,6 @@ import { useIDE, useCurrentActiveTab, useCurrentOpenFiles } from "@/store/ide";
 import { MOCK_ENABLED } from "@/lib/env";
 import { taskLauncherAdapter } from "@/lib/chat/task-launcher-adapter";
 import { TaskDetailDialog } from "@/components/ide/task-detail-dialog";
-import { NewTaskDialog } from "@/components/ide/new-task-dialog";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { useIsMobile } from "@/hooks/use-mobile";
 
@@ -204,10 +203,8 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
   const taskDetailDialogTaskId = useIDE((s) => s.taskDetailDialogTaskId);
   const setTaskDetailDialogOpen = useIDE((s) => s.setTaskDetailDialogOpen);
   const tasksByWorkspaceId = useIDE((s) => s.tasksByWorkspaceId);
-  const newTaskDialogOpen = useIDE((s) => s.newTaskDialogOpen);
-  const closeNewTaskDialog = useIDE((s) => s.closeNewTaskDialog);
-  const openNewTaskDialog = useIDE((s) => s.openNewTaskDialog);
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
+  void activeWorkspace; // kept for parity with the old dialog mount; harmless
 
   const currentTask = taskDetailDialogTaskId
     ? Object.values(tasksByWorkspaceId)
@@ -234,13 +231,6 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
               workspace={taskWorkspace}
               open={!!taskDetailDialogTaskId}
               onOpenChange={(open) => setTaskDetailDialogOpen(open ? taskDetailDialogTaskId : null)}
-            />
-          )}
-          {activeWorkspace && (
-            <NewTaskDialog
-              workspace={activeWorkspace}
-              open={newTaskDialogOpen}
-              onOpenChange={(open) => (open ? openNewTaskDialog() : closeNewTaskDialog())}
             />
           )}
         </div>

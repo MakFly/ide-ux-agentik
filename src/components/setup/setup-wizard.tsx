@@ -145,8 +145,10 @@ export function SetupWizard() {
       toast.success("Organization setup complete!");
       navigate({ to: `/org/${org.id}` });
 
+      // After landing on the workspace, preset the active agent so the central
+      // <Thread /> empty-state composer offers the user's default CLI on submit.
       setTimeout(() => {
-        useIDE.getState().openNewTaskDialog(userDraft.defaultAgent);
+        useIDE.getState().setActiveAgent(userDraft.defaultAgent);
       }, 100);
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Setup failed";

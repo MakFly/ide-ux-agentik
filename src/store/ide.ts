@@ -197,8 +197,6 @@ type State = {
   activeTaskId: string | null;
   /** Task detail dialog open state. When set, the TaskDetailDialog opens on the Transcript tab. */
   taskDetailDialogTaskId: string | null;
-  /** Singleton NewTaskDialog open state. Sidebar + and Workspace + New CLI both pipe into it. */
-  newTaskDialogOpen: boolean;
 
   // Live event buffer for the per-task transcript viewer. Cap is enforced
   // in the buffering reducer below (2000 entries / task).
@@ -370,9 +368,6 @@ type State = {
   loadTaskLogs: (taskId: string) => Promise<void>;
   setActiveTask: (id: string | null) => void;
   setTaskDetailDialogOpen: (taskId: string | null) => void;
-  /** Open the singleton NewTaskDialog. If `prefillCli` is given, set activeAgent so the dialog defaults to that CLI. */
-  openNewTaskDialog: (prefillCli?: TerminalKind) => void;
-  closeNewTaskDialog: () => void;
   createTaskFromPrompt: (
     prompt: string,
     options?: { cli?: string; model?: string; effort?: string },
@@ -895,7 +890,6 @@ export const useIDE = create<State>()(
       tasksByWorkspaceId: {},
       activeTaskId: null,
       taskDetailDialogTaskId: null,
-      newTaskDialogOpen: false,
       taskEventsByTaskId: {},
       dismissedTaskIds: [],
       worktreesByWorkspaceId: initialWorktrees,
@@ -2226,17 +2220,6 @@ export const useIDE = create<State>()(
 
       setTaskDetailDialogOpen: (taskId) => {
         set({ taskDetailDialogTaskId: taskId });
-      },
-
-      openNewTaskDialog: (prefillCli) => {
-        set((s) => ({
-          newTaskDialogOpen: true,
-          activeAgent: prefillCli ?? s.activeAgent,
-        }));
-      },
-
-      closeNewTaskDialog: () => {
-        set({ newTaskDialogOpen: false });
       },
 
       createTaskFromPrompt: async (prompt, options = {}) => {

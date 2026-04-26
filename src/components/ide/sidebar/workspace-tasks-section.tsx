@@ -188,7 +188,10 @@ export function WorkspaceTasksSection() {
   const hydrateTasks = useIDE((s) => s.hydrateTasks);
   const workspaceId = useIDE((s) => s.activeWorkspaceId);
   const [isLoadingInitial, setIsLoadingInitial] = useState(true);
-  const openNewTaskDialog = useIDE((s) => s.openNewTaskDialog);
+  const setActiveSession = useIDE((s) => s.setActiveSession);
+  // Focus the central <Thread /> composer: deselect the active session so the
+  // empty-state composer takes over the panel.
+  const focusComposer = () => setActiveSession("");
 
   const tasks = tasksByWorkspaceId[workspaceId] ?? [];
   const hasRunning = tasks.some((t) => t.status === "running");
@@ -229,7 +232,7 @@ export function WorkspaceTasksSection() {
           type="button"
           onClick={(e) => {
             e.stopPropagation();
-            openNewTaskDialog();
+            focusComposer();
           }}
           className="ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
           title="New task (compose & dispatch)"
@@ -246,7 +249,7 @@ export function WorkspaceTasksSection() {
         ) : !hasAny ? (
           <button
             type="button"
-            onClick={() => openNewTaskDialog()}
+            onClick={() => focusComposer()}
             className="mx-3 flex w-[calc(100%-1.5rem)] items-center gap-2 rounded-md border border-dashed border-border px-3 py-3 text-left text-[11.5px] text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
           >
             <Plus className="h-3.5 w-3.5" />
