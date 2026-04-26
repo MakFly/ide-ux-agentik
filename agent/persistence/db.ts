@@ -767,7 +767,15 @@ export const messagesRepo = {
 
 // ─── Blobs ────────────────────────────────────────────────────────────────────
 
+// SHA-256 hex: exactly 64 lowercase hexadecimal characters.
+// Any other shape would let a client-supplied "hash" escape BLOBS_DIR via
+// path components like "../../etc/passwd".
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
 function blobPath(hash: string): string {
+  if (!SHA256_HEX_RE.test(hash)) {
+    throw new Error(`invalid blob hash: ${hash}`);
+  }
   return path.join(BLOBS_DIR, hash);
 }
 

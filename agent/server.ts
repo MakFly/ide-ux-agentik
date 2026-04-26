@@ -376,8 +376,47 @@ importCodexRollouts().catch((e) => console.warn("[persistence] importCodexRollou
 function safeResolve(p: string): string {
   const clean = p.replace(/^\/+/, "").replace(/\.\./g, "");
   const abs = path.resolve(root, clean);
-  if (!abs.startsWith(root)) throw new Error(`path escapes root: ${p}`);
+  // Guard against prefix-confusion: "/root" must not match "/rootBis/...".
+  // Accept the root itself, or any path strictly inside root + separator.
+  if (abs !== root && !abs.startsWith(root + path.sep)) {
+    throw new Error(`path escapes root: ${p}`);
+  }
   return abs;
+}
+
+// Allowlists for spawnable commands. Without these, any authenticated client
+// could pass cmd: "bash -c <anything>" and obtain RCE on the agent host.
+// Override at boot via AGENT_ALLOWED_EXEC_CMDS / AGENT_ALLOWED_PTY_CMDS
+// (comma-separated lists). PTY default also includes the user's $SHELL basename.
+const DEFAULT_EXEC_ALLOWLIST = ["git", "node", "bun", "bunx", "npm", "npx", "pnpm", "yarn", "make"];
+const DEFAULT_PTY_ALLOWLIST = ["bash", "zsh", "sh", "fish", "codex", "claude", "gemini", "opencode"];
+
+function parseAllowlist(envVar: string | undefined, fallback: string[]): Set<string> {
+  if (!envVar) return new Set(fallback);
+  return new Set(
+    envVar
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
+const EXEC_ALLOWLIST = parseAllowlist(process.env.AGENT_ALLOWED_EXEC_CMDS, DEFAULT_EXEC_ALLOWLIST);
+const PTY_ALLOWLIST = (() => {
+  const set = parseAllowlist(process.env.AGENT_ALLOWED_PTY_CMDS, DEFAULT_PTY_ALLOWLIST);
+  const shellBasename = path.basename(process.env.SHELL ?? "/bin/bash");
+  if (shellBasename) set.add(shellBasename);
+  return set;
+})();
+
+// Match by basename only, so "/usr/bin/git" and "git" both check against "git".
+function assertSpawnAllowed(cmd: string, allowlist: Set<string>, kind: "exec" | "pty"): void {
+  const base = path.basename(cmd);
+  if (!allowlist.has(base)) {
+    throw new Error(
+      `${kind}: command not in allowlist: ${base} (configure AGENT_ALLOWED_${kind.toUpperCase()}_CMDS to extend)`,
+    );
+  }
 }
 
 function resolveWorkspaceDeletePath(rootPath: string): string {
@@ -503,13 +542,15 @@ function parseGitStatus(output: string): { branch: string; files: GitEntry[] } {
   return { branch, files };
 }
 
-let globalCtx: Ctx | null = null;
-
-function drainPendingTasks() {
-  if (!globalCtx || globalCtx.runningTasks.size >= 3) return;
-  const next = globalCtx.pendingTasks.shift();
+// Per-connection draining: pending tasks are owned by the ctx that queued them.
+// A previous version used a module-level `globalCtx` singleton which broke
+// when a second client connected (overwriting it) or when the owner
+// disconnected (silently stalling all queued tasks).
+function drainPendingTasks(ctx: Ctx) {
+  if (ctx.runningTasks.size >= 3) return;
+  const next = ctx.pendingTasks.shift();
   if (!next) return;
-  methods["task.start"]({ id: next }, globalCtx).catch((e) =>
+  methods["task.start"]({ id: next }, ctx).catch((e) =>
     console.error("[task] drain error:", e),
   );
 }
@@ -599,6 +640,7 @@ const methods: Record<string, Handler> = {
   async "pty.spawn"({ cmd, args, cwd, env, cols, rows }, ctx) {
     const shell = process.env.SHELL ?? "/bin/bash";
     const spawnCmd = cmd ? String(cmd) : shell;
+    assertSpawnAllowed(spawnCmd, PTY_ALLOWLIST, "pty");
     const spawnArgs: string[] = Array.isArray(args) ? (args as string[]) : cmd ? [] : ["-il"];
     const termCols = typeof cols === "number" ? cols : 80;
     const termRows = typeof rows === "number" ? rows : 24;
@@ -1308,7 +1350,7 @@ const methods: Record<string, Handler> = {
         taskSessionsRepo.detach(sessionId);
         ctx.taskSessions.delete(sessionId);
         ctx.runningTasks.delete(tid);
-        drainPendingTasks();
+        drainPendingTasks(ctx);
       });
 
       proc.on("error", (err) => {
@@ -1336,7 +1378,7 @@ const methods: Record<string, Handler> = {
         taskSessionsRepo.detach(sessionId);
         ctx.taskSessions.delete(sessionId);
         ctx.runningTasks.delete(tid);
-        drainPendingTasks();
+        drainPendingTasks(ctx);
       });
     };
 
@@ -1355,7 +1397,7 @@ const methods: Record<string, Handler> = {
         params: { taskId: tid, status: "failed", exitCode: null, errorMessage: errorMsg },
       });
       ctx.runningTasks.delete(tid);
-      drainPendingTasks();
+      drainPendingTasks(ctx);
     });
 
     return { status: "running" };
@@ -1395,7 +1437,7 @@ const methods: Record<string, Handler> = {
         const currentTask = tasksRepo.get(taskId);
         if (!currentTask) {
           ctx.runningTasks.delete(taskId);
-          drainPendingTasks();
+          drainPendingTasks(ctx);
           return;
         }
 
@@ -1424,7 +1466,7 @@ const methods: Record<string, Handler> = {
           });
           await autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
           ctx.runningTasks.delete(taskId);
-          drainPendingTasks();
+          drainPendingTasks(ctx);
           return;
         }
 
@@ -1548,7 +1590,7 @@ const methods: Record<string, Handler> = {
 
           ctx.taskSessions.delete(sessionId);
           ctx.runningTasks.delete(taskId);
-          drainPendingTasks();
+          drainPendingTasks(ctx);
         });
 
         proc.on("error", (err) => {
@@ -1579,7 +1621,7 @@ const methods: Record<string, Handler> = {
 
           ctx.taskSessions.delete(sessionId);
           ctx.runningTasks.delete(taskId);
-          drainPendingTasks();
+          drainPendingTasks(ctx);
         });
       } catch (e) {
         const errorMsg = (e as Error).message;
@@ -1599,7 +1641,7 @@ const methods: Record<string, Handler> = {
           void autoCleanupFailedTask(root, taskId, t?.worktree_path, t?.branch_name);
         }
         ctx.runningTasks.delete(taskId);
-        drainPendingTasks();
+        drainPendingTasks(ctx);
       }
     };
 
@@ -1642,7 +1684,7 @@ const methods: Record<string, Handler> = {
     });
 
     ctx.runningTasks.delete(taskId);
-    drainPendingTasks();
+    drainPendingTasks(ctx);
 
     return { ok: true };
   },
@@ -2054,6 +2096,7 @@ const methods: Record<string, Handler> = {
    */
   async "exec.run"({ cmd, args, cwd, env, timeoutMs }, _ctx) {
     if (!cmd) throw new Error("exec.run: cmd is required");
+    assertSpawnAllowed(String(cmd), EXEC_ALLOWLIST, "exec");
     let resolvedCwd: string;
     try {
       resolvedCwd = cwd ? safeResolve(String(cwd)) : root;
@@ -2407,7 +2450,6 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
     ws: { send: (d: string) => ws.send(d) },
   };
   contexts.set(ws, ctx);
-  globalCtx = ctx;
   ctx.authTimeout = setTimeout(() => {
     if (!ctx.authed) ws.close(4401, "auth timeout");
   }, 5000);
@@ -2498,7 +2540,6 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
     }
     ctx.taskSessions.clear();
     if (ctx.authTimeout) clearTimeout(ctx.authTimeout);
-    if (globalCtx === ctx) globalCtx = null;
   });
 });
 
