@@ -236,9 +236,14 @@ export class RemoteAgentProvider implements FsProvider {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.ws?.close();
+    // Send code 1000 (normal closure) explicitly so the `close` listener
+    // skips the auto-reconnect branch. Without an explicit code, browsers
+    // emit code 1005 ("no status received"), which our reconnect logic
+    // treats as abnormal and triggers a useless reconnect cycle (toast spam).
+    this.ws?.close(1000, "client disconnect");
     this.ws = null;
     this.watchers.clear();
+    this.reconnectAttempts = 0;
   }
 
   private _clearPending(reason: string): void {
