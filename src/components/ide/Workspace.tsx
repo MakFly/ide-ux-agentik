@@ -1,15 +1,24 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { X, Plus, ChevronLeft, ChevronRight, LogIn, Pin, PinOff } from "lucide-react";
+import { X, FileCode, Plus, ChevronLeft, ChevronRight, LogIn, Pin, PinOff } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import {
   useIDE,
+  useCurrentActiveTab,
+  useCurrentBranches,
+  useCurrentOpenFiles,
+  useCurrentTasks,
   useCurrentWorktree,
   useCurrentSessions,
   useActiveSession,
   usePinnedSessionIds,
+  type AgentTabId,
+  type TabId,
   type TerminalKind,
   type WorkspaceTerminal,
+  type Worktree,
+  type FileTab,
 } from "@/store/ide";
 import { Thread } from "@/components/assistant-ui/thread";
 import {
@@ -18,7 +27,10 @@ import {
   type SessionMode,
 } from "@/components/ide/agent-session-view";
 import { KillSessionDialog } from "@/components/ide/kill-session-dialog";
+import { CodeEditor } from "@/components/ide/code-editor";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,6 +44,11 @@ const agentFaviconSrc: Record<TerminalKind, string> = {
   opencode: "/agents/opencode.ico",
   gemini: "/agents/gemini.svg",
 };
+
+const staticTabs: { id: AgentTabId; label: string; icon: React.ReactNode }[] = [
+  { id: "overview", label: "Codebase Overview", icon: <span className="text-status-del">✦</span> },
+  { id: "audit", label: "Codebase Perf Audit", icon: <span className="text-status-add">⬢</span> },
+];
 
 function ProductFavicon({ agent, label }: { agent: TerminalKind; label: string }) {
   return (
@@ -48,10 +65,184 @@ function ProductFavicon({ agent, label }: { agent: TerminalKind; label: string }
   );
 }
 
+function FileView({
+  tabId,
+  path,
+  content,
+  loading,
+  isBinary,
+  isDirty,
+  error,
+  preview,
+}: {
+  tabId: `file:${string}`;
+  path: string;
+  content: string | null;
+  loading?: boolean;
+  isBinary?: boolean;
+  isDirty?: boolean;
+  error?: string;
+  preview: boolean;
+}) {
+  const isMarkdown = path.endsWith(".md");
+  return (
+    <div className="flex h-full flex-col overflow-hidden">
+      <div className="flex items-center gap-2 border-b border-border bg-code-bg/40 px-6 py-2 font-mono text-[11.5px] text-muted-foreground">
+        <span>{path}</span>
+        {isDirty && !loading && content !== null && (
+          <span className="text-status-warn" title="Unsaved changes">
+            •
+          </span>
+        )}
+        {!isDirty && !loading && content !== null && !isBinary && (
+          <span className="text-status-add/70 text-[10px]" title="Saved">
+            saved
+          </span>
+        )}
+        {preview && isMarkdown && content !== null && (
+          <span className="ml-2 text-primary">· preview</span>
+        )}
+      </div>
+      {loading ? (
+        <div className="space-y-2 px-6 py-4">
+          <div className="h-3 w-3/4 animate-pulse rounded bg-muted" />
+          <div className="h-3 w-1/2 animate-pulse rounded bg-muted" />
+          <div className="h-3 w-2/3 animate-pulse rounded bg-muted" />
+          <div className="h-3 w-1/3 animate-pulse rounded bg-muted" />
+        </div>
+      ) : isBinary ? (
+        <div className="flex h-32 items-center justify-center text-[13px] text-muted-foreground">
+          Binary file — preview not available.
+        </div>
+      ) : content === null ? (
+        <div className="flex h-32 items-center justify-center text-[13px] text-status-del">
+          {error ?? "Failed to load file."}
+        </div>
+      ) : preview && isMarkdown ? (
+        <div className="scrollbar-visible flex-1 overflow-y-auto">
+          <div className="markdown-preview max-w-3xl px-6 py-4 text-[14px] leading-6 text-foreground">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+          </div>
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <CodeEditor tabId={tabId} path={path} content={content} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function terminalStatusClass(status: WorkspaceTerminal["status"]) {
+  if (status === "busy") return "bg-status-warn/15 text-status-warn";
+  if (status === "idle") return "bg-muted text-muted-foreground";
+  return "bg-status-add/15 text-status-add";
+}
+
 function sessionDotClass(status: WorkspaceTerminal["status"]) {
   if (status === "busy") return "bg-status-warn animate-pulse";
   if (status === "idle") return "bg-muted-foreground/50";
   return "bg-status-add";
+}
+
+function TerminalView({
+  terminal,
+  workspaceName,
+  branchName,
+  worktree,
+  taskCount,
+}: {
+  terminal: WorkspaceTerminal;
+  workspaceName: string;
+  branchName: string;
+  worktree: Worktree;
+  taskCount: number;
+}) {
+  return (
+    <div className="scrollbar-visible h-full overflow-y-auto bg-code-bg/30 px-6 py-5 font-mono text-[12.5px] leading-6">
+      <div className="text-syntax-comment">
+        # {terminal.title} session — workspace: {workspaceName} — branch: {branchName}
+      </div>
+      <div className="mt-2">
+        <span className="text-syntax-string">$</span> {terminal.lastCommand}
+      </div>
+      <div className="text-syntax-type">→ attaching PTY to {worktree.path}</div>
+      <div className="text-syntax-type">→ worktree status: {worktree.status}</div>
+      <div className="text-syntax-type">→ task queue: {taskCount} branch-linked task(s)</div>
+      <div className="text-foreground">Ready. Type instructions in the composer below.</div>
+      <div className="mt-3 text-syntax-comment">
+        # context: active worktree "{worktree.name}" derived from the current branch scope
+      </div>
+      <div className="mt-1">
+        <span className="text-syntax-keyword">async fn</span>{" "}
+        <span className="text-syntax-fn">main</span>() {"{"}
+      </div>
+      <div className="pl-4">
+        <span className="text-syntax-keyword">let</span> session ={" "}
+        <span className="text-syntax-type">WorktreeSession</span>::
+        <span className="text-syntax-fn">attach</span>( "{worktree.path}");
+      </div>
+      <div className="pl-4">
+        session.<span className="text-syntax-fn">spawn_agent</span>("{terminal.kind}")?;
+      </div>
+      <div>{"}"}</div>
+    </div>
+  );
+}
+
+function AuditView({ branchName }: { branchName: string }) {
+  const rows = [
+    { metric: "Cold start", value: "412 ms", trend: "+3%", warn: false },
+    { metric: "Frame time (p99)", value: "8.2 ms", trend: "-12%", warn: false },
+    { metric: "Memory (idle)", value: "186 MB", trend: "+1%", warn: false },
+    { metric: "Git refresh", value: "94 ms", trend: "+18%", warn: true },
+    { metric: "PR poll", value: "1.2 s", trend: "stable", warn: false },
+  ];
+  return (
+    <div className="px-8 py-6">
+      <div className="mx-auto max-w-3xl">
+        <h1 className="text-[22px] font-semibold">Codebase Perf Audit</h1>
+        <p className="mt-2 text-[13.5px] text-muted-foreground">
+          Latest benchmarks · {branchName} · 14h ago
+        </p>
+        <div className="mt-5 overflow-hidden rounded-md border border-border">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="bg-code-bg/60 text-left text-muted-foreground">
+                <th className="px-4 py-2 font-medium">Metric</th>
+                <th className="px-4 py-2 font-medium">Value</th>
+                <th className="px-4 py-2 font-medium">Δ</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono">
+              {rows.map((r, i) => (
+                <tr key={r.metric} className={cn(i > 0 && "border-t border-border")}>
+                  <td className="px-4 py-2.5 font-sans">{r.metric}</td>
+                  <td className="px-4 py-2.5 text-syntax-num">{r.value}</td>
+                  <td
+                    className={cn("px-4 py-2.5", r.warn ? "text-status-warn" : "text-status-add")}
+                  >
+                    {r.trend}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OverviewView() {
+  return (
+    <section className="flex h-full flex-col items-center justify-center gap-2 px-8 py-10 text-center">
+      <div className="text-[13px] font-medium text-foreground">Codebase overview</div>
+      <p className="max-w-md text-[12.5px] text-muted-foreground">
+        Chat with the agent below. Open a file from the tree to edit it above the CLI.
+      </p>
+    </section>
+  );
 }
 
 const AGENT_OPTIONS: { id: TerminalKind; label: string }[] = [
@@ -73,13 +264,7 @@ function AgentCliTabs({
   const pinnedIds = usePinnedSessionIds();
   const setActiveSession = useIDE((s) => s.setActiveSession);
   const closeAgentSession = useIDE((s) => s.closeAgentSession);
-  const setActiveAgent = useIDE((s) => s.setActiveAgent);
-  // Deselect the current session and preset the CLI so the central <Thread />
-  // empty-state takes over (its composer reads activeAgent for placeholder/model).
-  const focusComposer = (cli: TerminalKind) => {
-    setActiveAgent(cli);
-    setActiveSession("");
-  };
+  const addAgentSession = useIDE((s) => s.addAgentSession);
   const pinSession = useIDE((s) => s.pinSession);
   const unpinSession = useIDE((s) => s.unpinSession);
   const currentWorktree = useCurrentWorktree();
@@ -154,7 +339,7 @@ function AgentCliTabs({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48">
             {AGENT_OPTIONS.map((a) => (
-              <DropdownMenuItem key={a.id} onSelect={() => focusComposer(a.id)}>
+              <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
                 <ProductFavicon agent={a.id} label={a.label} />
                 <span>{a.label}</span>
               </DropdownMenuItem>
@@ -195,7 +380,6 @@ function AgentCliTabs({
             <div
               key={s.id}
               data-session-id={s.id}
-              data-active={active}
               onMouseDown={(e) => {
                 if (e.button === 1) {
                   e.preventDefault();
@@ -275,7 +459,7 @@ function AgentCliTabs({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48">
             {AGENT_OPTIONS.map((a) => (
-              <DropdownMenuItem key={a.id} onSelect={() => focusComposer(a.id)}>
+              <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
                 <ProductFavicon agent={a.id} label={a.label} />
                 <span>{a.label}</span>
                 <span className="ml-auto font-mono text-[10px] text-muted-foreground">
@@ -311,55 +495,206 @@ function AgentCliTabs({
 }
 
 export function Workspace() {
-  const activeSession = useActiveSession();
-  const sessions = useCurrentSessions();
-  const pinnedIds = usePinnedSessionIds();
-  const allSessions = useCurrentSessions();
-  const sessionModeBySessionId = useIDE((s) => s.sessionModeBySessionId);
-  const setSessionMode = useIDE((s) => s.setSessionMode);
-  const setMode = (id: string, m: SessionMode) => setSessionMode(id, m);
-  const modeOf = (id: string): SessionMode => sessionModeBySessionId[id] ?? "chat";
+  const activeTab = useCurrentActiveTab();
+  const setActiveTab = useIDE((s) => s.setActiveTab);
+  const addTerminal = useIDE((s) => s.addTerminal);
+  const workspaces = useIDE((s) => s.workspaces);
+  const activeBranchId = useIDE((s) => s.activeBranchId);
+  const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
+  const openFiles = useCurrentOpenFiles();
+  const closeFile = useIDE((s) => s.closeFile);
+  const previewMode = useIDE((s) => s.previewMode);
+  const tasks = useCurrentTasks();
+  const currentWorktree = useCurrentWorktree();
+  const currentBranches = useCurrentBranches();
+  const workspace = workspaces.find((w) => w.id === activeWorkspaceId);
+  const branch = currentBranches.find((b) => b.id === activeBranchId);
+  const [closedTabs, setClosedTabs] = useState<string[]>([]);
 
-  const pinnedSessions = useMemo(
+  const terminalTabs = useMemo(
     () =>
-      pinnedIds
-        .map((id) => allSessions.find((s) => s.id === id))
-        .filter(Boolean) as WorkspaceTerminal[],
-    [pinnedIds, allSessions],
+      (currentWorktree?.terminals ?? []).map((terminal) => ({
+        id: `terminal:${terminal.id}` as TabId,
+        label: terminal.title,
+        icon: <ProductFavicon agent={terminal.kind} label={terminal.title} />,
+        terminal,
+      })),
+    [currentWorktree],
   );
 
-  const hasPinned = pinnedSessions.length > 0;
+  const visibleTabs = [...staticTabs, ...terminalTabs].filter(
+    (tab) => !closedTabs.includes(tab.id),
+  );
+  const validTabIds = new Set<TabId>([
+    "overview",
+    "audit",
+    ...terminalTabs.map((tab) => tab.id),
+    ...openFiles.map((file) => file.id),
+  ]);
+  const resolvedTab = validTabIds.has(activeTab) ? activeTab : (terminalTabs[0]?.id ?? "overview");
+  const activeFile = openFiles.find((f) => f.id === resolvedTab) as FileTab | undefined;
+  const activeTerminal = resolvedTab.startsWith("terminal:")
+    ? currentWorktree?.terminals.find((terminal) => `terminal:${terminal.id}` === resolvedTab)
+    : undefined;
+
+  const saveFile = useIDE((s) => s.saveFile);
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+        e.preventDefault();
+        void saveFile();
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [saveFile]);
 
   return (
     <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background shadow-sm">
-      <AgentCliTabs
-        activeMode={activeSession ? modeOf(activeSession.id) : undefined}
-        onActiveModeChange={activeSession ? (m) => setMode(activeSession.id, m) : undefined}
-      />
+      <div className="flex items-center border-b border-border">
+        <div className="scrollbar-none flex flex-1 items-center overflow-x-auto">
+          {visibleTabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={cn(
+                "group relative flex items-center gap-2 whitespace-nowrap px-4 py-2.5 text-[13px] transition-colors",
+                resolvedTab === tab.id
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {tab.icon}
+              <span>{tab.label}</span>
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setClosedTabs((current) => [...current, tab.id]);
+                  if (resolvedTab === tab.id) {
+                    const remaining = visibleTabs.filter((candidate) => candidate.id !== tab.id);
+                    setActiveTab(remaining[0]?.id ?? "overview");
+                  }
+                }}
+                className="rounded p-0.5 opacity-0 hover:bg-accent group-hover:opacity-100"
+              >
+                <X className="h-3 w-3" />
+              </span>
+              {resolvedTab === tab.id && (
+                <span className="absolute inset-x-3 -bottom-px h-[2px] bg-primary" />
+              )}
+            </button>
+          ))}
+          {openFiles.map((f) => (
+            <button
+              key={f.id}
+              onClick={() => setActiveTab(f.id)}
+              className={cn(
+                "group relative flex items-center gap-2 whitespace-nowrap border-l border-border px-4 py-2.5 text-[13px] transition-colors",
+                resolvedTab === f.id
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              <FileCode className="h-3.5 w-3.5 text-syntax-type" />
+              <span className="font-mono">{f.path.split("/").pop()}</span>
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeFile(f.id);
+                }}
+                className="rounded p-0.5 opacity-0 hover:bg-accent group-hover:opacity-100"
+              >
+                <X className="h-3 w-3" />
+              </span>
+              {resolvedTab === f.id && (
+                <span className="absolute inset-x-3 -bottom-px h-[2px] bg-primary" />
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center px-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              aria-label="New agent tab"
+              className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <Plus className="h-4 w-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              {(
+                [
+                  { kind: "codex", label: "Codex" },
+                  { kind: "claude", label: "Claude Code" },
+                  { kind: "opencode", label: "OpenCode" },
+                  { kind: "gemini", label: "Gemini" },
+                ] as const
+              ).map(({ kind, label }) => (
+                <DropdownMenuItem
+                  key={kind}
+                  onSelect={() => {
+                    if (!currentWorktree) return;
+                    const terminalId = addTerminal(currentWorktree.id, kind);
+                    setActiveTab(`terminal:${terminalId}` as TabId);
+                  }}
+                  className="gap-2"
+                >
+                  <ProductFavicon agent={kind} label={label} />
+                  <span>{label}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
       <div className="min-h-0 flex-1 overflow-hidden">
-        {sessions.length === 0 || !activeSession ? (
-          // Empty state: render the central composer (assistant-ui Thread). Submit
-          // → taskLauncherAdapter → store.createTaskFromPrompt → new task tab.
-          <Thread />
-        ) : hasPinned ? (
-          <PanelGroup orientation="horizontal" className="h-full">
-            <Panel minSize={20} defaultSize={Math.round(100 / (pinnedSessions.length + 1))}>
-              <AgentSessionView session={activeSession} mode={modeOf(activeSession.id)} />
-            </Panel>
-            {pinnedSessions.map((session) => (
-              <Fragment key={session.id}>
-                <PanelResizeHandle className="group relative w-1.5 shrink-0 cursor-col-resize bg-border/40 transition-colors hover:bg-primary/40">
-                  <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border group-hover:bg-primary/60" />
-                </PanelResizeHandle>
-                <Panel minSize={20} defaultSize={Math.round(100 / (pinnedSessions.length + 1))}>
-                  <AgentSessionView session={session} mode={modeOf(session.id)} />
-                </Panel>
-              </Fragment>
-            ))}
-          </PanelGroup>
-        ) : (
-          <AgentSessionView session={activeSession} mode={modeOf(activeSession.id)} />
-        )}
+        <PanelGroup orientation="vertical" id="workspace-split" className="flex h-full flex-col">
+          <Panel
+            defaultSize={activeFile ? 60 : 35}
+            minSize={15}
+            collapsible
+            collapsedSize={0}
+            className="flex min-h-0"
+          >
+            <div className="min-h-0 flex-1 overflow-hidden">
+              {activeFile ? (
+                <FileView
+                  tabId={activeFile.id}
+                  path={activeFile.path}
+                  content={activeFile.content}
+                  loading={activeFile.loading}
+                  isBinary={activeFile.isBinary}
+                  isDirty={activeFile.isDirty}
+                  error={activeFile.error}
+                  preview={previewMode}
+                />
+              ) : resolvedTab === "overview" ? (
+                <OverviewView />
+              ) : resolvedTab === "audit" ? (
+                <AuditView branchName={branch?.name ?? "—"} />
+              ) : activeTerminal && currentWorktree && workspace && branch ? (
+                <TerminalView
+                  terminal={activeTerminal}
+                  workspaceName={workspace.name}
+                  branchName={branch.name}
+                  worktree={currentWorktree}
+                  taskCount={tasks.length}
+                />
+              ) : (
+                <OverviewView />
+              )}
+            </div>
+          </Panel>
+          <PanelResizeHandle className="group relative h-2 shrink-0 cursor-row-resize transition-colors hover:bg-accent/40">
+            <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border/60 group-hover:bg-primary/50" />
+          </PanelResizeHandle>
+          <Panel defaultSize={activeFile ? 40 : 65} minSize={20} className="flex min-h-0 flex-col">
+            <AgentCliTabs />
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <Thread />
+            </div>
+          </Panel>
+        </PanelGroup>
       </div>
     </main>
   );
