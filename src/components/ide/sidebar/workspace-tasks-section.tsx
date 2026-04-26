@@ -81,6 +81,31 @@ function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; n
       const rootTab = allSessions.find((s) => s.taskRootId === cur.id || s.taskId === cur.id);
       if (rootTab) targetSessionId = rootTab.id;
     }
+    // Re-open path: when a task tab was killed (closeAgentSession deleted it
+    // from sessionsByWorkspaceId), clicking the row in the sidebar must
+    // resurrect a tab so the transcript becomes visible. Inject a synthetic
+    // WorkspaceTerminal if no row matches the targetSessionId yet.
+    const allSessionsNow = useIDE.getState().sessionsByWorkspaceId[workspace.id] ?? [];
+    if (!allSessionsNow.some((s) => s.id === targetSessionId)) {
+      useIDE.setState((s) => ({
+        sessionsByWorkspaceId: {
+          ...s.sessionsByWorkspaceId,
+          [workspace.id]: [
+            ...allSessionsNow,
+            {
+              id: targetSessionId,
+              kind: task.cli as any,
+              title: task.title,
+              status: task.status === "running" ? "busy" : "idle",
+              workspaceId: workspace.id,
+              lastCommand: "",
+              taskId: task.id,
+              taskRootId: task.id,
+            },
+          ],
+        },
+      }));
+    }
     setActiveSession(targetSessionId);
     setActiveAgent(task.cli as any);
   };
