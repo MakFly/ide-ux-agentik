@@ -248,8 +248,11 @@ export function WorkspaceTasksSection() {
         <AccordionTrigger className="flex-1 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground hover:no-underline hover:text-foreground">
           <span className="flex items-center gap-2">
             Tasks
-            <span className="rounded bg-accent/60 px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-foreground">
-              {running.length}
+            <span
+              className="rounded bg-accent/60 px-1.5 py-0.5 font-mono text-[10px] normal-case tracking-normal text-foreground"
+              title={`${running.length} running · ${tasks.length} total`}
+            >
+              {running.length > 0 ? `${running.length}/${tasks.length}` : `${tasks.length}`}
             </span>
           </span>
         </AccordionTrigger>
