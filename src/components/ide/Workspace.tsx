@@ -495,6 +495,35 @@ function AgentCliTabs({
 }
 
 export function Workspace() {
+  // Cmd/Ctrl+S still saves any active file (file viewer lives elsewhere now —
+  // central panel is composer-only).
+  const saveFile = useIDE((s) => s.saveFile);
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+        e.preventDefault();
+        void saveFile();
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [saveFile]);
+
+  return (
+    <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background shadow-sm">
+      <AgentCliTabs />
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <Thread />
+      </div>
+    </main>
+  );
+}
+
+// Legacy split-panel layout (Files/Overview/Audit/Terminal in the top half,
+// Thread in the bottom half). Kept dormant — the active layout is composer-
+// only by user request. Restore by exporting this and dropping the body
+// above if the dual-pane is needed later.
+function _WorkspaceLegacyDualPane() {
   const activeTab = useCurrentActiveTab();
   const setActiveTab = useIDE((s) => s.setActiveTab);
   const addTerminal = useIDE((s) => s.addTerminal);
