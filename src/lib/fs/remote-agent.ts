@@ -239,7 +239,10 @@ export class RemoteAgentProvider implements FsProvider {
     const delays = [1000, 2000, 4000, 8000, 16000];
     const maxAttempts = 5;
 
-    if (this.reconnectAttempts === 0) {
+    // Skip the toast on the first attempt: short flaps (HMR, brief network
+    // blip, dev-agent restart) usually reconnect within ~1s and the toast
+    // would just flash for nothing. Surface UI noise only from attempt 2.
+    if (this.reconnectAttempts === 1) {
       toast.loading("Reconnecting to agent…", { id: "agent-reconnect" });
     }
 
