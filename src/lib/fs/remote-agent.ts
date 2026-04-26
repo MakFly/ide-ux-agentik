@@ -55,6 +55,7 @@ export type Task = {
   createdAt: number;
   startedAt: number | null;
   endedAt: number | null;
+  parentTaskId: string | null;
 };
 
 /**
@@ -127,6 +128,7 @@ function taskFromDb(row: Record<string, unknown>): Task {
     createdAt: row.created_at as number,
     startedAt: (row.started_at as number) || null,
     endedAt: (row.ended_at as number) || null,
+    parentTaskId: (row.parent_task_id as string) || null,
   };
 }
 
@@ -615,6 +617,7 @@ export class RemoteAgentProvider implements FsProvider {
     effort?: string;
     baseRef?: string;
     parentSessionId?: string;
+    parentTaskId?: string;
   }): Promise<{ id: string; sessionId: string }> {
     return this.call("task.create", params);
   }

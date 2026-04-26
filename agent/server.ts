@@ -430,7 +430,7 @@ function safeResolve(p: string): string {
 // Override at boot via AGENT_ALLOWED_EXEC_CMDS / AGENT_ALLOWED_PTY_CMDS
 // (comma-separated lists). PTY default also includes the user's $SHELL basename.
 const DEFAULT_EXEC_ALLOWLIST = ["git", "node", "bun", "bunx", "npm", "npx", "pnpm", "yarn", "make"];
-const DEFAULT_PTY_ALLOWLIST = ["bash", "zsh", "sh", "fish", "codex", "claude", "gemini", "opencode"];
+const DEFAULT_PTY_ALLOWLIST = ["bash", "zsh", "sh", "fish", "codex", "claude", "gemini", "opencode", "bun"];
 
 function parseAllowlist(envVar: string | undefined, fallback: string[]): Set<string> {
   if (!envVar) return new Set(fallback);
@@ -1006,7 +1006,7 @@ const methods: Record<string, Handler> = {
   // ─── Task RPC ──────────────────────────────────────────────────────────────
 
   async "task.create"(
-    { workspaceId, title, prompt, cli, model, effort, baseRef, parentSessionId },
+    { workspaceId, title, prompt, cli, model, effort, baseRef, parentSessionId, parentTaskId },
     _ctx,
   ) {
     const wid = String(workspaceId ?? "").trim();
@@ -1016,6 +1016,10 @@ const methods: Record<string, Handler> = {
     const m = model !== undefined && model !== null ? String(model).trim() || undefined : undefined;
     const eff =
       effort !== undefined && effort !== null ? String(effort).trim() || undefined : undefined;
+    const ptid =
+      parentTaskId !== undefined && parentTaskId !== null
+        ? String(parentTaskId).trim() || undefined
+        : undefined;
     if (!wid) throw new Error("task.create: workspaceId is required");
     if (!t) throw new Error("task.create: title is required");
     if (!p) throw new Error("task.create: prompt is required");
@@ -1047,6 +1051,7 @@ const methods: Record<string, Handler> = {
       effort: eff,
       parentSessionId: parentSessionId !== undefined ? String(parentSessionId) : undefined,
       sessionId,
+      parentTaskId: ptid,
     });
 
     // Attach the primary session to the task.
@@ -1075,6 +1080,321 @@ const methods: Record<string, Handler> = {
       since: typeof since === "number" ? since : undefined,
       limit: typeof limit === "number" ? Math.min(limit, 5000) : 1000,
     });
+  },
+
+  // ─── Section 3.1 — worktree diff stat ─────────────────────────────────────
+
+  async "task.diffStat"({ taskId }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.diffStat: taskId is required");
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.diffStat: task not found: ${tid}`);
+    if (!task.worktree_path) throw new Error("task.diffStat: worktree_path not set");
+    if (!task.base_ref) throw new Error("task.diffStat: base_ref not set");
+    if (!task.branch_name) throw new Error("task.diffStat: branch_name not set");
+
+    const worktreePath = task.worktree_path;
+    const baseRef = task.base_ref;
+
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      assertExecArgsAllowed("git", ["diff", "--numstat", `${baseRef}...HEAD`]);
+      cpExecFile(
+        "git",
+        ["diff", "--numstat", `${baseRef}...HEAD`],
+        { cwd: worktreePath, encoding: "utf8", env: safeEnv() },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`git diff --numstat failed: ${stderr || err.message}`));
+          else resolve({ stdout, stderr });
+        },
+      );
+    });
+
+    let totalAdded = 0;
+    let totalDeleted = 0;
+    const files: { path: string; added: number; deleted: number }[] = [];
+
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split("\t");
+      if (parts.length < 3) continue;
+      const added = parseInt(parts[0], 10);
+      const deleted = parseInt(parts[1], 10);
+      const filePath = parts[2];
+      if (isNaN(added) || isNaN(deleted)) continue; // binary file (shows "-")
+      totalAdded += added;
+      totalDeleted += deleted;
+      files.push({ path: filePath, added, deleted });
+    }
+
+    // Persist to task row
+    tasksRepo.update(tid, {
+      diff_added: totalAdded,
+      diff_deleted: totalDeleted,
+      diff_files_count: files.length,
+    });
+
+    return { added: totalAdded, deleted: totalDeleted, files };
+  },
+
+  // ─── Section 3.3 — task.files ──────────────────────────────────────────────
+
+  async "task.files"({ taskId }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.files: taskId is required");
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.files: task not found: ${tid}`);
+    if (!task.worktree_path) throw new Error("task.files: worktree_path not set");
+    if (!task.base_ref) throw new Error("task.files: base_ref not set");
+
+    const worktreePath = task.worktree_path;
+    const baseRef = task.base_ref;
+
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      cpExecFile(
+        "git",
+        ["diff", "--name-status", `${baseRef}...HEAD`],
+        { cwd: worktreePath, encoding: "utf8", env: safeEnv() },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`git diff --name-status failed: ${stderr || err.message}`));
+          else resolve({ stdout, stderr });
+        },
+      );
+    });
+
+    const STATUS_MAP: Record<string, "modified" | "added" | "deleted" | "renamed"> = {
+      M: "modified",
+      A: "added",
+      D: "deleted",
+      R: "renamed",
+    };
+
+    const files: { path: string; status: "modified" | "added" | "deleted" | "renamed" }[] = [];
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split("\t");
+      const statusChar = parts[0][0]; // e.g. "M", "A", "D", "R100"
+      const filePath = parts[parts.length - 1]; // renamed: parts[2], others: parts[1]
+      const status = STATUS_MAP[statusChar] ?? "modified";
+      files.push({ path: filePath, status });
+    }
+
+    return { files };
+  },
+
+  // ─── Section 3.3 — task.changes ────────────────────────────────────────────
+
+  async "task.changes"({ taskId, file }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.changes: taskId is required");
+    const filePath = String(file ?? "").trim();
+    if (!filePath) throw new Error("task.changes: file is required");
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.changes: task not found: ${tid}`);
+    if (!task.worktree_path) throw new Error("task.changes: worktree_path not set");
+    if (!task.base_ref) throw new Error("task.changes: base_ref not set");
+
+    const worktreePath = task.worktree_path;
+    const baseRef = task.base_ref;
+
+    // Prevent path traversal: safeResolve relative to worktree
+    const absWorktree = path.resolve(worktreePath);
+    const absFile = path.resolve(worktreePath, filePath);
+    if (absFile !== absWorktree && !absFile.startsWith(absWorktree + path.sep)) {
+      throw new Error("task.changes: file path escapes worktree");
+    }
+    // Use relative path in the git command
+    const relFile = path.relative(worktreePath, absFile);
+
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      cpExecFile(
+        "git",
+        ["diff", `${baseRef}...HEAD`, "--", relFile],
+        { cwd: worktreePath, encoding: "utf8", env: safeEnv() },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`git diff failed: ${stderr || err.message}`));
+          else resolve({ stdout, stderr });
+        },
+      );
+    });
+
+    return { patch: stdout, file: filePath };
+  },
+
+  // ─── Section 3.3 — task.checks ─────────────────────────────────────────────
+
+  async "task.checks"({ taskId }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.checks: taskId is required");
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.checks: task not found: ${tid}`);
+    if (!task.worktree_path) throw new Error("task.checks: worktree_path not set");
+
+    const worktreePath = task.worktree_path;
+
+    // Run checks asynchronously; return immediately.
+    const runCheck = async (tool: "tsc" | "eslint") => {
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.checks.event",
+        params: { taskId: tid, tool, status: "running", stdout: "", stderr: "", exitCode: null },
+      });
+
+      const [cmd, ...args] =
+        tool === "tsc"
+          ? ["bunx", "tsc", "--noEmit"]
+          : ["bunx", "eslint", "."];
+
+      const proc = cpSpawn(cmd, args, {
+        cwd: worktreePath,
+        env: safeEnv(),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      const collectStream = (stream: NodeJS.ReadableStream | null): Promise<string> =>
+        new Promise((resolve) => {
+          if (!stream) return resolve("");
+          const chunks: Buffer[] = [];
+          stream.on("data", (c: Buffer) => chunks.push(c));
+          stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+          stream.on("error", () => resolve(""));
+        });
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        collectStream(proc.stdout),
+        collectStream(proc.stderr),
+        new Promise<number | null>((resolve) => proc.on("exit", (c) => resolve(c))),
+      ]);
+
+      const status = exitCode === 0 ? "done" : "failed";
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.checks.event",
+        params: { taskId: tid, tool, status, stdout, stderr, exitCode },
+      });
+    };
+
+    // Fire and forget
+    Promise.all([runCheck("tsc"), runCheck("eslint")]).catch((err) => {
+      console.warn("[task.checks] error running checks:", err);
+    });
+
+    return { status: "running" };
+  },
+
+  // ─── Section 3.2 — session.spawnSetup / session.spawnRun ──────────────────
+
+  async "session.spawnSetup"({ workspaceId }, ctx) {
+    const wid = String(workspaceId ?? "").trim();
+    if (!wid) throw new Error("session.spawnSetup: workspaceId is required");
+
+    const id = randomUUID();
+    const ptyId = randomUUID();
+
+    sessionsRepo.create({
+      id,
+      workspaceId: wid,
+      cli: "setup",
+      title: "Setup",
+      mode: "terminal",
+      kind: "setup",
+    });
+
+    const shell = process.env.SHELL ?? "/bin/bash";
+
+    if (!nodePty) throw new Error("session.spawnSetup: node-pty unavailable");
+
+    const ptyProc = nodePty.spawn(shell, ["-il"], {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: root,
+      env: safeEnv({ TERM: "xterm-256color" }),
+    });
+
+    const session: PtySession = { id: ptyId, cmd: shell, cwd: root, alive: true, pty: ptyProc };
+    ctx.ptySessions.set(ptyId, session);
+
+    ptyProc.onData((data) => {
+      ctx.ws.send(
+        JSON.stringify({ jsonrpc: "2.0", method: "pty.data", params: { id: ptyId, data } }),
+      );
+    });
+    ptyProc.onExit(({ exitCode, signal }) => {
+      if (!session.alive) return;
+      session.alive = false;
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "pty.exit",
+          params: { id: ptyId, code: exitCode, signal: signal ?? null },
+        }),
+      );
+      ctx.ptySessions.delete(ptyId);
+    });
+
+    return { id, ptyId };
+  },
+
+  async "session.spawnRun"({ workspaceId, script }, ctx) {
+    const wid = String(workspaceId ?? "").trim();
+    if (!wid) throw new Error("session.spawnRun: workspaceId is required");
+
+    const id = randomUUID();
+    const ptyId = randomUUID();
+
+    sessionsRepo.create({
+      id,
+      workspaceId: wid,
+      cli: "run",
+      title: script ? `bun run ${script}` : "Interactive",
+      mode: "terminal",
+      kind: "run",
+    });
+
+    const shell = process.env.SHELL ?? "/bin/bash";
+
+    if (!nodePty) throw new Error("session.spawnRun: node-pty unavailable");
+
+    const spawnCmd = script ? "bun" : shell;
+    const spawnArgs = script ? ["run", String(script)] : ["-il"];
+    assertSpawnAllowed(spawnCmd, PTY_ALLOWLIST, "pty");
+
+    const ptyProc = nodePty.spawn(spawnCmd, spawnArgs, {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: root,
+      env: safeEnv({ TERM: "xterm-256color" }),
+    });
+
+    const session: PtySession = { id: ptyId, cmd: spawnCmd, cwd: root, alive: true, pty: ptyProc };
+    ctx.ptySessions.set(ptyId, session);
+
+    ptyProc.onData((data) => {
+      ctx.ws.send(
+        JSON.stringify({ jsonrpc: "2.0", method: "pty.data", params: { id: ptyId, data } }),
+      );
+    });
+    ptyProc.onExit(({ exitCode, signal }) => {
+      if (!session.alive) return;
+      session.alive = false;
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "pty.exit",
+          params: { id: ptyId, code: exitCode, signal: signal ?? null },
+        }),
+      );
+      ctx.ptySessions.delete(ptyId);
+    });
+
+    return { id, ptyId };
   },
 
   async "task.sessionList"({ taskId }, _ctx) {
@@ -1309,7 +1629,8 @@ const methods: Record<string, Handler> = {
     });
 
     const spawnContinueAsync = async () => {
-      const sessionId = task.session_id;
+      // task.session_id was guard-checked above (throw if null)
+      const sessionId = task.session_id!;
       const cliKind = task.cli;
       const { execCmd, execArgs, stdinText } = buildTaskCommand(cliKind, p, {
         model: m ?? task.model,

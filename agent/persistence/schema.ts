@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   model TEXT,
   approval_mode TEXT,
   mode TEXT NOT NULL DEFAULT 'chat',
+  kind TEXT NOT NULL DEFAULT 'terminal',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'idle'
@@ -128,7 +129,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
   created_at INTEGER NOT NULL,
   started_at INTEGER,
-  ended_at INTEGER
+  ended_at INTEGER,
+  diff_added INTEGER,
+  diff_deleted INTEGER,
+  diff_files_count INTEGER,
+  parent_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_workspace_status
@@ -136,6 +141,9 @@ CREATE INDEX IF NOT EXISTS idx_tasks_workspace_status
 
 CREATE INDEX IF NOT EXISTS idx_tasks_parent_session_id
   ON tasks(parent_session_id) WHERE parent_session_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_tasks_parent
+  ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS task_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

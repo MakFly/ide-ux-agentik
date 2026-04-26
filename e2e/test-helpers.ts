@@ -30,6 +30,7 @@ export async function seedTaskInPage(page: Page, partial: Partial<Task>): Promis
     createdAt: partial.createdAt ?? Date.now(),
     startedAt: partial.startedAt ?? (partial.status === "running" ? Date.now() : null),
     endedAt: partial.endedAt ?? null,
+    parentTaskId: partial.parentTaskId ?? null,
   };
 
   // Inject into store

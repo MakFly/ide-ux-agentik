@@ -39,9 +39,26 @@ export type BranchTask = WorkTask;
 export type TerminalKind = "codex" | "claude" | "opencode" | "gemini";
 export const TERMINAL_KINDS: readonly TerminalKind[] = ["codex", "claude", "opencode", "gemini"];
 
+/**
+ * Extended session kind — includes CLI agent kinds plus DB-only session types
+ * spawned by session.spawnSetup / session.spawnRun on the server side.
+ * UI components keep using TerminalKind (the 4 CLI kinds).
+ */
+export type SessionKind = TerminalKind | "chat" | "terminal" | "setup" | "run";
+
 export function isTerminalKind(value: string): value is TerminalKind {
   return (TERMINAL_KINDS as readonly string[]).includes(value);
 }
+
+export type TaskDiffStat = {
+  added: number;
+  deleted: number;
+  files: Array<{ path: string; added: number; deleted: number }>;
+};
+
+export type TaskNode = import("@/lib/fs/remote-agent").Task & {
+  children: TaskNode[];
+};
 
 const TERMINAL_TITLE_BY_KIND: Record<TerminalKind, string> = {
   codex: "Codex",
@@ -343,6 +360,9 @@ type State = {
   // in the buffering reducer below (2000 entries / task).
   taskEventsByTaskId: Record<string, import("@/lib/fs/remote-agent").TaskLogEntry[]>;
 
+  // Diff stat cache — keyed by taskId, 30s TTL
+  taskDiffStatById: Record<string, { value: TaskDiffStat; fetchedAt: number }>;
+
   // Client-side soft-delete tombstones. When the user removes a task we
   // record its id here so that it stays hidden even if the agent failed to
   // delete the SQLite row (e.g. running an older agent build). Persisted to
@@ -516,7 +536,7 @@ type State = {
   setTaskDetailDialogOpen: (taskId: string | null) => void;
   createTaskFromPrompt: (
     prompt: string,
-    options?: { cli?: string; model?: string; effort?: string },
+    options?: { cli?: string; model?: string; effort?: string; parentTaskId?: string },
   ) => Promise<import("@/lib/fs/remote-agent").Task | null>;
   continueTaskFromPrompt: (
     taskId: string,
@@ -534,6 +554,16 @@ type State = {
   ) => Promise<void>;
   /** Close and detach a session from its task (peer only, not primary). */
   detachCliFromTask: (sessionId: string) => Promise<void>;
+
+  // Section 3.1
+  loadTaskDiffStat: (taskId: string) => Promise<TaskDiffStat | null>;
+  selectTaskDiffStat: (taskId: string) => TaskDiffStat | null;
+
+  // Section 3.2
+  selectSessionsByKind: (workspaceId: string, kind: string) => WorkspaceTerminal[];
+
+  // Section 3.4
+  selectTaskTree: (workspaceId: string) => TaskNode[];
 };
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -982,6 +1012,7 @@ export const useIDE = create<State>()(
       activeTaskId: null,
       taskDetailDialogTaskId: null,
       taskEventsByTaskId: {},
+      taskDiffStatById: {},
       dismissedTaskIds: [],
       worktreesByWorkspaceId: initialWorktrees,
       sessionsByWorkspaceId: {},
@@ -2733,6 +2764,7 @@ export const useIDE = create<State>()(
         const cli = options.cli && isTerminalKind(options.cli) ? options.cli : state.activeAgent;
         const model = options.model ?? state.selectedModelByCli[cli];
         const effort = options.effort;
+        const parentTaskId = options.parentTaskId;
 
         try {
           console.info(
@@ -2764,6 +2796,7 @@ export const useIDE = create<State>()(
             cli,
             model,
             effort,
+            parentTaskId,
           });
           console.info(
             `[store.createTaskFromPrompt] taskCreate ok id=${taskId} sessionId=${sessionId}`,
@@ -2831,6 +2864,7 @@ export const useIDE = create<State>()(
             createdAt: Date.now(),
             startedAt: Date.now(),
             endedAt: null,
+            parentTaskId: options?.parentTaskId ?? null,
           };
           set((s) => {
             // Dedup by id — if the `task.created` WS event already populated
@@ -3197,6 +3231,69 @@ export const useIDE = create<State>()(
         } catch (err) {
           console.warn("[store.detachCliFromTask] failed:", err);
         }
+      },
+
+      // ─── Section 3.1 — diff stat ───────────────────────────────────────────
+
+      loadTaskDiffStat: async (taskId) => {
+        const state = get();
+        const cached = state.taskDiffStatById[taskId];
+        if (cached && Date.now() - cached.fetchedAt < 30_000) {
+          return cached.value;
+        }
+        // Find the workspace that owns this task to get a provider
+        let provider: RemoteAgentProvider | undefined;
+        for (const [wsId, tasks] of Object.entries(state.tasksByWorkspaceId)) {
+          if (tasks.some((t) => t.id === taskId)) {
+            provider = state.agentProvidersByWorkspaceId[wsId];
+            break;
+          }
+        }
+        if (!provider) return null;
+        try {
+          const result = await provider.call<TaskDiffStat>("task.diffStat", { taskId });
+          set((s) => ({
+            taskDiffStatById: {
+              ...s.taskDiffStatById,
+              [taskId]: { value: result, fetchedAt: Date.now() },
+            },
+          }));
+          return result;
+        } catch (err) {
+          console.warn("[store.loadTaskDiffStat] failed:", err);
+          return null;
+        }
+      },
+
+      selectTaskDiffStat: (taskId) => {
+        return get().taskDiffStatById[taskId]?.value ?? null;
+      },
+
+      // ─── Section 3.2 — sessions by kind ───────────────────────────────────
+
+      selectSessionsByKind: (workspaceId, kind) => {
+        const sessions = get().sessionsByWorkspaceId[workspaceId] ?? [];
+        return sessions.filter((s) => (s.kind as string) === kind);
+      },
+
+      // ─── Section 3.4 — task tree ───────────────────────────────────────────
+
+      selectTaskTree: (workspaceId) => {
+        const tasks = get().tasksByWorkspaceId[workspaceId] ?? [];
+        const nodeMap = new Map<string, TaskNode>();
+        for (const t of tasks) {
+          nodeMap.set(t.id, { ...t, children: [] });
+        }
+        const roots: TaskNode[] = [];
+        for (const node of nodeMap.values()) {
+          const parentId = node.parentTaskId;
+          if (parentId && nodeMap.has(parentId)) {
+            nodeMap.get(parentId)!.children.push(node);
+          } else {
+            roots.push(node);
+          }
+        }
+        return roots;
       },
 
       createFolder: (name) => {

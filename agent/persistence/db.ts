@@ -14,6 +14,7 @@ export type Session = {
   model: string | null;
   approval_mode: string | null;
   mode: "chat" | "terminal";
+  kind: string;
   created_at: number;
   updated_at: number;
   status: string;
@@ -78,6 +79,10 @@ export type DbTask = {
   created_at: number;
   started_at: number | null;
   ended_at: number | null;
+  diff_added: number | null;
+  diff_deleted: number | null;
+  diff_files_count: number | null;
+  parent_task_id: string | null;
 };
 
 export type DbTaskLog = {
@@ -295,6 +300,37 @@ function migrateIfNeeded(db: Database.Database): void {
       db.pragma("foreign_keys = ON");
     }
     console.info("[persistence] migration completed: task_sessions table created");
+  }
+
+  // Section 3.2 — sessions.kind
+  if (!sessionCols.includes("kind")) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'terminal'`);
+    db.exec(`UPDATE sessions SET kind = CASE WHEN mode = 'chat' THEN 'chat' ELSE 'terminal' END WHERE kind = 'terminal' AND mode IS NOT NULL`);
+    console.log(`[persistence] migration: added sessions.kind (backfilled from mode)`);
+  }
+
+  // Section 3.1 — tasks diff stats
+  const taskColsPost = (db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[]).map(
+    (r) => r.name,
+  );
+  if (!taskColsPost.includes("diff_added")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN diff_added INTEGER`);
+    console.log(`[persistence] migration: added tasks.diff_added`);
+  }
+  if (!taskColsPost.includes("diff_deleted")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN diff_deleted INTEGER`);
+    console.log(`[persistence] migration: added tasks.diff_deleted`);
+  }
+  if (!taskColsPost.includes("diff_files_count")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN diff_files_count INTEGER`);
+    console.log(`[persistence] migration: added tasks.diff_files_count`);
+  }
+
+  // Section 3.4 — tasks.parent_task_id
+  if (!taskColsPost.includes("parent_task_id")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN parent_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL`);
+    console.log(`[persistence] migration: added tasks.parent_task_id`);
   }
 }
 
@@ -550,6 +586,7 @@ type CreateSessionParams = {
   model?: string;
   approvalMode?: string;
   mode?: "chat" | "terminal";
+  kind?: string;
 };
 
 type SessionPatch = {
@@ -566,10 +603,10 @@ export const sessionsRepo = {
     const now = Date.now();
     const id = params.id ?? randomUUID();
     db.prepare<
-      [string, string, string, string | null, string | null, string | null, string, number, number]
+      [string, string, string, string | null, string | null, string | null, string, string, number, number]
     >(
-      `INSERT OR IGNORE INTO sessions (id, workspace_id, cli, title, model, approval_mode, mode, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO sessions (id, workspace_id, cli, title, model, approval_mode, mode, kind, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       params.workspaceId,
@@ -578,6 +615,7 @@ export const sessionsRepo = {
       params.model ?? null,
       params.approvalMode ?? null,
       params.mode ?? "chat",
+      params.kind ?? "terminal",
       now,
       now,
     );
@@ -900,6 +938,7 @@ type CreateTaskParams = {
   effort?: string;
   baseRef?: string;
   sessionId?: string;
+  parentTaskId?: string;
 };
 
 export const tasksRepo = {
@@ -918,10 +957,11 @@ export const tasksRepo = {
         string | null,
         string | null,
         number,
+        string | null,
       ]
     >(
-      `INSERT INTO tasks (id, workspace_id, parent_session_id, title, prompt, cli, model, effort, session_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, workspace_id, parent_session_id, title, prompt, cli, model, effort, session_id, created_at, parent_task_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       params.id,
       params.workspaceId,
@@ -933,6 +973,7 @@ export const tasksRepo = {
       params.effort ?? null,
       params.sessionId ?? null,
       now,
+      params.parentTaskId ?? null,
     );
     return tasksRepo.get(params.id)!;
   },
@@ -977,6 +1018,10 @@ export const tasksRepo = {
         | "session_id"
         | "started_at"
         | "ended_at"
+        | "diff_added"
+        | "diff_deleted"
+        | "diff_files_count"
+        | "parent_task_id"
       >
     >,
   ): void {
@@ -1024,10 +1069,53 @@ export const tasksRepo = {
       sets.push("ended_at = ?");
       vals.push(patch.ended_at);
     }
+    if (patch.diff_added !== undefined) {
+      sets.push("diff_added = ?");
+      vals.push(patch.diff_added);
+    }
+    if (patch.diff_deleted !== undefined) {
+      sets.push("diff_deleted = ?");
+      vals.push(patch.diff_deleted);
+    }
+    if (patch.diff_files_count !== undefined) {
+      sets.push("diff_files_count = ?");
+      vals.push(patch.diff_files_count);
+    }
+    if (patch.parent_task_id !== undefined) {
+      sets.push("parent_task_id = ?");
+      vals.push(patch.parent_task_id);
+    }
 
     if (sets.length === 0) return;
     vals.push(id);
     db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+  },
+
+  listChildren(parentId: string): DbTask[] {
+    const db = openDb();
+    return db
+      .prepare<[string], DbTask>(
+        `SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC`,
+      )
+      .all(parentId);
+  },
+
+  getRootAncestor(taskId: string): DbTask | null {
+    const db = openDb();
+    const row = db
+      .prepare<[string], DbTask>(
+        `WITH RECURSIVE ancestors(id, parent_task_id) AS (
+           SELECT id, parent_task_id FROM tasks WHERE id = ?
+           UNION ALL
+           SELECT t.id, t.parent_task_id FROM tasks t
+           INNER JOIN ancestors a ON t.id = a.parent_task_id
+         )
+         SELECT * FROM tasks WHERE id = (
+           SELECT id FROM ancestors WHERE parent_task_id IS NULL LIMIT 1
+         )`,
+      )
+      .get(taskId);
+    return row ?? null;
   },
 
   delete(id: string): void {
