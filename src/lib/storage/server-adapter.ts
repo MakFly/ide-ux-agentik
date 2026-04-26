@@ -3,9 +3,8 @@
  * The client holds NO copy beyond an in-memory cache hydrated on demand.
  *
  * Connection: the singleton `RemoteAgentProvider` is built lazily from the
- * `AgentEndpoint` saved in localStorage (see ./endpoint.ts). If no endpoint
- * is configured yet (pre-wizard), every method throws `StorageNotConnected`
- * — callers should send the user through the setup wizard first.
+ * global `AgentEndpoint` resolved by ./endpoint.ts. If no endpoint is
+ * configured yet (pre-wizard), every method throws `StorageNotConnected`.
  */
 import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import type { Org, User } from "../types/org";

@@ -3,7 +3,11 @@ import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   AlertTriangle,
   ArrowLeft,
+  CheckCircle2,
+  Copy,
   ExternalLink,
+  KeyRound,
+  Loader2,
   Pencil,
   Plus,
   Search,
@@ -14,7 +18,7 @@ import {
 import { toast } from "sonner";
 import { z } from "zod";
 
-import { useIDE, type Theme } from "@/store/ide";
+import { useIDE, type Theme, type Workspace } from "@/store/ide";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
@@ -64,13 +68,30 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useMcpServers } from "@/lib/mcp/use-mcp-servers";
 import { mcpClient } from "@/lib/mcp/client";
 import type { McpEntry, McpServer } from "@/lib/mcp/types";
 import { providerFor } from "@/lib/fs";
-import type { RemoteAgentProvider } from "@/lib/fs/remote-agent";
+import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
+import {
+  getEndpoint,
+  getEndpointSource,
+  resetProviderCache,
+  setEndpoint,
+  storage,
+  type AgentEndpoint,
+} from "@/lib/storage";
 
-const SECTION_IDS = ["appearance", "layout", "ai", "providers", "mcp"] as const;
+const SECTION_IDS = [
+  "agent",
+  "workspace",
+  "appearance",
+  "layout",
+  "ai",
+  "providers",
+  "mcp",
+] as const;
 const PROVIDER_IDS = ["codex", "claude", "opencode", "gemini"] as const;
 
 const settingsSearchSchema = z.object({
@@ -94,7 +115,7 @@ function SettingsPage() {
   const { login, section: urlSection, provider: urlProvider } = Route.useSearch();
   const navigate = useNavigate({ from: "/settings" });
 
-  const section: SectionId = urlSection ?? "appearance";
+  const section: SectionId = urlSection ?? "agent";
   const provider = urlProvider;
 
   const [loginOpen, setLoginOpen] = useState(false);
@@ -206,6 +227,8 @@ function SettingsPage() {
 
         <main className="min-w-0 flex-1">
           <div className="mx-auto w-full max-w-3xl px-8 py-10">
+            {section === "agent" && <AgentSection />}
+            {section === "workspace" && <WorkspaceSection />}
             {section === "appearance" && <AppearanceSection />}
             {section === "layout" && <LayoutSection />}
             {section === "ai" && <AISection />}
@@ -231,6 +254,10 @@ function sectionLabel(id: SectionId): string {
   switch (id) {
     case "appearance":
       return "Appearance";
+    case "agent":
+      return "Agent";
+    case "workspace":
+      return "Workspace";
     case "layout":
       return "Layout";
     case "ai":
@@ -244,6 +271,536 @@ function sectionLabel(id: SectionId): string {
 
 function SectionWrap({ children }: { children: ReactNode }) {
   return <div className="flex flex-col gap-6">{children}</div>;
+}
+
+function AgentSection() {
+  const [currentEndpoint, setCurrentEndpoint] = useState<AgentEndpoint | null>(null);
+  const [endpointSource, setEndpointSource] = useState<"saved" | "injected" | "env" | "none">(
+    "none",
+  );
+  const [url, setUrl] = useState("");
+  const [token, setToken] = useState("");
+  const [label, setLabel] = useState("local-dev");
+  const [saving, setSaving] = useState(false);
+
+  const updateWorkspace = useIDE((s) => s.updateWorkspace);
+  const hydrateWorkspacesFromStorage = useIDE((s) => s.hydrateWorkspacesFromStorage);
+  const hydrateTasks = useIDE((s) => s.hydrateTasks);
+  const setCurrentOrgId = useIDE((s) => s.setCurrentOrgId);
+
+  useEffect(() => {
+    const endpoint = getEndpoint();
+    setCurrentEndpoint(endpoint);
+    setEndpointSource(getEndpointSource());
+    setUrl(endpoint?.url ?? "");
+    setToken(endpoint?.token ?? "");
+    setLabel(endpoint?.label ?? "local-dev");
+  }, []);
+
+  async function syncRemoteWorkspaces(endpoint: AgentEndpoint) {
+    const store = useIDE.getState();
+    let orgId = store.currentOrgId;
+    if (!orgId) {
+      const org = await storage.getOrg().catch(() => null);
+      if (org) {
+        orgId = org.id;
+        setCurrentOrgId(org.id);
+        await hydrateWorkspacesFromStorage(org.id);
+      }
+    }
+
+    const remoteWorkspaces = useIDE
+      .getState()
+      .workspaces.filter((workspace) => workspace.source.kind === "remote-agent");
+
+    for (const workspace of remoteWorkspaces) {
+      if (workspace.source.kind !== "remote-agent") continue;
+      await updateWorkspace({
+        ...workspace,
+        source: {
+          ...workspace.source,
+          url: endpoint.url,
+          token: endpoint.token,
+          label: endpoint.label,
+        },
+      });
+    }
+
+    await Promise.all(remoteWorkspaces.map((workspace) => hydrateTasks(workspace.id)));
+    return remoteWorkspaces.length;
+  }
+
+  async function handleSave() {
+    const nextUrl = url.trim();
+    const nextToken = token.trim();
+    const nextLabel = label.trim() || "agent";
+
+    if (!nextUrl || !nextToken) {
+      toast.error("Agent URL and token are required");
+      return;
+    }
+    if (!/^wss?:\/\//.test(nextUrl)) {
+      toast.error("Agent URL must start with ws:// or wss://");
+      return;
+    }
+
+    const endpoint: AgentEndpoint = { url: nextUrl, token: nextToken, label: nextLabel };
+    const provider = new RemoteAgentProvider(endpoint.label, endpoint.url, endpoint.token);
+    setSaving(true);
+    try {
+      await provider.connect();
+      await provider.disconnect().catch(() => {});
+      setEndpoint(endpoint);
+      resetProviderCache();
+      setCurrentEndpoint(endpoint);
+      setEndpointSource("saved");
+      setUrl(endpoint.url);
+      setToken(endpoint.token);
+      setLabel(endpoint.label);
+      const synced = await syncRemoteWorkspaces(endpoint);
+      toast.success(
+        synced > 0
+          ? `Global agent saved and ${synced} workspace token${synced > 1 ? "s" : ""} updated`
+          : "Global agent saved",
+      );
+    } catch (e) {
+      await provider.disconnect().catch(() => {});
+      toast.error(e instanceof Error ? e.message : "Agent authentication failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <SectionWrap>
+      <SectionHeader
+        title="Global Agent"
+        description="The shared remote-agent endpoint used by /settings, organization storage, task hydration, and CLI execution."
+      />
+      <Card>
+        <div className="py-4">
+          <div className="mb-4 flex items-start gap-3 rounded-lg border border-border/80 bg-background/45 p-3">
+            <KeyRound className="mt-0.5 h-4 w-4 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-medium">Connection source</div>
+              <p className="mt-1 text-[12px] text-muted-foreground">
+                {endpointSource === "saved"
+                  ? "Using the saved global endpoint from this settings page."
+                  : endpointSource === "env"
+                    ? "Using VITE_DEV_AGENT_URL / VITE_DEV_AGENT_TOKEN until you save an override."
+                    : endpointSource === "injected"
+                      ? "Using window.__AGENT__ until you save an override."
+                      : "No global endpoint configured yet."}
+              </p>
+            </div>
+            {currentEndpoint ? (
+              <span className="inline-flex items-center gap-1 rounded bg-status-add/15 px-2 py-1 text-[11px] text-status-add">
+                <CheckCircle2 className="h-3 w-3" />
+                {endpointSource}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded bg-status-warn/15 px-2 py-1 text-[11px] text-status-warn">
+                <AlertTriangle className="h-3 w-3" />
+                missing
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="global-agent-url">Agent URL</Label>
+              <Input
+                id="global-agent-url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="ws://localhost:8080"
+                className="mt-2 font-mono"
+              />
+            </div>
+            <div>
+              <Label htmlFor="global-agent-token">Agent token</Label>
+              <Input
+                id="global-agent-token"
+                type="password"
+                autoComplete="off"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="Paste the agent token"
+                className="mt-2 font-mono"
+              />
+            </div>
+            <div>
+              <Label htmlFor="global-agent-label">Label</Label>
+              <Input
+                id="global-agent-label"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder="local-dev"
+                className="mt-2"
+              />
+            </div>
+          </div>
+
+          <div className="mt-5 flex items-center justify-between gap-3 border-t border-border pt-4">
+            <p className="text-[12px] text-muted-foreground">
+              Saving here makes the agent global and applies it to all remote-agent workspaces.
+            </p>
+            <Button onClick={handleSave} disabled={saving} className="shrink-0 gap-2">
+              {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {saving ? "Testing…" : "Test & save global agent"}
+            </Button>
+          </div>
+        </div>
+      </Card>
+    </SectionWrap>
+  );
+}
+
+function workspaceSourceLabel(workspace: Workspace): string {
+  switch (workspace.source.kind) {
+    case "remote-agent":
+      return workspace.rootPath ? "Remote clone" : "Remote agent";
+    case "local-web":
+      return "Local folder";
+    case "mock":
+      return "Demo";
+  }
+}
+
+function workspaceLocation(workspace: Workspace): string {
+  if (workspace.rootPath) return workspace.rootPath;
+  if (workspace.source.kind === "remote-agent") {
+    return workspace.source.label || workspace.source.url;
+  }
+  if (workspace.source.kind === "local-web") return workspace.source.name;
+  return workspace.source.id;
+}
+
+function WorkspaceSection() {
+  const workspaces = useIDE((s) => s.workspaces);
+  const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
+  const removeWorkspace = useIDE((s) => s.removeWorkspace);
+  const currentOrgId = useIDE((s) => s.currentOrgId);
+  const setCurrentOrgId = useIDE((s) => s.setCurrentOrgId);
+  const hydrateWorkspacesFromStorage = useIDE((s) => s.hydrateWorkspacesFromStorage);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [deleteTargets, setDeleteTargets] = useState<Workspace[]>([]);
+  const [confirmName, setConfirmName] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [loading, setLoading] = useState(workspaces.length === 0);
+
+  const selectedWorkspaces = useMemo(
+    () => workspaces.filter((workspace) => selectedIds.includes(workspace.id)),
+    [selectedIds, workspaces],
+  );
+  const allSelected = workspaces.length > 0 && selectedIds.length === workspaces.length;
+  const someSelected = selectedIds.length > 0 && !allSelected;
+  const confirmPhrase = useMemo(() => {
+    if (deleteTargets.length === 1) return deleteTargets[0]?.name ?? "";
+    if (deleteTargets.length > 1) return `delete ${deleteTargets.length} workspaces`;
+    return "";
+  }, [deleteTargets]);
+  const canDelete = deleteTargets.length > 0 && confirmName.trim() === confirmPhrase;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      setLoading(workspaces.length === 0);
+      try {
+        let orgId = currentOrgId;
+        if (!orgId) {
+          const org = await storage.getOrg();
+          orgId = org?.id ?? null;
+          if (orgId) setCurrentOrgId(orgId);
+        }
+        if (orgId) {
+          await hydrateWorkspacesFromStorage(orgId);
+        }
+      } catch (e) {
+        console.warn("[Settings.Workspace] Failed to hydrate workspaces:", e);
+        toast.error(e instanceof Error ? e.message : "Could not load workspaces");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentOrgId, hydrateWorkspacesFromStorage, setCurrentOrgId, workspaces.length]);
+
+  useEffect(() => {
+    setSelectedIds((current) =>
+      current.filter((id) => workspaces.some((workspace) => workspace.id === id)),
+    );
+  }, [workspaces]);
+
+  function toggleWorkspace(workspaceId: string, checked: boolean) {
+    setSelectedIds((current) =>
+      checked
+        ? Array.from(new Set([...current, workspaceId]))
+        : current.filter((id) => id !== workspaceId),
+    );
+  }
+
+  function toggleAll(checked: boolean) {
+    setSelectedIds(checked ? workspaces.map((workspace) => workspace.id) : []);
+  }
+
+  function openDeleteDialog(targets: Workspace[]) {
+    setDeleteTargets(targets);
+    setConfirmName("");
+  }
+
+  async function copyConfirmPhrase() {
+    if (!confirmPhrase) return;
+    try {
+      await navigator.clipboard.writeText(confirmPhrase);
+      toast.success("Confirmation copied");
+    } catch {
+      toast.error("Could not copy confirmation");
+    }
+  }
+
+  async function handleDelete() {
+    if (!canDelete) return;
+    setDeleting(true);
+    const targets = [...deleteTargets];
+    let deleted = 0;
+    try {
+      for (const workspace of targets) {
+        await removeWorkspace(workspace.id);
+        deleted += 1;
+      }
+      toast.success(
+        deleted === 1 ? `Workspace "${targets[0]?.name}" deleted` : `${deleted} workspaces deleted`,
+      );
+      setSelectedIds((current) => current.filter((id) => !targets.some((w) => w.id === id)));
+      setDeleteTargets([]);
+      setConfirmName("");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not delete selected workspaces");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <SectionWrap>
+      <SectionHeader
+        title="Workspace"
+        description="All registered workspaces. Deleting a cloned remote workspace also deletes its folder on the agent host."
+      />
+      <Card
+        title="Existing workspaces"
+        description={`${workspaces.length} workspace${workspaces.length > 1 ? "s" : ""} configured.`}
+      >
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 py-8 text-[13px] text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Loading workspaces…
+          </div>
+        ) : workspaces.length === 0 ? (
+          <div className="py-8 text-center text-[13px] text-muted-foreground">
+            No workspace configured yet.
+          </div>
+        ) : (
+          <div className="-mx-5">
+            <div className="flex items-center justify-between gap-3 border-b border-border/80 px-5 py-3">
+              <div className="text-[12px] text-muted-foreground">
+                {selectedIds.length > 0
+                  ? `${selectedIds.length} selected`
+                  : "Select rows to delete several workspaces at once."}
+              </div>
+              <div className="flex items-center gap-2">
+                {selectedIds.length > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8"
+                    onClick={() => setSelectedIds([])}
+                    disabled={deleting}
+                  >
+                    Clear selection
+                  </Button>
+                )}
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="h-8 gap-2"
+                  disabled={selectedWorkspaces.length === 0 || deleting}
+                  onClick={() => openDeleteDialog(selectedWorkspaces)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete selected
+                </Button>
+              </div>
+            </div>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-10 px-5">
+                    <Checkbox
+                      aria-label="Select all workspaces"
+                      checked={allSelected ? true : someSelected ? "indeterminate" : false}
+                      onCheckedChange={(checked) => toggleAll(checked === true)}
+                    />
+                  </TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Location</TableHead>
+                  <TableHead className="w-[96px] pr-5 text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {workspaces.map((workspace) => {
+                  const selected = selectedIds.includes(workspace.id);
+                  return (
+                    <TableRow key={workspace.id} data-state={selected ? "selected" : undefined}>
+                      <TableCell className="px-5">
+                        <Checkbox
+                          aria-label={`Select ${workspace.name}`}
+                          checked={selected}
+                          onCheckedChange={(checked) =>
+                            toggleWorkspace(workspace.id, checked === true)
+                          }
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[11px] font-semibold text-white"
+                            style={{ backgroundColor: workspace.color }}
+                          >
+                            {workspace.letter}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="truncate text-[13px] font-medium">{workspace.name}</div>
+                            {workspace.id === activeWorkspaceId && (
+                              <div className="text-[11px] text-muted-foreground">Active</div>
+                            )}
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="secondary">{workspaceSourceLabel(workspace)}</Badge>
+                      </TableCell>
+                      <TableCell className="max-w-[280px] truncate font-mono text-[12px] text-muted-foreground">
+                        {workspaceLocation(workspace)}
+                      </TableCell>
+                      <TableCell className="pr-5 text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 text-destructive hover:text-destructive"
+                          onClick={() => openDeleteDialog([workspace])}
+                        >
+                          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                          Delete
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </Card>
+
+      <AlertDialog
+        open={deleteTargets.length > 0}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeleteTargets([]);
+            setConfirmName("");
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {deleteTargets.length === 1 ? "workspace" : "workspaces"}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTargets.length === 1
+                ? `This removes "${deleteTargets[0]?.name}" from the app. If it has a cloned folder path, that folder is deleted on the agent host as well.`
+                : `This removes ${deleteTargets.length} workspaces from the app. Any cloned folder paths are deleted on the agent host as well.`}{" "}
+              This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-3">
+            <div className="rounded-lg border border-border/80 bg-muted/35 p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-[12px] font-medium text-muted-foreground">
+                  Confirmation text
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 px-2 text-[12px]"
+                  onClick={copyConfirmPhrase}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  Copy
+                </Button>
+              </div>
+              <code className="block select-all rounded-md bg-background px-2.5 py-2 font-mono text-[12px] text-foreground">
+                {confirmPhrase}
+              </code>
+            </div>
+            <Label htmlFor="delete-workspace-confirm">
+              Paste or type the confirmation text to continue
+            </Label>
+            <Input
+              id="delete-workspace-confirm"
+              value={confirmName}
+              onChange={(e) => setConfirmName(e.target.value)}
+              autoComplete="off"
+              disabled={deleting}
+              className="font-mono"
+            />
+            <div className="max-h-36 overflow-auto rounded-lg border border-border/80 bg-background/40 p-2">
+              {deleteTargets.map((workspace) => (
+                <div key={workspace.id} className="flex items-start gap-2 px-1 py-1.5">
+                  <span
+                    className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-semibold text-white"
+                    style={{ backgroundColor: workspace.color }}
+                  >
+                    {workspace.letter}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="truncate text-[12.5px] font-medium">{workspace.name}</div>
+                    {workspace.rootPath && (
+                      <div className="truncate font-mono text-[11px] text-muted-foreground">
+                        {workspace.rootPath}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={!canDelete || deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(event) => {
+                event.preventDefault();
+                void handleDelete();
+              }}
+            >
+              {deleting && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+              Delete workspace
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </SectionWrap>
+  );
 }
 
 function AppearanceSection() {

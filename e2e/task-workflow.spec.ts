@@ -401,9 +401,9 @@ test.describe("task workflow — store-level", () => {
     expect(result.status).toBe("completed");
   });
 
-  test("12. child task with parentSessionId joins parent's tab — no new tab", async ({ page }) => {
-    // Verify that seeding a child task (parentSessionId set) does not create
-    // a new tab; instead it updates the existing parent's tab.
+  test("12. seeding child task does not create implicit session tabs", async ({ page }) => {
+    // The central Thread is now the stable task surface. Tasks should not be
+    // mirrored into WorkspaceTerminal tabs as a navigation side effect.
     await page.goto("/");
     await waitForTestAPI(page);
     await clearAllSessionsInPage(page);
@@ -428,7 +428,7 @@ test.describe("task workflow — store-level", () => {
       const store = api.getStore();
       return (store.sessionsByWorkspaceId[wsId] ?? []).length;
     }, wsId);
-    expect(tabCount).toBe(1);
+    expect(tabCount).toBe(0);
 
     // Seed child task B with parentSessionId = root.sessionId
     await seedTaskInPage(page, {
@@ -447,21 +447,20 @@ test.describe("task workflow — store-level", () => {
       const store = api.getStore();
       return (store.sessionsByWorkspaceId[wsId] ?? []).length;
     }, wsId);
-    expect(tabCount).toBe(1); // STILL 1 — child joined the conversation tab
+    expect(tabCount).toBe(0);
 
-    // The single tab's taskId should now point to the child (latest in chain)
-    const tab = await page.evaluate((wsId) => {
+    const taskIds = await page.evaluate((wsId) => {
       const api = (window as any).__test;
       const store = api.getStore();
-      return (store.sessionsByWorkspaceId[wsId] ?? [])[0];
+      return (store.tasksByWorkspaceId[wsId] ?? []).map((task: any) => task.id);
     }, wsId);
-    expect(tab.taskId).toBe("child-task");
-    expect(tab.id).toBe(rootSessionId); // tab keyed on root.sessionId
+    expect(taskIds).toContain("root-task");
+    expect(taskIds).toContain("child-task");
   });
 
-  test("13. multiple tasks of same conversation produce 1 tab", async ({ page }) => {
-    // Verify that hydrating root + 2 child tasks produces 1 session tab
-    // with the latest child as the active taskId.
+  test("13. multiple conversation tasks do not produce tabs", async ({ page }) => {
+    // Legacy child rows may still hydrate, but the new Thread workflow no
+    // longer mirrors them into session tabs.
     await page.goto("/");
     await waitForTestAPI(page);
     await clearAllSessionsInPage(page);
@@ -512,12 +511,218 @@ test.describe("task workflow — store-level", () => {
       return {
         sessionCount: sessions.length,
         taskCount: tasks.length,
-        latestTaskInTab: sessions[0]?.taskId,
       };
     }, wsId);
 
     expect(result.taskCount).toBe(3);
-    expect(result.sessionCount).toBe(1); // 1 tab, 3 tasks all part of same conversation
-    expect(result.latestTaskInTab).toBe("t3"); // tab points to latest child
+    expect(result.sessionCount).toBe(0);
+  });
+
+  test("14. closing temporary CLI session restores previous task session context", async ({ page }) => {
+    await page.goto("/");
+    await waitForTestAPI(page);
+    await clearAllSessionsInPage(page);
+
+    const wsId = await getActiveWorkspaceId(page);
+
+    await page.evaluate(() => {
+      const api = (window as any).__test.getStore();
+      api.addAgentSession("codex");
+    });
+    const baseSessionBefore = await page.evaluate((wsIdToCheck) => {
+      const api = (window as any).__test.getStore();
+      const sessions = api.sessionsByWorkspaceId[wsIdToCheck] ?? [];
+      return sessions[sessions.length - 1]?.id;
+    }, wsId);
+    expect(baseSessionBefore).toBeDefined();
+
+    const baseSessionId = baseSessionBefore;
+
+    const task = await seedTaskInPage(page, {
+      id: "restore-task",
+      sessionId: baseSessionId,
+      workspaceId: wsId,
+      title: "Existing task",
+      prompt: "Existing task prompt",
+      cli: "codex",
+      status: "done",
+    });
+
+    await page.evaluate((taskId) => {
+      const store = (window as any).__test?.getStore();
+      if (!store?.setActiveTask) throw new Error("__test store setActiveTask unavailable");
+      store.setActiveTask(taskId);
+    }, task.id);
+
+    const before = await page.evaluate((wsIdToCheck) => {
+      const api = (window as any).__test.getStore();
+      return {
+        activeTaskId: api.activeTaskId,
+        activeSessionId: api.activeSessionIdByWorkspaceId[wsIdToCheck],
+        sessionCount: (api.sessionsByWorkspaceId[wsIdToCheck] ?? []).length,
+      };
+    }, wsId);
+    expect(before.activeTaskId).toBe(task.id);
+    expect(before.activeSessionId).toBe(baseSessionId);
+
+    const tempSessionId = await page.evaluate(() => {
+      const api = (window as any).__test.getStore();
+      api.setActiveTask(null);
+      api.setActiveSession("");
+      api.addAgentSession("codex");
+      const nextApi = (window as any).__test.getStore();
+      const sessions = nextApi.sessionsByWorkspaceId[nextApi.activeWorkspaceId] ?? [];
+      return sessions[sessions.length - 1]?.id;
+    });
+    const whileOpen = await page.evaluate((wsIdToCheck) => {
+      const api = (window as any).__test.getStore();
+      return {
+        activeTaskId: api.activeTaskId,
+        activeSessionId: api.activeSessionIdByWorkspaceId[wsIdToCheck],
+        sessionCount: (api.sessionsByWorkspaceId[wsIdToCheck] ?? []).length,
+      };
+    }, wsId);
+    expect(whileOpen.activeTaskId).toBeNull();
+    expect(whileOpen.activeSessionId).toBe(tempSessionId);
+    expect(whileOpen.sessionCount).toBe(2);
+
+    await page.evaluate((sid) => {
+      const api = (window as any).__test.getStore();
+      api.closeAgentSession(sid);
+    }, tempSessionId);
+
+    const after = await page.evaluate((wsIdToCheck) => {
+      const api = (window as any).__test.getStore();
+      return {
+        activeTaskId: api.activeTaskId,
+        activeSessionId: api.activeSessionIdByWorkspaceId[wsIdToCheck],
+        sessionIds: (api.sessionsByWorkspaceId[wsIdToCheck] ?? []).map((session: any) => session.id),
+        sessionCount: (api.sessionsByWorkspaceId[wsIdToCheck] ?? []).length,
+      };
+    }, wsId);
+
+    expect(after.activeSessionId).toBe(baseSessionId);
+    expect(after.activeTaskId).toBe(task.id);
+    expect(after.sessionCount).toBe(1);
+  });
+
+  test("15. closing temporary non-task CLI restores previous task tab and its cached data", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForTestAPI(page);
+    await clearAllSessionsInPage(page);
+
+    const wsId = await getActiveWorkspaceId(page);
+
+    const task = await seedTaskInPage(page, {
+      id: "restore-task-data",
+      sessionId: "restore-task-session",
+      workspaceId: wsId,
+      title: "Existing task for restore",
+      prompt: "Existing task prompt",
+      cli: "codex",
+      status: "done",
+    });
+
+    await pushTaskEventInPage(page, task.id, {
+      type: "assistant_message",
+      text: "message-before-close",
+    });
+
+    await page.evaluate((taskId) => {
+      const store = (window as any).__test.getStore();
+      store.setActiveTask(taskId);
+    }, task.id);
+
+    const tempSessionId = await page.evaluate(() => {
+      const store = (window as any).__test.getStore();
+      store.setActiveTask(null);
+      store.setActiveSession("");
+      return store.addAgentSession("codex");
+    });
+
+    const whileOpen = await page.evaluate((wsIdToCheck) => {
+      const store = (window as any).__test.getStore();
+      return {
+        activeTaskId: store.activeTaskId,
+        activeSessionId: store.activeSessionIdByWorkspaceId[wsIdToCheck],
+        sessionCount: (store.sessionsByWorkspaceId[wsIdToCheck] ?? []).length,
+      };
+    }, wsId);
+    expect(whileOpen.activeTaskId).toBeNull();
+    expect(whileOpen.activeSessionId).not.toBe(task.sessionId);
+    expect(whileOpen.activeSessionId).toBe(tempSessionId);
+    expect(whileOpen.sessionCount).toBe(2);
+
+    await page.evaluate((tempSid) => {
+      const store = (window as any).__test.getStore();
+      store.closeAgentSession(tempSid);
+    }, tempSessionId);
+
+    const after = await page.evaluate(({ taskId, wsIdToCheck }) => {
+      const store = (window as any).__test.getStore();
+      return {
+        activeTaskId: store.activeTaskId,
+        activeSessionId: store.activeSessionIdByWorkspaceId[wsIdToCheck],
+        sessionCount: (store.sessionsByWorkspaceId[wsIdToCheck] ?? []).length,
+        taskEvents: (store.taskEventsByTaskId[taskId] ?? []).length,
+      };
+    }, { taskId: task.id, wsIdToCheck: wsId });
+
+    expect(after.activeTaskId).toBe(task.id);
+    expect(after.activeSessionId).toBe(task.sessionId);
+    expect(after.sessionCount).toBe(1);
+    expect(after.taskEvents).toBe(1);
+  });
+
+  test("16. closing active task CLI restores fallback non-task CLI", async ({ page }) => {
+    await page.goto("/");
+    await waitForTestAPI(page);
+    await clearAllSessionsInPage(page);
+
+    const wsId = await getActiveWorkspaceId(page);
+
+    const tempSessionId = await page.evaluate(() => {
+      const store = (window as any).__test.getStore();
+      return store.addAgentSession("codex");
+    });
+
+    const task = await seedTaskInPage(page, {
+      id: "restore-fallback-task",
+      sessionId: "restore-fallback-session",
+      workspaceId: wsId,
+      title: "Task restored after closing",
+      prompt: "Prompt",
+      cli: "codex",
+      status: "done",
+    });
+
+    await page.evaluate((taskId) => {
+      const store = (window as any).__test.getStore();
+      store.setActiveTask(taskId);
+    }, task.id);
+
+    await page.evaluate((taskSessionId) => {
+      const store = (window as any).__test.getStore();
+      store.closeSessionTab(taskSessionId);
+    }, task.sessionId);
+
+    const after = await page.evaluate(({ tempSidToCheck, wsIdToCheck }) => {
+      const store = (window as any).__test.getStore();
+      return {
+        activeTaskId: store.activeTaskId,
+        activeSessionId: store.activeSessionIdByWorkspaceId[wsIdToCheck],
+        sessionCount: (store.sessionsByWorkspaceId[wsIdToCheck] ?? []).length,
+        hasTempSession: (store.sessionsByWorkspaceId[wsIdToCheck] ?? []).some(
+          (session: { id: string }) => session.id === tempSidToCheck,
+        ),
+      };
+    }, { tempSidToCheck: tempSessionId, wsIdToCheck: wsId });
+
+    expect(after.activeTaskId).toBeNull();
+    expect(after.activeSessionId).toBe(tempSessionId);
+    expect(after.sessionCount).toBe(1);
+    expect(after.hasTempSession).toBe(true);
   });
 });

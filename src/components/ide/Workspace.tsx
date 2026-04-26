@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { X, FileCode, Plus, ChevronLeft, ChevronRight, LogIn, Pin, PinOff } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
@@ -21,6 +21,19 @@ import {
   type FileTab,
 } from "@/store/ide";
 import { Thread } from "@/components/assistant-ui/thread";
+import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
+import {
+  CompositeAttachmentAdapter,
+  SimpleImageAttachmentAdapter,
+  SimpleTextAttachmentAdapter,
+  useExternalStoreRuntime,
+  type AttachmentAdapter,
+  type AppendMessage,
+  type CompleteAttachment,
+  type PendingAttachment,
+  type ThreadSuggestion,
+  type ThreadMessageLike,
+} from "@assistant-ui/react";
 import {
   AgentSessionView,
   SessionModeToggle,
@@ -37,6 +50,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import type { Task, TaskLogEntry } from "@/lib/fs/remote-agent";
 
 const agentFaviconSrc: Record<TerminalKind, string> = {
   codex: "/agents/codex.svg",
@@ -252,6 +266,263 @@ const AGENT_OPTIONS: { id: TerminalKind; label: string }[] = [
   { id: "gemini", label: "Gemini" },
 ];
 
+const EMPTY_TASKS: Task[] = [];
+const EMPTY_TASK_EVENTS: TaskLogEntry[] = [];
+const EMPTY_THREAD_SUGGESTIONS: ThreadSuggestion[] = [];
+const NEW_TASK_THREAD_SUGGESTIONS: ThreadSuggestion[] = [
+  { prompt: "Audit the current workspace and identify the riskiest UX bugs" },
+  { prompt: "Explain how tasks and CLI sessions should be structured here" },
+];
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+class GenericFileAttachmentAdapter implements AttachmentAdapter {
+  accept = "*";
+
+  async add({ file }: { file: File }): Promise<PendingAttachment> {
+    return {
+      id: crypto.randomUUID(),
+      type: "file",
+      name: file.name,
+      contentType: file.type || "application/octet-stream",
+      file,
+      status: { type: "requires-action", reason: "composer-send" },
+    };
+  }
+
+  async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
+    const dataUrl = await readFileAsDataUrl(attachment.file);
+    const data = dataUrl.replace(/^data:[^;]+;base64,/, "");
+
+    return {
+      ...attachment,
+      status: { type: "complete" },
+      content: [
+        {
+          type: "file",
+          filename: attachment.name,
+          data,
+          mimeType: attachment.contentType || "application/octet-stream",
+        },
+      ],
+    };
+  }
+
+  async remove() {
+    // Nothing to clean up: the file is kept only in assistant-ui composer state.
+  }
+}
+
+const threadAttachmentAdapter = new CompositeAttachmentAdapter([
+  new SimpleImageAttachmentAdapter(),
+  new SimpleTextAttachmentAdapter(),
+  new GenericFileAttachmentAdapter(),
+]);
+
+function convertExternalThreadMessage(message: ThreadMessageLike) {
+  return message;
+}
+
+function appendTextMessage(
+  messages: ThreadMessageLike[],
+  role: "assistant" | "user",
+  text: string,
+  id: string,
+  createdAt: Date,
+) {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  const previous = messages[messages.length - 1];
+  if (previous?.role === role && previous.content === trimmed) return;
+  messages.push({ id, role, content: trimmed, createdAt });
+}
+
+function textFromContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      const p = part as Record<string, unknown>;
+      if (typeof p.text === "string") return p.text;
+      if (typeof p.content === "string") return p.content;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function extractUserText(event: unknown): string {
+  if (!event || typeof event !== "object") return "";
+  const data = event as Record<string, unknown>;
+  const type = data.type as string | undefined;
+
+  if (type === "user_message" && typeof data.text === "string") return data.text;
+  if (type === "user") {
+    const message = data.message as Record<string, unknown> | undefined;
+    return textFromContent(message?.content);
+  }
+  return "";
+}
+
+function extractAssistantText(event: unknown): string {
+  if (!event || typeof event !== "object") return "";
+  const data = event as Record<string, unknown>;
+  const type = data.type as string | undefined;
+
+  if (type === "assistant_message" && typeof data.text === "string") return data.text;
+  if (type === "assistant") {
+    const message = data.message as Record<string, unknown> | undefined;
+    return textFromContent(message?.content);
+  }
+  if (type === "message" && data.role === "assistant" && typeof data.content === "string") {
+    return data.content;
+  }
+  if (type === "text") {
+    const part = data.part as Record<string, unknown> | undefined;
+    if (typeof part?.text === "string") return part.text;
+    if (typeof data.text === "string") return data.text;
+  }
+  if (type === "item.completed") {
+    const item = data.item as Record<string, unknown> | undefined;
+    if (item?.type === "assistant_message" && typeof item.text === "string") return item.text;
+    if (item?.type === "command_execution" && typeof item.aggregated_output === "string") {
+      const command = typeof item.command === "string" ? `$ ${item.command}\n` : "";
+      return `\`\`\`text\n${command}${item.aggregated_output}\n\`\`\``;
+    }
+  }
+  if (type === "stderr" && typeof data.text === "string") return `stderr:\n${data.text}`;
+  if (type === "error") {
+    const message = typeof data.message === "string" ? data.message : "Unknown agent error";
+    return `Error: ${message}`;
+  }
+  return "";
+}
+
+function buildTaskThreadMessages(
+  task: Task,
+  events: TaskLogEntry[],
+  initialUserMessage?: ThreadMessageLike,
+): ThreadMessageLike[] {
+  const messages: ThreadMessageLike[] = [];
+  if (initialUserMessage) {
+    messages.push(initialUserMessage);
+  } else {
+    appendTextMessage(
+      messages,
+      "user",
+      task.prompt,
+      `${task.id}:user:root`,
+      new Date(task.createdAt),
+    );
+  }
+
+  let assistantBuffer = "";
+  let assistantStartedAt: number | null = null;
+  let skippedInitialUser = false;
+
+  const flushAssistant = (ts: number) => {
+    if (!assistantBuffer.trim()) return;
+    appendTextMessage(
+      messages,
+      "assistant",
+      assistantBuffer,
+      `${task.id}:assistant:${messages.length}`,
+      new Date(assistantStartedAt ?? ts),
+    );
+    assistantBuffer = "";
+    assistantStartedAt = null;
+  };
+
+  for (const entry of events) {
+    const userText = extractUserText(entry.data);
+    if (userText) {
+      if (!skippedInitialUser && userText.trim() === task.prompt.trim()) {
+        skippedInitialUser = true;
+      } else {
+        flushAssistant(entry.ts);
+        appendTextMessage(
+          messages,
+          "user",
+          userText,
+          `${task.id}:user:${entry.ts}`,
+          new Date(entry.ts),
+        );
+      }
+      continue;
+    }
+
+    const assistantText = extractAssistantText(entry.data);
+    if (!assistantText) continue;
+    if (assistantStartedAt === null) assistantStartedAt = entry.ts;
+    assistantBuffer += assistantText;
+  }
+
+  flushAssistant(Date.now());
+  return messages;
+}
+
+function appendMessageText(message: AppendMessage): string {
+  return message.content
+    .map((part) => {
+      if (part.type === "text") return part.text;
+      return "";
+    })
+    .join("")
+    .trim();
+}
+
+function attachmentTextContent(attachment: CompleteAttachment): string {
+  return attachment.content
+    .map((part) => {
+      if (part.type === "text") return part.text;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function attachmentPromptSummary(attachment: CompleteAttachment): string {
+  const text = attachmentTextContent(attachment);
+  if (text) return text;
+
+  const label =
+    attachment.type === "image"
+      ? "Image attachment"
+      : attachment.type === "document"
+        ? "Document attachment"
+        : "File attachment";
+  return `[${label}: ${attachment.name}]`;
+}
+
+function appendMessagePrompt(message: AppendMessage): string {
+  const text = appendMessageText(message);
+  const attachmentText = (message.attachments ?? [])
+    .map(attachmentPromptSummary)
+    .filter(Boolean)
+    .join("\n\n");
+
+  return [text, attachmentText].filter(Boolean).join("\n\n").trim();
+}
+
+function appendMessageContent(message: AppendMessage): ThreadMessageLike["content"] {
+  return message.content.length > 0 ? message.content : [];
+}
+
+function submittedPrompt(message: ThreadMessageLike): string | undefined {
+  const prompt = message.metadata?.custom?.agentPrompt;
+  return typeof prompt === "string" ? prompt : undefined;
+}
+
 function AgentCliTabs({
   activeMode,
   onActiveModeChange,
@@ -263,7 +534,9 @@ function AgentCliTabs({
   const activeSession = useActiveSession();
   const pinnedIds = usePinnedSessionIds();
   const setActiveSession = useIDE((s) => s.setActiveSession);
+  const setActiveTask = useIDE((s) => s.setActiveTask);
   const closeAgentSession = useIDE((s) => s.closeAgentSession);
+  const closeSessionTab = useIDE((s) => s.closeSessionTab);
   const addAgentSession = useIDE((s) => s.addAgentSession);
   const pinSession = useIDE((s) => s.pinSession);
   const unpinSession = useIDE((s) => s.unpinSession);
@@ -271,6 +544,7 @@ function AgentCliTabs({
   const workspaces = useIDE((s) => s.workspaces);
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
   const workspaceName = workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? "—";
+  const activeSessionId = activeSession?.id;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -297,12 +571,12 @@ function AgentCliTabs({
   }, [sessions.length]);
 
   useEffect(() => {
-    if (!activeSession) return;
+    if (!activeSessionId) return;
     const el = scrollRef.current?.querySelector<HTMLElement>(
-      `[data-session-id="${activeSession.id}"]`,
+      `[data-session-id="${activeSessionId}"]`,
     );
     el?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
-  }, [activeSession?.id]);
+  }, [activeSessionId]);
 
   // Ctrl+Tab / Ctrl+Shift+Tab to cycle between sessions
   useEffect(() => {
@@ -323,6 +597,11 @@ function AgentCliTabs({
     scrollRef.current?.scrollBy({ left: dir * 180, behavior: "smooth" });
   };
 
+  const startNewComposerSession = () => {
+    setActiveTask(null);
+    setActiveSession("");
+  };
+
   if (sessions.length === 0) {
     return (
       <div className="flex items-center justify-between border-b border-border bg-code-bg/40 px-3 py-2">
@@ -339,7 +618,13 @@ function AgentCliTabs({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48">
             {AGENT_OPTIONS.map((a) => (
-              <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
+              <DropdownMenuItem
+                key={a.id}
+                onSelect={() => {
+                  startNewComposerSession();
+                  addAgentSession(a.id);
+                }}
+              >
                 <ProductFavicon agent={a.id} label={a.label} />
                 <span>{a.label}</span>
               </DropdownMenuItem>
@@ -383,7 +668,8 @@ function AgentCliTabs({
               onMouseDown={(e) => {
                 if (e.button === 1) {
                   e.preventDefault();
-                  closeAgentSession(s.id);
+                  if (s.taskRootId || s.taskId) closeSessionTab(s.id);
+                  else closeAgentSession(s.id);
                 }
               }}
               className={cn(
@@ -459,7 +745,13 @@ function AgentCliTabs({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48">
             {AGENT_OPTIONS.map((a) => (
-              <DropdownMenuItem key={a.id} onSelect={() => addAgentSession(a.id)}>
+              <DropdownMenuItem
+                key={a.id}
+                onSelect={() => {
+                  startNewComposerSession();
+                  addAgentSession(a.id);
+                }}
+              >
                 <ProductFavicon agent={a.id} label={a.label} />
                 <span>{a.label}</span>
                 <span className="ml-auto font-mono text-[10px] text-muted-foreground">
@@ -495,8 +787,6 @@ function AgentCliTabs({
 }
 
 export function Workspace() {
-  // Cmd/Ctrl+S still saves any active file (file viewer lives elsewhere now —
-  // central panel is composer-only).
   const saveFile = useIDE((s) => s.saveFile);
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -513,9 +803,157 @@ export function Workspace() {
     <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background shadow-sm">
       <AgentCliTabs />
       <div className="min-h-0 flex-1 overflow-hidden">
-        <Thread />
+        <WorkspaceThread />
       </div>
     </main>
+  );
+}
+
+function WorkspaceThread() {
+  const activeTaskId = useIDE((s) => s.activeTaskId);
+  const sessions = useCurrentSessions();
+  const tasks = useIDE((s) => s.tasksByWorkspaceId[s.activeWorkspaceId] ?? EMPTY_TASKS);
+  const taskEventsByTaskId = useIDE((s) => s.taskEventsByTaskId);
+  const selectedModelByCli = useIDE((s) => s.selectedModelByCli);
+  const createTaskFromPrompt = useIDE((s) => s.createTaskFromPrompt);
+  const continueTaskFromPrompt = useIDE((s) => s.continueTaskFromPrompt);
+  const [optimisticMessages, setOptimisticMessages] = useState<ThreadMessageLike[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  useEffect(() => {
+    if (!activeTaskId) {
+      setOptimisticMessages([]);
+    }
+  }, [activeTaskId]);
+
+  const activeTask = activeTaskId ? (tasks.find((t) => t.id === activeTaskId) ?? null) : null;
+  const events = activeTask
+    ? (taskEventsByTaskId[activeTask.id] ?? EMPTY_TASK_EVENTS)
+    : EMPTY_TASK_EVENTS;
+  const initialUserMessage = activeTask
+    ? optimisticMessages.find((message) => submittedPrompt(message) === activeTask.prompt)
+    : undefined;
+  const messages = useMemo(
+    () =>
+      activeTask
+        ? buildTaskThreadMessages(activeTask, events, initialUserMessage)
+        : optimisticMessages,
+    [activeTask, events, initialUserMessage, optimisticMessages],
+  );
+  const isRunning =
+    submitting ||
+    activeTask?.status === "running" ||
+    activeTask?.status === "queued" ||
+    activeTask?.status === "awaiting";
+
+  const onNew = useCallback(
+    async (message: AppendMessage) => {
+      const prompt = appendMessagePrompt(message);
+      if (!prompt) return;
+
+      const current = useIDE.getState();
+      const currentSessions = current.sessionsByWorkspaceId[current.activeWorkspaceId] ?? [];
+      const currentSessionId = current.activeSessionIdByWorkspaceId[current.activeWorkspaceId];
+      const activeSession = currentSessions.find((session) => session.id === currentSessionId);
+      const task =
+        current.activeTaskId
+          ? ((current.tasksByWorkspaceId[current.activeWorkspaceId] ?? []).find(
+              (t) => t.id === current.activeTaskId,
+            ) ?? null)
+          : null;
+      const cli =
+        task?.cli ??
+        current.composerAgentByWorkspaceId[current.activeWorkspaceId] ??
+        activeSession?.kind ??
+        current.activeAgent;
+      if (!cli) {
+        toast.error("Choose a CLI first");
+        return;
+      }
+
+      const optimisticId = `optimistic:user:${Date.now()}`;
+      const optimistic: ThreadMessageLike = {
+        id: optimisticId,
+        role: "user",
+        content: appendMessageContent(message),
+        attachments: message.attachments,
+        createdAt: new Date(),
+        metadata: { custom: { agentPrompt: prompt } },
+      };
+      setOptimisticMessages((prev) => [...prev, optimistic]);
+      setSubmitting(true);
+      try {
+        if (task) {
+          await continueTaskFromPrompt(task.id, prompt, {
+            model: selectedModelByCli[task.cli],
+            effort: task.effort ?? undefined,
+          });
+        } else {
+          const createdTask = await createTaskFromPrompt(prompt, {
+            cli,
+            model: selectedModelByCli[cli],
+          });
+          if (!createdTask) {
+            setOptimisticMessages((prev) => prev.filter((message) => message.id !== optimisticId));
+          }
+        }
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [continueTaskFromPrompt, createTaskFromPrompt, selectedModelByCli],
+  );
+
+  const onCancel = useCallback(async () => {
+    const state = useIDE.getState();
+    const taskId = state.activeTaskId;
+    if (!taskId) return;
+    const workspace = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+    if (!workspace || workspace.source.kind !== "remote-agent") return;
+    try {
+      let provider = state.agentProvidersByWorkspaceId[workspace.id];
+      if (!provider) {
+        const { RemoteAgentProvider } = await import("@/lib/fs/remote-agent");
+        provider = new RemoteAgentProvider(
+          workspace.source.label,
+          workspace.source.url,
+          workspace.source.token,
+        );
+        await provider.connect();
+        useIDE.setState((s) => ({
+          agentProvidersByWorkspaceId: {
+            ...s.agentProvidersByWorkspaceId,
+            [workspace.id]: provider!,
+          },
+        }));
+      }
+      await provider.taskCancel(taskId);
+    } catch (err) {
+      console.error("[WorkspaceThread] cancel failed:", err);
+      toast.error("Failed to cancel task");
+    }
+  }, []);
+
+  const runtimeAdapter = useMemo(
+    () => ({
+      messages,
+      convertMessage: convertExternalThreadMessage,
+      isRunning,
+      onNew,
+      onCancel,
+      adapters: {
+        attachments: threadAttachmentAdapter,
+      },
+      suggestions: activeTask ? EMPTY_THREAD_SUGGESTIONS : NEW_TASK_THREAD_SUGGESTIONS,
+    }),
+    [activeTask, isRunning, messages, onCancel, onNew],
+  );
+
+  const runtime = useExternalStoreRuntime<ThreadMessageLike>(runtimeAdapter);
+
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <Thread />
+    </AssistantRuntimeProvider>
   );
 }
 
@@ -523,7 +961,7 @@ export function Workspace() {
 // Thread in the bottom half). Kept dormant — the active layout is composer-
 // only by user request. Restore by exporting this and dropping the body
 // above if the dual-pane is needed later.
-function _WorkspaceLegacyDualPane() {
+function WorkspaceLegacyDualPane() {
   const activeTab = useCurrentActiveTab();
   const setActiveTab = useIDE((s) => s.setActiveTab);
   const addTerminal = useIDE((s) => s.addTerminal);

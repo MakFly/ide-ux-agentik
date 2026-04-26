@@ -50,6 +50,7 @@ export type Task = {
   baseRef: string | null;
   exitCode: number | null;
   errorMessage: string | null;
+  agentSessionId: string | null;
   sessionId: string | null;
   createdAt: number;
   startedAt: number | null;
@@ -121,7 +122,8 @@ function taskFromDb(row: Record<string, unknown>): Task {
     baseRef: (row.base_ref as string) || null,
     exitCode: (row.exit_code as number) || null,
     errorMessage: (row.error_message as string) || null,
-    sessionId: (row.session_id as string) || "",
+    agentSessionId: (row.agent_session_id as string) || null,
+    sessionId: (row.session_id as string) || null,
     createdAt: row.created_at as number,
     startedAt: (row.started_at as number) || null,
     endedAt: (row.ended_at as number) || null,
@@ -215,6 +217,8 @@ export class RemoteAgentProvider implements FsProvider {
           await this.call("auth", { token: this.token });
           resolve();
         } catch (e) {
+          if (this.ws === ws) this.ws = null;
+          ws.close(1000, "auth failed");
           reject(e);
         }
       });
@@ -637,6 +641,15 @@ export class RemoteAgentProvider implements FsProvider {
     await this.call<void>("task.start", { id });
   }
 
+  async taskContinue(params: {
+    taskId: string;
+    prompt: string;
+    model?: string;
+    effort?: string;
+  }): Promise<void> {
+    await this.call<void>("task.continue", params);
+  }
+
   async taskCancel(id: string): Promise<void> {
     await this.call<void>("task.cancel", { id });
   }
@@ -645,7 +658,7 @@ export class RemoteAgentProvider implements FsProvider {
     await this.call<void>("task.removeWorktree", { id, deleteBranch });
   }
 
-  async taskUpdate(taskId: string, patch: { sessionId?: string }): Promise<void> {
+  async taskUpdate(taskId: string, patch: { sessionId?: string | null }): Promise<void> {
     await this.call<void>("task.update", { taskId, patch });
   }
 

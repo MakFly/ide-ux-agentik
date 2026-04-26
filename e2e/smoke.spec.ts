@@ -12,6 +12,7 @@ test.beforeEach(async ({ context }) => {
     try {
       window.localStorage.removeItem("codex-auth");
       window.localStorage.removeItem("codex-api-key");
+      window.localStorage.removeItem("agentik.global-agent.endpoint.v1");
     } catch {
       /* ignore */
     }
@@ -83,5 +84,33 @@ test.describe("settings page — offline", () => {
     await btn.click();
     await expect(container).toHaveAttribute("data-login-open", "true", { timeout: 5_000 });
     await expect(page.getByText("Sign in to Codex")).toBeVisible({ timeout: 5_000 });
+  });
+
+  test("runtime local-dev endpoint beats a stale saved local-dev override", async ({
+    page,
+    context,
+  }) => {
+    await context.addInitScript(() => {
+      window.localStorage.setItem(
+        "agentik.global-agent.endpoint.v1",
+        JSON.stringify({
+          url: "ws://127.0.0.1:7421",
+          token: "stale-token",
+          label: "local-dev",
+        }),
+      );
+      (window as unknown as { __AGENT__?: { url: string; token: string; label: string } }).__AGENT__ =
+        {
+          url: "ws://127.0.0.1:7421",
+          token: "fresh-token",
+          label: "local-dev",
+        };
+    });
+
+    await page.goto("/settings?section=agent");
+
+    await expect(page.getByText("Connection source")).toBeVisible();
+    await expect(page.getByText("Using window.__AGENT__ until you save an override.")).toBeVisible();
+    await expect(page.locator("#global-agent-token")).toHaveValue("fresh-token");
   });
 });

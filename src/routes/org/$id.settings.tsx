@@ -1,9 +1,11 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ArrowLeft } from "lucide-react";
+import { AlertTriangle, ArrowLeft, KeyRound, Loader2 } from "lucide-react";
 import { getStorage, StorageNotConnected } from "@/lib/storage";
 import type { Org, User } from "@/lib/types/org";
+import { useIDE, type Workspace } from "@/store/ide";
+import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,8 +30,13 @@ function OrgSettings() {
 
   const [org, setOrg] = useState<Org | null>(null);
   const [user, setUser] = useState<User | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [tokenDrafts, setTokenDrafts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [testingWorkspaceId, setTestingWorkspaceId] = useState<string | null>(null);
+  const updateWorkspace = useIDE((s) => s.updateWorkspace);
+  const hydrateTasks = useIDE((s) => s.hydrateTasks);
 
   useEffect(() => {
     void (async () => {
@@ -41,8 +48,20 @@ function OrgSettings() {
           navigate({ to: "/", replace: true });
           return;
         }
+        const ws = await storage.getWorkspaces(o.id);
         setOrg(o);
         setUser(u);
+        setWorkspaces(ws);
+        setTokenDrafts(
+          Object.fromEntries(
+            ws
+              .filter((workspace) => workspace.source.kind === "remote-agent")
+              .map((workspace) => [
+                workspace.id,
+                workspace.source.kind === "remote-agent" ? workspace.source.token : "",
+              ]),
+          ),
+        );
         setLoading(false);
       } catch (error) {
         if (error instanceof StorageNotConnected) {
@@ -76,6 +95,45 @@ function OrgSettings() {
       setSaving(false);
     }
   };
+
+  const handleSaveWorkspaceToken = async (workspace: Workspace) => {
+    const source = workspace.source;
+    if (source.kind !== "remote-agent") return;
+    const token = (tokenDrafts[workspace.id] ?? "").trim();
+    if (!token) {
+      toast.error("Agent token is required");
+      return;
+    }
+
+    const nextSource = {
+      ...source,
+      token,
+    };
+    const nextWorkspace: Workspace = {
+      ...workspace,
+      source: nextSource,
+    };
+
+    setTestingWorkspaceId(workspace.id);
+    const provider = new RemoteAgentProvider(nextSource.label, nextSource.url, nextSource.token);
+    try {
+      await provider.connect();
+      await provider.disconnect().catch(() => {});
+      await updateWorkspace(nextWorkspace);
+      setWorkspaces((prev) => prev.map((w) => (w.id === workspace.id ? nextWorkspace : w)));
+      await hydrateTasks(workspace.id);
+      toast.success(`Token updated for ${workspace.name}`);
+    } catch (e) {
+      await provider.disconnect().catch(() => {});
+      toast.error(e instanceof Error ? e.message : "Agent authentication failed");
+    } finally {
+      setTestingWorkspaceId(null);
+    }
+  };
+
+  const remoteWorkspaces = workspaces.filter(
+    (workspace) => workspace.source.kind === "remote-agent",
+  );
 
   return (
     <div className="min-h-svh bg-background p-6 text-foreground">
@@ -183,6 +241,92 @@ function OrgSettings() {
               </div>
             </Card>
           )}
+
+          <Card className="border-border bg-card p-6">
+            <div className="mb-1 flex items-center gap-2">
+              <KeyRound className="h-4 w-4 text-muted-foreground" />
+              <h2 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+                Remote agent tokens
+              </h2>
+            </div>
+            <p className="mt-2 text-[12.5px] text-muted-foreground">
+              Update the shared token used by workspace task hydration and CLI execution. The token
+              is tested before it is saved.
+            </p>
+
+            {remoteWorkspaces.length === 0 ? (
+              <div className="mt-4 rounded-md border border-dashed border-border px-3 py-3 text-[12.5px] text-muted-foreground">
+                No remote-agent workspace configured for this organization.
+              </div>
+            ) : (
+              <div className="mt-5 space-y-4">
+                {remoteWorkspaces.map((workspace) => {
+                  if (workspace.source.kind !== "remote-agent") return null;
+                  const draft = tokenDrafts[workspace.id] ?? "";
+                  const unchanged = draft.trim() === workspace.source.token;
+                  const busy = testingWorkspaceId === workspace.id;
+                  return (
+                    <div
+                      key={workspace.id}
+                      className="rounded-lg border border-border/80 bg-background/45 p-4"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="font-medium text-[13.5px]">{workspace.name}</div>
+                          <div className="mt-1 truncate font-mono text-[11.5px] text-muted-foreground">
+                            {workspace.source.label} · {workspace.source.url}
+                          </div>
+                        </div>
+                        {unchanged ? (
+                          <span className="rounded bg-muted px-2 py-1 text-[11px] text-muted-foreground">
+                            Current
+                          </span>
+                        ) : (
+                          <span className="rounded bg-status-warn/15 px-2 py-1 text-[11px] text-status-warn">
+                            Unsaved
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-4 grid gap-2 sm:grid-cols-[1fr_auto]">
+                        <div>
+                          <Label htmlFor={`agent-token-${workspace.id}`}>Token</Label>
+                          <Input
+                            id={`agent-token-${workspace.id}`}
+                            type="password"
+                            autoComplete="off"
+                            value={draft}
+                            onChange={(e) =>
+                              setTokenDrafts((prev) => ({
+                                ...prev,
+                                [workspace.id]: e.target.value,
+                              }))
+                            }
+                            className="mt-2 font-mono"
+                            placeholder="Paste the agent token"
+                          />
+                        </div>
+                        <Button
+                          className="self-end gap-2"
+                          onClick={() => handleSaveWorkspaceToken(workspace)}
+                          disabled={busy || !draft.trim() || unchanged}
+                        >
+                          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                          {busy ? "Testing…" : "Test & save"}
+                        </Button>
+                      </div>
+                      {!unchanged && (
+                        <div className="mt-3 flex items-start gap-2 text-[11.5px] text-status-warn">
+                          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          This will reconnect the workspace provider and clear the current auth
+                          error if the token is valid.
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
 
           <div className="flex items-center justify-end gap-2">
             <Button

@@ -26,6 +26,7 @@ export async function seedTaskInPage(page: Page, partial: Partial<Task>): Promis
     baseRef: partial.baseRef ?? "main",
     exitCode: partial.exitCode ?? null,
     errorMessage: partial.errorMessage ?? null,
+    agentSessionId: partial.agentSessionId ?? null,
     createdAt: partial.createdAt ?? Date.now(),
     startedAt: partial.startedAt ?? (partial.status === "running" ? Date.now() : null),
     endedAt: partial.endedAt ?? null,

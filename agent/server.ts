@@ -92,6 +92,8 @@ const ALLOWED_CHAT_FLAGS: Record<string, ReadonlySet<string>> = {
     "--verbose",
     "--include-partial-messages",
   ]),
+  gemini: new Set(["-m", "--model", "-r", "--yolo", "-o"]),
+  opencode: new Set(["--model", "-m", "--session", "--variant", "--format"]),
 };
 
 function validateExtraArgs(cli: string, args: string[]): string[] {
@@ -116,6 +118,103 @@ function validateExtraArgs(cli: string, args: string[]): string[] {
     }
   }
   return out;
+}
+
+function buildTaskCommand(
+  cli: string,
+  prompt: string,
+  opts: { model?: string | null; effort?: string | null; agentSessionId?: string | null } = {},
+): { execCmd: string; execArgs: string[]; stdinText?: string } {
+  const model = opts.model || undefined;
+  const effort = opts.effort || undefined;
+  const agentSessionId = opts.agentSessionId || undefined;
+
+  if (cli === "codex") {
+    const flags: string[] = [];
+    if (model) flags.push("--model", model);
+    if (effort) flags.push("-c", `model_reasoning_effort=${effort}`);
+    return agentSessionId
+      ? {
+          execCmd: "codex",
+          execArgs: ["exec", "resume", "--json", ...flags, agentSessionId, "-"],
+          stdinText: prompt,
+        }
+      : { execCmd: "codex", execArgs: ["exec", "--json", ...flags, "-"], stdinText: prompt };
+  }
+
+  if (cli === "claude") {
+    const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+    if (model) args.push("--model", model);
+    if (effort) args.push("--effort", effort);
+    if (agentSessionId) args.push("--resume", agentSessionId);
+    return { execCmd: "claude", execArgs: args };
+  }
+
+  if (cli === "gemini") {
+    const args = ["-p", prompt, "--yolo", "-o", "stream-json"];
+    if (model) args.push("-m", model);
+    if (agentSessionId) args.push("-r", agentSessionId);
+    return { execCmd: "gemini", execArgs: args };
+  }
+
+  if (cli === "opencode") {
+    const args = ["run", "--format", "json"];
+    if (model) args.push("--model", model);
+    if (effort) args.push("--variant", effort);
+    if (agentSessionId) args.push("--session", agentSessionId);
+    args.push(prompt);
+    return { execCmd: "opencode", execArgs: args };
+  }
+
+  throw new Error(`unsupported cli "${cli}"`);
+}
+
+function taskCommandEnv(cli: string): Record<string, string> {
+  if (cli !== "codex") return safeEnv();
+  // codex 0.125.0 emits a spurious `ERROR codex_core::session: failed to record
+  // rollout items: thread X not found` after every `exec --json` turn.completed.
+  // Cosmetic — rollout file is written, exit 0, response delivered. Silence that
+  // tracing target unless the operator overrides RUST_LOG explicitly.
+  const existingRustLog = process.env.RUST_LOG?.trim();
+  const normalized = existingRustLog
+    ? existingRustLog
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .map((entry) =>
+          entry.startsWith("codex_core::session") ? "codex_core::session=off" : entry,
+        )
+    : [];
+  const rustLog = [...normalized, "codex_core::session=off"]
+    .filter((value, index, arr) => arr.indexOf(value) === index)
+    .join(",");
+  const extra: Record<string, string> = {
+    RUST_LOG: rustLog,
+  };
+  if (process.env.CODEX_HOME) extra.CODEX_HOME = process.env.CODEX_HOME;
+  return safeEnv(extra);
+}
+
+function writeTaskStdin(proc: ChildProcess, stdinText: string | undefined): void {
+  if (stdinText === undefined) return;
+  proc.stdin?.write(stdinText);
+  proc.stdin?.end();
+}
+
+function extractAgentSessionId(event: unknown): string | null {
+  if (!event || typeof event !== "object") return null;
+  const obj = event as Record<string, unknown>;
+  for (const key of ["session_id", "sessionId", "thread_id", "threadId"]) {
+    const value = obj[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+
+  for (const key of ["message", "params", "data"]) {
+    const nested = obj[key];
+    const id = extractAgentSessionId(nested);
+    if (id) return id;
+  }
+  return null;
 }
 
 function rowToWorkspace(row: import("./persistence/db.ts").DbWorkspaceRow) {
@@ -279,6 +378,24 @@ function safeResolve(p: string): string {
   const abs = path.resolve(root, clean);
   if (!abs.startsWith(root)) throw new Error(`path escapes root: ${p}`);
   return abs;
+}
+
+function resolveWorkspaceDeletePath(rootPath: string): string {
+  const target = path.resolve(rootPath);
+  const homeDir = path.resolve(process.env.HOME || "/root");
+  const agentRoot = path.resolve(root);
+  const allowedRoots = Array.from(new Set([homeDir, agentRoot]));
+  const isInsideAllowedRoot = allowedRoots.some(
+    (allowedRoot) => target !== allowedRoot && target.startsWith(`${allowedRoot}${path.sep}`),
+  );
+
+  if (!isInsideAllowedRoot) {
+    throw new Error(`workspace delete refused outside HOME/AGENT_ROOT: ${rootPath}`);
+  }
+  if (target === path.parse(target).root) {
+    throw new Error(`workspace delete refused for filesystem root: ${rootPath}`);
+  }
+  return target;
 }
 
 type PtySession = {
@@ -935,7 +1052,7 @@ const methods: Record<string, Handler> = {
       throw new Error(`unsupported cli "${c}"`);
     }
 
-    const mergedEnv = safeEnv();
+    const mergedEnv = taskCommandEnv(c);
 
     console.info(
       `[task.attachSession] id=${tid} sessionId=${sessionId} exec="${execCmd} ${execArgs.slice(0, 3).join(" ")}…" cwd=${worktreePath}`,
@@ -1035,6 +1152,215 @@ const methods: Record<string, Handler> = {
     return { taskId: tid, sessionId, role: "peer" };
   },
 
+  async "task.continue"({ taskId, prompt, model, effort }, ctx) {
+    const tid = String(taskId ?? "").trim();
+    const p = String(prompt ?? "").trim();
+    const m = model !== undefined && model !== null ? String(model).trim() || undefined : undefined;
+    const eff =
+      effort !== undefined && effort !== null ? String(effort).trim() || undefined : undefined;
+
+    if (!tid) throw new Error("task.continue: taskId is required");
+    if (!p) throw new Error("task.continue: prompt is required");
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.continue: task not found: ${tid}`);
+    if (!ALLOWED_CHAT_FLAGS[task.cli])
+      throw new Error(`task.continue: unsupported cli "${task.cli}"`);
+    if (task.status === "running" || task.status === "queued" || task.status === "awaiting") {
+      throw new Error("task.continue: current turn is still running");
+    }
+    if (!task.worktree_path) {
+      throw new Error("task.continue: task worktree is not ready yet");
+    }
+    if (!task.session_id) {
+      throw new Error("task.continue: task has no persisted session");
+    }
+    if (ctx.runningTasks.size >= 3) {
+      throw new Error("task.continue: concurrency limit reached");
+    }
+
+    ctx.runningTasks.add(tid);
+    tasksRepo.update(tid, {
+      status: "running",
+      started_at: Date.now(),
+      ended_at: null,
+      exit_code: null,
+      error_message: null,
+    });
+
+    const userEvent = { type: "user_message", text: p };
+    taskLogsRepo.append(tid, "info", "stdout", userEvent);
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.started",
+      params: {
+        taskId: tid,
+        sessionId: task.session_id,
+        worktreePath: task.worktree_path,
+        branchName: task.branch_name,
+      },
+    });
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.event",
+      params: { taskId: tid, event: userEvent },
+    });
+
+    const spawnContinueAsync = async () => {
+      const sessionId = task.session_id;
+      const cliKind = task.cli;
+      const { execCmd, execArgs, stdinText } = buildTaskCommand(cliKind, p, {
+        model: m ?? task.model,
+        effort: eff ?? task.effort,
+        agentSessionId: task.agent_session_id,
+      });
+      const mergedEnv = taskCommandEnv(cliKind);
+
+      console.info(
+        `[task.continue] id=${tid} sessionId=${sessionId} exec="${execCmd} ${execArgs.slice(0, 3).join(" ")}…" cwd=${task.worktree_path}`,
+      );
+      const proc = cpSpawn(execCmd, execArgs, {
+        cwd: task.worktree_path!,
+        env: mergedEnv,
+        stdio: [stdinText === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      });
+      writeTaskStdin(proc, stdinText);
+
+      const taskSession: TaskSession = { id: sessionId, taskId: tid, sessionId, proc, alive: true };
+      ctx.taskSessions.set(sessionId, taskSession);
+
+      let buf = "";
+      proc.stdout?.setEncoding("utf8");
+      proc.stdout?.on("data", (chunk: string) => {
+        buf += chunk;
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let evt: unknown;
+          try {
+            evt = JSON.parse(line);
+          } catch {
+            evt = { type: "raw", text: line };
+          }
+          const agentSessionId = extractAgentSessionId(evt);
+          if (agentSessionId && agentSessionId !== task.agent_session_id) {
+            tasksRepo.update(tid, { agent_session_id: agentSessionId });
+          }
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.event",
+            params: { taskId: tid, event: evt },
+          });
+          taskLogsRepo.append(tid, "info", "stdout", evt);
+        }
+      });
+
+      proc.stderr?.setEncoding("utf8");
+      proc.stderr?.on("data", (chunk: string) => {
+        broadcastAuthed({
+          jsonrpc: "2.0",
+          method: "task.event",
+          params: { taskId: tid, event: { type: "stderr", text: chunk } },
+        });
+        taskLogsRepo.append(tid, "warn", "stderr", { text: chunk });
+      });
+
+      proc.on("exit", (code, signal) => {
+        if (!taskSession.alive) return;
+        taskSession.alive = false;
+
+        if (buf.trim()) {
+          try {
+            const evt = JSON.parse(buf.trim());
+            const agentSessionId = extractAgentSessionId(evt);
+            if (agentSessionId && agentSessionId !== task.agent_session_id) {
+              tasksRepo.update(tid, { agent_session_id: agentSessionId });
+            }
+            broadcastAuthed({
+              jsonrpc: "2.0",
+              method: "task.event",
+              params: { taskId: tid, event: evt },
+            });
+            taskLogsRepo.append(tid, "info", "stdout", evt);
+          } catch {
+            /* ignore malformed trailing line */
+          }
+          buf = "";
+        }
+
+        const finalStatus = code === 0 && signal === null ? ("done" as const) : ("failed" as const);
+        console.info(
+          `[task.continue.exit] id=${tid} status=${finalStatus} code=${code} signal=${signal ?? "none"}`,
+        );
+        tasksRepo.update(tid, {
+          status: finalStatus,
+          exit_code: code ?? undefined,
+          ended_at: Date.now(),
+        });
+        broadcastAuthed({
+          jsonrpc: "2.0",
+          method: "task.ended",
+          params: { taskId: tid, status: finalStatus, exitCode: code, errorMessage: signal },
+        });
+
+        taskSessionsRepo.detach(sessionId);
+        ctx.taskSessions.delete(sessionId);
+        ctx.runningTasks.delete(tid);
+        drainPendingTasks();
+      });
+
+      proc.on("error", (err) => {
+        if (!taskSession.alive) return;
+        taskSession.alive = false;
+        const errorMsg = err.message;
+        console.error(`[task.continue] proc error id=${tid}: ${errorMsg}`);
+        broadcastAuthed({
+          jsonrpc: "2.0",
+          method: "task.event",
+          params: { taskId: tid, event: { type: "error", message: errorMsg } },
+        });
+        taskLogsRepo.append(tid, "error", "spawn", { message: errorMsg });
+        tasksRepo.update(tid, {
+          status: "failed",
+          error_message: errorMsg,
+          ended_at: Date.now(),
+        });
+        broadcastAuthed({
+          jsonrpc: "2.0",
+          method: "task.ended",
+          params: { taskId: tid, status: "failed", exitCode: null, errorMessage: errorMsg },
+        });
+
+        taskSessionsRepo.detach(sessionId);
+        ctx.taskSessions.delete(sessionId);
+        ctx.runningTasks.delete(tid);
+        drainPendingTasks();
+      });
+    };
+
+    spawnContinueAsync().catch((e) => {
+      const errorMsg = (e as Error).message;
+      console.error(`[task.continue] uncaught FAILED id=${tid}: ${errorMsg}`);
+      taskLogsRepo.append(tid, "error", "spawn", { message: errorMsg });
+      tasksRepo.update(tid, {
+        status: "failed",
+        error_message: errorMsg,
+        ended_at: Date.now(),
+      });
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.ended",
+        params: { taskId: tid, status: "failed", exitCode: null, errorMessage: errorMsg },
+      });
+      ctx.runningTasks.delete(tid);
+      drainPendingTasks();
+    });
+
+    return { status: "running" };
+  },
+
   async "task.start"({ id }, ctx) {
     const taskId = String(id ?? "").trim();
     if (!taskId) throw new Error("task.start: id is required");
@@ -1110,32 +1436,13 @@ const methods: Record<string, Handler> = {
 
         const cliKind = currentTask.cli;
         const text = currentTask.prompt;
-        const safeExtra: string[] = [];
-        if (currentTask.model) {
-          safeExtra.push("--model", currentTask.model);
-        }
-        if (currentTask.effort) {
-          // Codex uses -c model_reasoning_effort; Claude uses --effort directly.
-          if (cliKind === "codex") {
-            safeExtra.push("-c", `model_reasoning_effort=${currentTask.effort}`);
-          } else {
-            safeExtra.push("--effort", currentTask.effort);
-          }
-        }
+        const { execCmd, execArgs, stdinText } = buildTaskCommand(cliKind, text, {
+          model: currentTask.model,
+          effort: currentTask.effort,
+          agentSessionId: currentTask.agent_session_id,
+        });
 
-        let execCmd: string;
-        let execArgs: string[];
-        if (cliKind === "codex") {
-          execCmd = "codex";
-          execArgs = ["exec", "--json", ...safeExtra, text];
-        } else if (cliKind === "claude") {
-          execCmd = "claude";
-          execArgs = ["-p", text, "--output-format", "stream-json", "--verbose", ...safeExtra];
-        } else {
-          throw new Error(`unsupported cli "${cliKind}"`);
-        }
-
-        const mergedEnv = safeEnv();
+        const mergedEnv = taskCommandEnv(cliKind);
         // Session already exists from task.create — retrieve it instead of creating
         const sessionId = currentTask.session_id;
         if (!sessionId) {
@@ -1150,8 +1457,9 @@ const methods: Record<string, Handler> = {
         const proc = cpSpawn(execCmd, execArgs, {
           cwd: worktreePath,
           env: mergedEnv,
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: [stdinText === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         });
+        writeTaskStdin(proc, stdinText);
 
         const taskSession: TaskSession = { id: sessionId, taskId, sessionId, proc, alive: true };
         ctx.taskSessions.set(sessionId, taskSession);
@@ -1170,6 +1478,10 @@ const methods: Record<string, Handler> = {
               evt = JSON.parse(line);
             } catch {
               evt = { type: "raw", text: line };
+            }
+            const agentSessionId = extractAgentSessionId(evt);
+            if (agentSessionId && agentSessionId !== currentTask.agent_session_id) {
+              tasksRepo.update(taskId, { agent_session_id: agentSessionId });
             }
             broadcastAuthed({
               jsonrpc: "2.0",
@@ -1197,6 +1509,10 @@ const methods: Record<string, Handler> = {
           if (buf.trim()) {
             try {
               const evt = JSON.parse(buf.trim());
+              const agentSessionId = extractAgentSessionId(evt);
+              if (agentSessionId && agentSessionId !== currentTask.agent_session_id) {
+                tasksRepo.update(taskId, { agent_session_id: agentSessionId });
+              }
               broadcastAuthed({
                 jsonrpc: "2.0",
                 method: "task.event",
@@ -1210,7 +1526,7 @@ const methods: Record<string, Handler> = {
           }
 
           const finalStatus =
-            code === 0 || signal === null ? ("done" as const) : ("failed" as const);
+            code === 0 && signal === null ? ("done" as const) : ("failed" as const);
           console.info(
             `[task.exit] id=${taskId} status=${finalStatus} code=${code} signal=${signal ?? "none"}`,
           );
@@ -1367,7 +1683,12 @@ const methods: Record<string, Handler> = {
     if (!patch || typeof patch !== "object") throw new Error("task.update: patch is required");
     const p = patch as Record<string, unknown>;
     tasksRepo.update(tid, {
-      session_id: p.sessionId !== undefined ? String(p.sessionId) : undefined,
+      session_id:
+        p.sessionId === null
+          ? null
+          : p.sessionId !== undefined
+            ? String(p.sessionId)
+            : undefined,
     });
     return { ok: true };
   },
@@ -1473,7 +1794,13 @@ const methods: Record<string, Handler> = {
   async "workspaces.delete"({ id }) {
     const wid = String(id ?? "").trim();
     if (!wid) throw new Error("workspaces.delete: id is required");
-    return workspacesRepo.delete(wid);
+    const workspace = workspacesRepo.get(wid);
+    if (workspace?.root_path) {
+      const deletePath = resolveWorkspaceDeletePath(workspace.root_path);
+      await fs.rm(deletePath, { recursive: true, force: true });
+    }
+    workspacesRepo.delete(wid);
+    return { ok: true, deletedPath: workspace?.root_path ?? null };
   },
 
   async "sessions.list"({ workspaceId }) {

@@ -133,9 +133,7 @@ function RootComponent() {
         },
         /** Create a new agent session in the active workspace and return its id. */
         addAgentSession: (kind: TerminalKind) => {
-          useIDE.getState().addAgentSession(kind);
-          const s = useIDE.getState();
-          return s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
+          return useIDE.getState().addAgentSession(kind);
         },
         /** Read the active session id for a given workspace. */
         getActiveSessionId: (workspaceId: string) =>

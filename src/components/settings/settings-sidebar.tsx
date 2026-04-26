@@ -3,11 +3,13 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Cpu,
+  KeyRound,
   Layout as LayoutIcon,
   Palette,
   Plug,
   Server,
   Sparkles,
+  FolderKanban,
 } from "lucide-react";
 
 import { PROVIDER_META, type ProviderId } from "@/lib/providers-check";
@@ -15,7 +17,14 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
-export type SectionId = "appearance" | "layout" | "ai" | "providers" | "mcp";
+export type SectionId =
+  | "agent"
+  | "workspace"
+  | "appearance"
+  | "layout"
+  | "ai"
+  | "providers"
+  | "mcp";
 
 type Item = {
   id: SectionId;
@@ -24,6 +33,8 @@ type Item = {
 };
 
 const ITEMS: Item[] = [
+  { id: "agent", label: "Agent", icon: KeyRound },
+  { id: "workspace", label: "Workspace", icon: FolderKanban },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "layout", label: "Layout", icon: LayoutIcon },
   { id: "ai", label: "AI", icon: Sparkles },

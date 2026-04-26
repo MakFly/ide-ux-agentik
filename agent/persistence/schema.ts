@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   base_ref TEXT,
   exit_code INTEGER,
   error_message TEXT,
+  agent_session_id TEXT,
   session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
   created_at INTEGER NOT NULL,
   started_at INTEGER,

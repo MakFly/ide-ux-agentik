@@ -13,4 +13,10 @@ export function getStorage(): StorageAdapter {
 export const storage = getStorage();
 export type { StorageAdapter, Snapshot } from "./types";
 export { StorageNotConnected, attachProvider, resetProviderCache } from "./server-adapter";
-export { getEndpoint, setEndpoint, clearEndpoint, type AgentEndpoint } from "./endpoint";
+export {
+  getEndpoint,
+  getEndpointSource,
+  setEndpoint,
+  clearEndpoint,
+  type AgentEndpoint,
+} from "./endpoint";

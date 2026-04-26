@@ -13,6 +13,7 @@ import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as DocsRouteImport } from './routes/docs'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as SettingsWorkspaceRouteImport } from './routes/settings.workspace'
 import { Route as OrgIdRouteImport } from './routes/org/$id'
 import { Route as DevDiffRouteImport } from './routes/_dev.diff'
 import { Route as OrgIdIndexRouteImport } from './routes/org/$id.index'
@@ -37,6 +38,11 @@ const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsWorkspaceRoute = SettingsWorkspaceRouteImport.update({
+  id: '/workspace',
+  path: '/workspace',
+  getParentRoute: () => SettingsRoute,
 } as any)
 const OrgIdRoute = OrgIdRouteImport.update({
   id: '/org/$id',
@@ -63,9 +69,10 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/docs': typeof DocsRoute
-  '/settings': typeof SettingsRoute
+  '/settings': typeof SettingsRouteWithChildren
   '/diff': typeof DevDiffRoute
   '/org/$id': typeof OrgIdRouteWithChildren
+  '/settings/workspace': typeof SettingsWorkspaceRoute
   '/org/$id/settings': typeof OrgIdSettingsRoute
   '/org/$id/': typeof OrgIdIndexRoute
 }
@@ -73,8 +80,9 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/docs': typeof DocsRoute
-  '/settings': typeof SettingsRoute
+  '/settings': typeof SettingsRouteWithChildren
   '/diff': typeof DevDiffRoute
+  '/settings/workspace': typeof SettingsWorkspaceRoute
   '/org/$id/settings': typeof OrgIdSettingsRoute
   '/org/$id': typeof OrgIdIndexRoute
 }
@@ -83,9 +91,10 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRoute
   '/docs': typeof DocsRoute
-  '/settings': typeof SettingsRoute
+  '/settings': typeof SettingsRouteWithChildren
   '/_dev/diff': typeof DevDiffRoute
   '/org/$id': typeof OrgIdRouteWithChildren
+  '/settings/workspace': typeof SettingsWorkspaceRoute
   '/org/$id/settings': typeof OrgIdSettingsRoute
   '/org/$id/': typeof OrgIdIndexRoute
 }
@@ -98,6 +107,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/diff'
     | '/org/$id'
+    | '/settings/workspace'
     | '/org/$id/settings'
     | '/org/$id/'
   fileRoutesByTo: FileRoutesByTo
@@ -107,6 +117,7 @@ export interface FileRouteTypes {
     | '/docs'
     | '/settings'
     | '/diff'
+    | '/settings/workspace'
     | '/org/$id/settings'
     | '/org/$id'
   id:
@@ -117,6 +128,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/_dev/diff'
     | '/org/$id'
+    | '/settings/workspace'
     | '/org/$id/settings'
     | '/org/$id/'
   fileRoutesById: FileRoutesById
@@ -125,7 +137,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DashboardRoute: typeof DashboardRoute
   DocsRoute: typeof DocsRoute
-  SettingsRoute: typeof SettingsRoute
+  SettingsRoute: typeof SettingsRouteWithChildren
   DevDiffRoute: typeof DevDiffRoute
   OrgIdRoute: typeof OrgIdRouteWithChildren
 }
@@ -160,6 +172,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings/workspace': {
+      id: '/settings/workspace'
+      path: '/workspace'
+      fullPath: '/settings/workspace'
+      preLoaderRoute: typeof SettingsWorkspaceRouteImport
+      parentRoute: typeof SettingsRoute
+    }
     '/org/$id': {
       id: '/org/$id'
       path: '/org/$id'
@@ -191,6 +210,18 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface SettingsRouteChildren {
+  SettingsWorkspaceRoute: typeof SettingsWorkspaceRoute
+}
+
+const SettingsRouteChildren: SettingsRouteChildren = {
+  SettingsWorkspaceRoute: SettingsWorkspaceRoute,
+}
+
+const SettingsRouteWithChildren = SettingsRoute._addFileChildren(
+  SettingsRouteChildren,
+)
+
 interface OrgIdRouteChildren {
   OrgIdSettingsRoute: typeof OrgIdSettingsRoute
   OrgIdIndexRoute: typeof OrgIdIndexRoute
@@ -207,7 +238,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DashboardRoute: DashboardRoute,
   DocsRoute: DocsRoute,
-  SettingsRoute: SettingsRoute,
+  SettingsRoute: SettingsRouteWithChildren,
   DevDiffRoute: DevDiffRoute,
   OrgIdRoute: OrgIdRouteWithChildren,
 }

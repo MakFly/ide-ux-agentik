@@ -36,13 +36,11 @@ import {
   CopyIcon,
   DownloadIcon,
   MoreHorizontalIcon,
-  PencilIcon,
-  RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FC } from "react";
 import { toast } from "sonner";
-import { useIDE } from "@/store/ide";
+import { useIDE, type TerminalKind } from "@/store/ide";
 import { ModelPill } from "@/components/ide/model-pill";
 import { ReasoningPill } from "@/components/ide/reasoning-pill";
 import { ContextRing } from "@/components/assistant-ui/context-ring";
@@ -62,6 +60,13 @@ const CLI_PLACEHOLDERS: Record<string, string> = {
   opencode: "Ask OpenCode anything, @ to add files, / for commands",
   gemini: "Ask Gemini anything, @ to add files, / for commands",
 };
+
+const CLI_OPTIONS: Array<{ id: TerminalKind; label: string; detail: string; icon: string }> = [
+  { id: "codex", label: "Codex", detail: "OpenAI CLI", icon: "/agents/codex.svg" },
+  { id: "claude", label: "Claude", detail: "Claude Code", icon: "/agents/claude-code.svg" },
+  { id: "gemini", label: "Gemini", detail: "Google CLI", icon: "/agents/gemini.svg" },
+  { id: "opencode", label: "OpenCode", detail: "OpenCode run", icon: "/agents/opencode.ico" },
+];
 
 type PartLike = { type?: string; text?: string };
 type MessageLike = { content?: ReadonlyArray<PartLike> };
@@ -139,19 +144,51 @@ const ThreadScrollToBottom: FC = () => {
 };
 
 const ThreadWelcome: FC = () => {
+  const workspaceId = useIDE((s) => s.activeWorkspaceId);
+  const selectedCli = useIDE((s) => s.composerAgentByWorkspaceId[s.activeWorkspaceId]);
+  const setComposerAgent = useIDE((s) => s.setComposerAgent);
+
   return (
     <div className="aui-thread-welcome-root my-auto flex grow flex-col">
       <div className="aui-thread-welcome-center flex w-full grow flex-col items-center justify-center">
         <div className="aui-thread-welcome-message flex size-full flex-col justify-center px-4">
           <h1 className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both font-semibold text-2xl duration-200">
-            Hello there!
+            Choose your CLI
           </h1>
           <p className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-muted-foreground text-xl delay-75 duration-200">
-            How can I help you today?
+            Pick the agent runtime before starting this task.
           </p>
+          <div className="mt-6 grid w-full max-w-3xl grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {CLI_OPTIONS.map((cli) => {
+              const active = selectedCli === cli.id;
+              return (
+                <button
+                  key={cli.id}
+                  type="button"
+                  onClick={() => setComposerAgent(workspaceId, cli.id)}
+                  className={cn(
+                    "group flex items-center gap-3 rounded-2xl border px-4 py-3 text-left transition-all",
+                    "bg-card/80 hover:-translate-y-0.5 hover:border-primary/50 hover:bg-accent/40",
+                    active && "border-primary bg-primary/10 shadow-sm shadow-primary/10",
+                  )}
+                  aria-pressed={active}
+                >
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl border bg-background">
+                    <img src={cli.icon} alt="" className="h-5 w-5 object-contain" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-[13px] font-semibold text-foreground">
+                      {cli.label}
+                    </span>
+                    <span className="block text-[11.5px] text-muted-foreground">{cli.detail}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
-      <ThreadSuggestions />
+      {selectedCli && <ThreadSuggestions />}
     </div>
   );
 };
@@ -182,10 +219,23 @@ const ThreadSuggestionItem: FC = () => {
 
 const Composer: FC = () => {
   const activeAgent = useIDE((s) => {
+    const activeTask = s.activeTaskId
+      ? (s.tasksByWorkspaceId[s.activeWorkspaceId] ?? []).find((t) => t.id === s.activeTaskId)
+      : null;
+    if (activeTask?.cli) return activeTask.cli as TerminalKind;
+    const composerAgent = s.composerAgentByWorkspaceId[s.activeWorkspaceId];
+    if (composerAgent) return composerAgent;
     const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
     const activeId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
     return sessions.find((t) => t.id === activeId)?.kind ?? s.activeAgent;
   });
+  const requiresCli = useIDE(
+    (s) =>
+      !s.activeTaskId &&
+      !s.composerAgentByWorkspaceId[s.activeWorkspaceId] &&
+      !s.activeSessionIdByWorkspaceId[s.activeWorkspaceId],
+  );
+
   const placeholder = CLI_PLACEHOLDERS[activeAgent] ?? CLI_PLACEHOLDERS.codex;
 
   const shellRef = useRef<HTMLDivElement>(null);
@@ -276,6 +326,8 @@ const Composer: FC = () => {
     void executeSlash(cmdId, { ...slashCtx, onHelp: () => setHelpOpen(true) });
   }
 
+  if (requiresCli) return null;
+
   return (
     <>
       <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
@@ -289,6 +341,7 @@ const Composer: FC = () => {
             <ComposerPrimitive.Input
               data-testid="chat-composer-input"
               placeholder={placeholder}
+              disabled={requiresCli}
               className="aui-composer-input max-h-32 min-h-10 w-full resize-none bg-transparent px-1.75 py-1 text-sm outline-none placeholder:text-muted-foreground/80"
               rows={1}
               autoFocus
@@ -359,6 +412,13 @@ const SendOrStopButton: FC = () => {
   const aui = useAui();
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const composerText = useAuiState((s) => s.composer.text ?? "");
+  const composerAttachmentsCount = useAuiState((s) => s.composer.attachments.length);
+  const requiresCli = useIDE(
+    (s) =>
+      !s.activeTaskId &&
+      !s.composerAgentByWorkspaceId[s.activeWorkspaceId] &&
+      !s.activeSessionIdByWorkspaceId[s.activeWorkspaceId],
+  );
 
   if (isRunning) {
     return (
@@ -405,7 +465,7 @@ const SendOrStopButton: FC = () => {
         size="icon"
         className="aui-composer-send size-8 rounded-full"
         aria-label="Send message"
-        disabled={!composerText.trim()}
+        disabled={(!composerText.trim() && composerAttachmentsCount === 0) || requiresCli}
       >
         <ArrowUpIcon className="aui-composer-send-icon size-4" />
       </TooltipIconButton>
@@ -415,6 +475,12 @@ const SendOrStopButton: FC = () => {
 
 const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
   const activeAgent = useIDE((s) => {
+    const activeTask = s.activeTaskId
+      ? (s.tasksByWorkspaceId[s.activeWorkspaceId] ?? []).find((t) => t.id === s.activeTaskId)
+      : null;
+    if (activeTask?.cli) return activeTask.cli as TerminalKind;
+    const composerAgent = s.composerAgentByWorkspaceId[s.activeWorkspaceId];
+    if (composerAgent) return composerAgent;
     const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
     const activeId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
     return sessions.find((t) => t.id === activeId)?.kind ?? s.activeAgent;
@@ -531,11 +597,6 @@ const AssistantActionBar: FC = () => {
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      <ActionBarPrimitive.Reload asChild>
-        <TooltipIconButton tooltip="Refresh">
-          <RefreshCwIcon />
-        </TooltipIconButton>
-      </ActionBarPrimitive.Reload>
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <TooltipIconButton tooltip="More" className="data-[state=open]:bg-accent">
@@ -572,9 +633,6 @@ const UserMessage: FC = () => {
         <div className="aui-user-message-content wrap-break-word peer rounded-2xl bg-muted px-4 py-2.5 text-foreground empty:hidden">
           <MessagePrimitive.Parts />
         </div>
-        <div className="aui-user-action-bar-wrapper absolute top-1/2 left-0 -translate-x-full -translate-y-1/2 pr-2 peer-empty:hidden">
-          <UserActionBar />
-        </div>
       </div>
 
       <BranchPicker
@@ -582,22 +640,6 @@ const UserMessage: FC = () => {
         className="col-span-full col-start-1 row-start-3 -mr-1 justify-end"
       />
     </MessagePrimitive.Root>
-  );
-};
-
-const UserActionBar: FC = () => {
-  return (
-    <ActionBarPrimitive.Root
-      hideWhenRunning
-      autohide="not-last"
-      className="aui-user-action-bar-root flex flex-col items-end"
-    >
-      <ActionBarPrimitive.Edit asChild>
-        <TooltipIconButton tooltip="Edit" className="aui-user-action-edit p-4">
-          <PencilIcon />
-        </TooltipIconButton>
-      </ActionBarPrimitive.Edit>
-    </ActionBarPrimitive.Root>
   );
 };
 

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { CheckCircle2, LoaderCircle, AlertTriangle, Clock, Trash2, X, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { useIDE, type Workspace } from "@/store/ide";
+import { isTerminalKind, useIDE, type Workspace } from "@/store/ide";
 import { RemoteAgentProvider, type Task } from "@/lib/fs/remote-agent";
 import { AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import {
@@ -54,7 +55,9 @@ function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; n
   const setActiveAgent = useIDE((s) => s.setActiveAgent);
   const setActiveTask = useIDE((s) => s.setActiveTask);
   const openTaskSession = useIDE((s) => s.openTaskSession);
+  const removeTaskById = useIDE((s) => s.removeTaskById);
   const activateInWorkspace = async () => {
+    const cliKind = isTerminalKind(task.cli) ? task.cli : "codex";
     setActiveTask(task.id);
     // Lazily create session in DB if not yet persisted
     await openTaskSession(task.id);
@@ -94,7 +97,7 @@ function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; n
             ...allSessionsNow,
             {
               id: targetSessionId,
-              kind: task.cli as any,
+              kind: cliKind,
               title: task.title,
               status: task.status === "running" ? "busy" : "idle",
               workspaceId: workspace.id,
@@ -107,7 +110,7 @@ function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; n
       }));
     }
     setActiveSession(targetSessionId);
-    setActiveAgent(task.cli as any);
+    setActiveAgent(cliKind);
   };
   return (
     <div
@@ -156,18 +159,20 @@ function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; n
               <DropdownMenuItem
                 onClick={async () => {
                   if (workspace.source.kind !== "remote-agent") return;
+                  const provider = new RemoteAgentProvider(
+                    workspace.source.label,
+                    workspace.source.url,
+                    workspace.source.token,
+                  );
                   try {
-                    const provider = new RemoteAgentProvider(
-                      workspace.source.label,
-                      workspace.source.url,
-                      workspace.source.token,
-                    );
                     await provider.connect();
                     await provider.taskCancel(task.id);
                     toast.success("Task cancelled");
                   } catch (err) {
                     toast.error("Failed to cancel task");
                     console.error(err);
+                  } finally {
+                    await provider.disconnect().catch(() => {});
                   }
                 }}
                 className="gap-2 text-[12.5px]"
@@ -180,18 +185,29 @@ function TaskRow({ task, workspace, now }: { task: Task; workspace: Workspace; n
               <DropdownMenuItem
                 onClick={async () => {
                   if (workspace.source.kind !== "remote-agent") return;
+                  const provider = new RemoteAgentProvider(
+                    workspace.source.label,
+                    workspace.source.url,
+                    workspace.source.token,
+                  );
                   try {
-                    const provider = new RemoteAgentProvider(
-                      workspace.source.label,
-                      workspace.source.url,
-                      workspace.source.token,
-                    );
                     await provider.connect();
                     await provider.taskRemoveWorktree(task.id, true);
+                    removeTaskById(task.id);
                     toast.success("Worktree removed");
                   } catch (err) {
-                    toast.error("Failed to remove worktree");
-                    console.error(err);
+                    const msg = err instanceof Error ? err.message : String(err);
+                    // Server already cleaned the row (auto-cleanup on exit, or
+                    // a previous removal): treat as a successful no-op.
+                    if (/task not found/i.test(msg)) {
+                      removeTaskById(task.id);
+                      toast.success("Worktree removed");
+                    } else {
+                      toast.error("Failed to remove worktree");
+                      console.error(err);
+                    }
+                  } finally {
+                    await provider.disconnect().catch(() => {});
                   }
                 }}
                 className="gap-2 text-[12.5px] text-destructive focus:text-destructive"
@@ -212,11 +228,16 @@ export function WorkspaceTasksSection() {
   const tasksByWorkspaceId = useIDE((s) => s.tasksByWorkspaceId);
   const hydrateTasks = useIDE((s) => s.hydrateTasks);
   const workspaceId = useIDE((s) => s.activeWorkspaceId);
+  const connectionError = useIDE((s) => s.agentConnectionErrorByWorkspaceId[s.activeWorkspaceId]);
   const [isLoadingInitial, setIsLoadingInitial] = useState(true);
   const setActiveSession = useIDE((s) => s.setActiveSession);
-  // Focus the central <Thread /> composer: deselect the active session so the
-  // empty-state composer takes over the panel.
-  const focusComposer = () => setActiveSession("");
+  const setActiveTask = useIDE((s) => s.setActiveTask);
+  // Focus the central <Thread /> composer for a fresh task draft.
+  const focusComposer = () => {
+    // Keep the same workspace state but reset task-bound focus.
+    setActiveTask(null);
+    setActiveSession("");
+  };
 
   const tasks = tasksByWorkspaceId[workspaceId] ?? [];
   const hasRunning = tasks.some((t) => t.status === "running");
@@ -273,6 +294,20 @@ export function WorkspaceTasksSection() {
         {isLoadingInitial ? (
           <div className="mx-3 rounded-md border border-dashed border-border px-3 py-3 text-[11.5px] text-muted-foreground">
             Loading tasks…
+          </div>
+        ) : connectionError ? (
+          <div className="mx-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-3 text-[11.5px] text-destructive">
+            <div className="flex gap-2">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{connectionError}</span>
+            </div>
+            <Link
+              to="/settings"
+              search={{ section: "agent" }}
+              className="mt-2 inline-flex rounded border border-destructive/30 px-2 py-1 text-[11px] font-medium text-destructive transition-colors hover:bg-destructive/10"
+            >
+              Update token
+            </Link>
           </div>
         ) : !hasAny ? (
           <button

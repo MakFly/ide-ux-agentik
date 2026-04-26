@@ -21,7 +21,7 @@ export type Session = {
 
 export type Message = {
   id: string;
-  session_id: string;
+  session_id: string | null;
   parent_id: string | null;
   logical_parent_id: string | null;
   is_sidechain: number;
@@ -42,7 +42,7 @@ export type FileBlob = {
 
 export type FileSnapshot = {
   id: string;
-  session_id: string;
+  session_id: string | null;
   message_id: string | null;
   path: string;
   content_before_hash: string | null;
@@ -52,7 +52,7 @@ export type FileSnapshot = {
 
 export type Summary = {
   id: number;
-  session_id: string;
+  session_id: string | null;
   leaf_uuid: string;
   text: string;
   ts: number;
@@ -73,7 +73,8 @@ export type DbTask = {
   base_ref: string | null;
   exit_code: number | null;
   error_message: string | null;
-  session_id: string;
+  agent_session_id: string | null;
+  session_id: string | null;
   created_at: number;
   started_at: number | null;
   ended_at: number | null;
@@ -128,6 +129,10 @@ function migrateIfNeeded(db: Database.Database): void {
     db.exec(`ALTER TABLE tasks ADD COLUMN effort TEXT`);
     console.log(`[persistence] migration: added tasks.effort`);
   }
+  if (!taskCols.includes("agent_session_id")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN agent_session_id TEXT`);
+    console.log(`[persistence] migration: added tasks.agent_session_id`);
+  }
 
   const sessionCols = (db.prepare(`PRAGMA table_info(sessions)`).all() as { name: string }[]).map(
     (r) => r.name,
@@ -173,6 +178,7 @@ function migrateIfNeeded(db: Database.Database): void {
           base_ref TEXT,
           exit_code INTEGER,
           error_message TEXT,
+          agent_session_id TEXT,
           session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
           created_at INTEGER NOT NULL,
           started_at INTEGER,
@@ -187,12 +193,12 @@ function migrateIfNeeded(db: Database.Database): void {
         INSERT INTO tasks_new (
           id, workspace_id, parent_session_id, title, prompt, cli, model, effort,
           status, worktree_path, branch_name, base_ref, exit_code, error_message,
-          session_id, created_at, started_at, ended_at
+          agent_session_id, session_id, created_at, started_at, ended_at
         )
         SELECT
           id, workspace_id, parent_session_id, title, prompt, cli,
           model, effort, status, worktree_path, branch_name, base_ref,
-          exit_code, error_message, session_id, created_at, started_at, ended_at
+          exit_code, error_message, agent_session_id, session_id, created_at, started_at, ended_at
         FROM tasks
       `);
 
@@ -417,6 +423,13 @@ type WorkspaceUpsertParams = {
 };
 
 export const workspacesRepo = {
+  get(id: string): DbWorkspaceRow | null {
+    return (
+      (openDb().prepare(`SELECT * FROM workspaces WHERE id = ?`).get(id) as
+        | DbWorkspaceRow
+        | undefined) ?? null
+    );
+  },
   list(orgId: string): DbWorkspaceRow[] {
     return openDb()
       .prepare(`SELECT * FROM workspaces WHERE org_id = ? ORDER BY created_at ASC`)
@@ -947,6 +960,7 @@ export const tasksRepo = {
         | "base_ref"
         | "exit_code"
         | "error_message"
+        | "agent_session_id"
         | "session_id"
         | "started_at"
         | "ended_at"
@@ -980,6 +994,10 @@ export const tasksRepo = {
     if (patch.error_message !== undefined) {
       sets.push("error_message = ?");
       vals.push(patch.error_message);
+    }
+    if (patch.agent_session_id !== undefined) {
+      sets.push("agent_session_id = ?");
+      vals.push(patch.agent_session_id);
     }
     if (patch.session_id !== undefined) {
       sets.push("session_id = ?");

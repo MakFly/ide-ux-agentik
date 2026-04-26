@@ -4,7 +4,7 @@ import readline from "node:readline";
 import { createReadStream } from "node:fs";
 import { sessionsRepo, messagesRepo } from "./db.ts";
 
-const CODEX_HOME = process.env.CODEX_HOME ?? path.join(process.cwd(), ".codex-home");
+const CODEX_HOME = process.env.CODEX_HOME ?? path.join(process.env.HOME ?? process.cwd(), ".codex");
 const SESSIONS_DIR = path.join(CODEX_HOME, "sessions");
 
 type CodexEventLine = {
@@ -103,7 +103,9 @@ async function importFile(filePath: string): Promise<number> {
     try {
       evt = JSON.parse(line) as CodexEventLine;
     } catch {
-      console.warn(`[persistence] JSONL parse error in ${path.basename(filePath)}: ${line.slice(0, 80)}`);
+      console.warn(
+        `[persistence] JSONL parse error in ${path.basename(filePath)}: ${line.slice(0, 80)}`,
+      );
       continue;
     }
 
@@ -115,7 +117,9 @@ async function importFile(filePath: string): Promise<number> {
       const meta = payload as unknown as SessionMetaPayload;
       sessionId = String(meta.id ?? "").trim();
       if (!sessionId) {
-        console.warn(`[persistence] session_meta missing id in ${path.basename(filePath)}, skipping`);
+        console.warn(
+          `[persistence] session_meta missing id in ${path.basename(filePath)}, skipping`,
+        );
         break;
       }
 
@@ -148,7 +152,7 @@ async function importFile(filePath: string): Promise<number> {
         db.prepare(
           `INSERT OR IGNORE INTO sessions
            (id, workspace_id, cli, title, model, approval_mode, created_at, updated_at, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           sessionId,
           "imported-codex",
@@ -158,7 +162,7 @@ async function importFile(filePath: string): Promise<number> {
           "confirm",
           sessionTimestamp,
           now,
-          "closed"
+          "closed",
         );
       } catch (e) {
         console.warn(`[persistence] failed to create session ${sessionId}:`, e);
@@ -211,7 +215,7 @@ export async function importCodexRollouts(): Promise<void> {
 
   if (totalRollouts > 0) {
     console.log(
-      `[persistence] imported ${totalRollouts} rollouts (${totalMessages} messages) from .codex-home/sessions/`
+      `[persistence] imported ${totalRollouts} rollouts (${totalMessages} messages) from ${SESSIONS_DIR}`,
     );
   }
 }

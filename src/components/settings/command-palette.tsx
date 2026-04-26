@@ -19,6 +19,18 @@ type Entry =
 const ENTRIES: Entry[] = [
   {
     kind: "section",
+    id: "agent",
+    label: "Agent",
+    keywords: ["global", "endpoint", "token", "auth", "remote"],
+  },
+  {
+    kind: "section",
+    id: "workspace",
+    label: "Workspace",
+    keywords: ["projects", "repositories", "delete", "folder", "root"],
+  },
+  {
+    kind: "section",
     id: "appearance",
     label: "Appearance",
     keywords: ["theme", "dark", "light", "mode"],

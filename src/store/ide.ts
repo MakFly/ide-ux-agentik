@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { toast } from "sonner";
-import { providerFor, FsError, type FsEntry } from "@/lib/fs";
+import { dropProvider, providerFor, FsError, type FsEntry } from "@/lib/fs";
 import { computeStatus, type GitStatusMap } from "@/lib/git/status";
 import { persistence } from "@/lib/persistence/client";
 import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
@@ -37,6 +37,25 @@ export type WorkTask = {
 export type BranchTask = WorkTask;
 
 export type TerminalKind = "codex" | "claude" | "opencode" | "gemini";
+export const TERMINAL_KINDS: readonly TerminalKind[] = ["codex", "claude", "opencode", "gemini"];
+
+export function isTerminalKind(value: string): value is TerminalKind {
+  return (TERMINAL_KINDS as readonly string[]).includes(value);
+}
+
+const TERMINAL_TITLE_BY_KIND: Record<TerminalKind, string> = {
+  codex: "Codex",
+  claude: "Claude Code",
+  opencode: "OpenCode",
+  gemini: "Gemini",
+};
+
+const TERMINAL_COMMAND_BY_KIND: Record<TerminalKind, string> = {
+  codex: "codex run",
+  claude: "claude",
+  opencode: "opencode run",
+  gemini: "gemini",
+};
 
 export type WorkspaceTerminal = {
   id: string;
@@ -55,6 +74,128 @@ export type WorkspaceTerminal = {
   // @deprecated: replaced by taskRootId. Kept for backward compatibility reading.
   taskId?: string;
 };
+
+function taskSessionId(task: import("@/lib/fs/remote-agent").Task): string {
+  return task.sessionId || `${task.id}-session`;
+}
+
+function taskSessionStatus(
+  task: import("@/lib/fs/remote-agent").Task,
+): WorkspaceTerminal["status"] {
+  if (task.status === "running" || task.status === "queued" || task.status === "awaiting") {
+    return "busy";
+  }
+  return "idle";
+}
+
+function sessionForTask(task: import("@/lib/fs/remote-agent").Task): WorkspaceTerminal {
+  const kind = isTerminalKind(task.cli) ? task.cli : "codex";
+  const id = taskSessionId(task);
+  return {
+    id,
+    kind,
+    title: task.title || TERMINAL_TITLE_BY_KIND[kind],
+    status: taskSessionStatus(task),
+    workspaceId: task.workspaceId,
+    lastCommand: TERMINAL_COMMAND_BY_KIND[kind],
+    taskId: task.id,
+    taskRootId: task.id,
+    cliSessions: [id],
+  };
+}
+
+function reconcileTaskSessions(
+  tasks: import("@/lib/fs/remote-agent").Task[],
+  existing: WorkspaceTerminal[],
+): WorkspaceTerminal[] {
+  let next = existing;
+  for (const task of tasks) {
+    const id = taskSessionId(task);
+    const idx = next.findIndex(
+      (session) =>
+        session.id === id || session.taskRootId === task.id || session.taskId === task.id,
+    );
+    const tab = sessionForTask(task);
+    if (idx >= 0) {
+      next = next.map((session, i) =>
+        i === idx
+          ? {
+              ...session,
+              ...tab,
+              cliSessions: session.cliSessions?.length ? session.cliSessions : tab.cliSessions,
+            }
+          : session,
+      );
+    }
+  }
+  return next;
+}
+
+function activeSessionFromTasks(
+  activeTaskId: string | null,
+  tasks: import("@/lib/fs/remote-agent").Task[],
+): string | null {
+  if (!activeTaskId) return null;
+  const task = tasks.find((candidate) => candidate.id === activeTaskId);
+  return task ? taskSessionId(task) : null;
+}
+
+function taskIdFromSession(
+  session: WorkspaceTerminal | undefined,
+  tasks: import("@/lib/fs/remote-agent").Task[],
+): string | null {
+  const candidateId = session?.taskRootId ?? session?.taskId;
+  if (candidateId) return candidateId;
+  if (!session) return null;
+  const match = tasks.find((task) => taskSessionId(task) === session.id);
+  return match ? match.id : null;
+}
+
+function inferActiveTaskFromSession(
+  activeTaskId: string | null,
+  workspaceId: string,
+  activeSessionIdByWorkspaceId: Record<string, string>,
+  sessionsByWorkspace: Record<string, WorkspaceTerminal[]>,
+  tasksByWorkspace: Record<string, import("@/lib/fs/remote-agent").Task[]>,
+): string | null {
+  if (activeTaskId) return activeTaskId;
+  const activeSessionId = activeSessionIdByWorkspaceId[workspaceId];
+  if (!activeSessionId) return null;
+  const activeSession = (sessionsByWorkspace[workspaceId] ?? []).find(
+    (session) => session.id === activeSessionId,
+  );
+  return taskIdFromSession(activeSession, tasksByWorkspace[workspaceId] ?? []);
+}
+
+function deriveActiveTaskId(
+  workspaceId: string,
+  currentActiveTaskId: string | null,
+  sessionsByWorkspace: Record<string, WorkspaceTerminal[]>,
+  tasksByWorkspace: Record<string, import("@/lib/fs/remote-agent").Task[]>,
+  fallbackSession?: WorkspaceTerminal,
+): string | null {
+  const tasksForWorkspace = tasksByWorkspace[workspaceId] ?? [];
+
+  if (!currentActiveTaskId) {
+    return fallbackSession ? taskIdFromSession(fallbackSession, tasksForWorkspace) : null;
+  }
+
+  const activeTaskId = currentActiveTaskId;
+
+  const belongsToWorkspace = tasksForWorkspace.some(
+    (task) => task.id === activeTaskId,
+  );
+  if (!belongsToWorkspace) {
+    return activeTaskId;
+  }
+
+  if (fallbackSession) {
+    return taskIdFromSession(fallbackSession, tasksByWorkspace[workspaceId] ?? []);
+  }
+
+  const remainingSessions = sessionsByWorkspace[workspaceId] ?? [];
+  return remainingSessions.length > 0 ? activeTaskId : null;
+}
 
 export type Worktree = {
   id: string;
@@ -230,6 +371,7 @@ type State = {
 
   // Runtime-only (not persisted): Keep providers alive for task event listeners.
   agentProvidersByWorkspaceId: Record<string, RemoteAgentProvider>;
+  agentConnectionErrorByWorkspaceId: Record<string, string | undefined>;
 
   // Global prefs
   theme: Theme;
@@ -239,6 +381,7 @@ type State = {
   showAgentPanel: boolean;
   applyingFromUrl: boolean;
   activeAgent: TerminalKind;
+  composerAgentByWorkspaceId: Record<string, TerminalKind | undefined>;
   previewMode: boolean;
   filesTab: "files" | "changes" | "checks";
   settingsSidebarCollapsed: boolean;
@@ -303,8 +446,10 @@ type State = {
   toggleAgentPanel: () => void;
   setApplyingFromUrl: (v: boolean) => void;
   setActiveAgent: (k: TerminalKind) => void;
+  setComposerAgent: (workspaceId: string, cli: TerminalKind) => void;
   setActiveSession: (sessionId: string) => void;
-  addAgentSession: (kind: TerminalKind) => void;
+  closeSessionTab: (sessionId: string) => void;
+  addAgentSession: (kind: TerminalKind) => string;
   closeAgentSession: (sessionId: string) => void;
   pinSession: (sessionId: string) => void;
   unpinSession: (sessionId: string) => void;
@@ -331,6 +476,7 @@ type State = {
     source?: WorkspaceSource,
     opts?: { rootPath?: string; gitUrl?: string },
   ) => string;
+  updateWorkspace: (workspace: Workspace) => Promise<void>;
   addTask: (worktreeId: string, title: string, description?: string) => void;
   updateTask: (
     worktreeId: string,
@@ -349,7 +495,7 @@ type State = {
   // Cascade removal helpers — available as store actions, not wired to UI.
   removeWorktree: (worktreeId: string) => void;
   removeBranch: (workspaceId: string, branchId: string) => void;
-  removeWorkspace: (workspaceId: string) => void;
+  removeWorkspace: (workspaceId: string) => Promise<void>;
 
   createFolder: (name: string) => void;
   createFile: (folder: string | null, name: string) => void;
@@ -371,6 +517,11 @@ type State = {
   createTaskFromPrompt: (
     prompt: string,
     options?: { cli?: string; model?: string; effort?: string },
+  ) => Promise<import("@/lib/fs/remote-agent").Task | null>;
+  continueTaskFromPrompt: (
+    taskId: string,
+    prompt: string,
+    options?: { model?: string; effort?: string },
   ) => Promise<void>;
   upsertTask: (task: import("@/lib/fs/remote-agent").Task) => void;
   removeTaskById: (taskId: string) => void;
@@ -796,76 +947,16 @@ function buildInitialTasksByWorktreeId(): Record<string, WorkTask[]> {
   return result;
 }
 
-/**
- * Resolve the conversation root task by walking up the parentSessionId chain.
- * Returns the root task's id (which has parentSessionId = null).
- */
-function resolveConversationRoot(
-  task: import("@/lib/fs/remote-agent").Task,
-  allTasks: import("@/lib/fs/remote-agent").Task[],
-): string {
-  let cur = task;
-  const seen = new Set<string>();
-  while (cur.parentSessionId) {
-    if (seen.has(cur.id)) break; // cycle detection
-    seen.add(cur.id);
-    const parent = allTasks.find((t) => t.sessionId === cur.parentSessionId);
-    if (!parent) break;
-    cur = parent;
+// Module-level mutex for hydrateTasks. See comment in hydrateTasks for why a
+// state-based guard is racy under React StrictMode.
+const hydrateTasksInflight = new Map<string, Promise<void>>();
+
+function agentConnectionErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/auth failed/i.test(message)) {
+    return "Agent authentication failed. Check the token for this workspace.";
   }
-  return cur.id;
-}
-
-const TITLE_BY_KIND: Record<TerminalKind, string> = {
-  codex: "Codex",
-  claude: "Claude Code",
-  opencode: "OpenCode",
-  gemini: "Gemini",
-};
-
-/**
- * Mirror a single Task into the existing WorkspaceTerminal[] list, parent-aware.
- * - Root task (no parentSessionId) → create or update its own tab.
- * - Child task (parentSessionId set) → update the conversation root's tab in place,
- *   keeping the tab id stable (= root.sessionId) but pointing taskId at the latest child.
- */
-function buildSessionTabFor(
-  task: import("@/lib/fs/remote-agent").Task,
-  allTasks: import("@/lib/fs/remote-agent").Task[],
-  existing: WorkspaceTerminal[],
-): WorkspaceTerminal[] {
-  const conversationRootTaskId = resolveConversationRoot(task, allTasks);
-  const tabStatus: WorkspaceTerminal["status"] = task.status === "running" ? "busy" : "ready";
-  const cliKind = (task.cli as TerminalKind) ?? "codex";
-  const titleFor = task.title?.slice(0, 40) || TITLE_BY_KIND[cliKind];
-  // Generate deterministic sessionId if not yet persisted (lazy session creation)
-  const sessionId = task.sessionId || `${task.id}-session`;
-
-  if (task.id === conversationRootTaskId) {
-    // ROOT task — create or update tab keyed on sessionId (deterministic or from DB).
-    const tab: WorkspaceTerminal = {
-      id: sessionId,
-      kind: cliKind,
-      title: titleFor,
-      status: tabStatus,
-      workspaceId: task.workspaceId,
-      lastCommand: TITLE_BY_KIND[cliKind],
-      taskRootId: task.id,
-      cliSessions: [sessionId],
-    };
-    const idx = existing.findIndex((t) => t.id === sessionId);
-    return idx >= 0 ? existing.map((t, i) => (i === idx ? tab : t)) : [...existing, tab];
-  }
-
-  // CHILD task — find the existing tab for the conversation root and
-  // update its taskRootId to point to the latest task in the chain.
-  const rootTab = existing.find(
-    (t) => t.taskRootId === conversationRootTaskId || t.taskId === conversationRootTaskId,
-  );
-  if (!rootTab) return existing; // shouldn't happen, fail closed
-  return existing.map((t) =>
-    t.id === rootTab.id ? { ...t, taskRootId: task.id, status: tabStatus, title: titleFor } : t,
-  );
+  return message || "Failed to connect to agent";
 }
 
 export const useIDE = create<State>()(
@@ -899,6 +990,7 @@ export const useIDE = create<State>()(
       sessionModeBySessionId: {},
       sessionClearTickByWorkspace: {},
       agentProvidersByWorkspaceId: {},
+      agentConnectionErrorByWorkspaceId: {},
 
       theme: readStoredTheme(),
       showFiles: true,
@@ -907,6 +999,7 @@ export const useIDE = create<State>()(
       showAgentPanel: false,
       applyingFromUrl: false,
       activeAgent: "claude",
+      composerAgentByWorkspaceId: {},
       previewMode: false,
       filesTab: "files",
       settingsSidebarCollapsed: false,
@@ -1387,6 +1480,14 @@ export const useIDE = create<State>()(
       toggleAgentPanel: () => set((s) => ({ showAgentPanel: !s.showAgentPanel })),
       setApplyingFromUrl: (v) => set({ applyingFromUrl: v }),
       setActiveAgent: (k) => set({ activeAgent: k }),
+      setComposerAgent: (workspaceId, cli) =>
+        set((s) => ({
+          activeAgent: cli,
+          composerAgentByWorkspaceId: {
+            ...s.composerAgentByWorkspaceId,
+            [workspaceId]: cli,
+          },
+        })),
       togglePreview: () => set((s) => ({ previewMode: !s.previewMode })),
       setTheme: (theme) => {
         writeStoredTheme(theme);
@@ -1596,6 +1697,35 @@ export const useIDE = create<State>()(
         return id;
       },
 
+      updateWorkspace: async (workspace) => {
+        const existing = get().workspaces.find((w) => w.id === workspace.id);
+        if (!existing) throw new Error(`Workspace not found: ${workspace.id}`);
+
+        await storage.putWorkspace(workspace.orgId, workspace);
+
+        if (existing.source.kind === "remote-agent") {
+          dropProvider(existing.source);
+        }
+
+        const existingProvider = get().agentProvidersByWorkspaceId[workspace.id];
+        if (existingProvider) {
+          await existingProvider.disconnect().catch(() => {});
+        }
+
+        set((s) => {
+          const { [workspace.id]: _provider, ...providers } = s.agentProvidersByWorkspaceId;
+          void _provider;
+          return {
+            workspaces: s.workspaces.map((w) => (w.id === workspace.id ? workspace : w)),
+            agentProvidersByWorkspaceId: providers,
+            agentConnectionErrorByWorkspaceId: {
+              ...s.agentConnectionErrorByWorkspaceId,
+              [workspace.id]: undefined,
+            },
+          };
+        });
+      },
+
       addTask: (worktreeId, title, description) =>
         set((s) => ({
           tasksByWorktreeId: {
@@ -1775,39 +1905,146 @@ export const useIDE = create<State>()(
           },
         })),
 
-      setActiveSession: (sessionId) =>
-        set((s) => ({
-          activeSessionIdByWorkspaceId: {
-            ...s.activeSessionIdByWorkspaceId,
-            [s.activeWorkspaceId]: sessionId,
-          },
-        })),
+      setActiveSession: (sessionId) => {
+        let nextActiveTaskId: string | null = null;
+        set((s) => {
+          const workspaceId = s.activeWorkspaceId;
+          const sessions = s.sessionsByWorkspaceId[workspaceId] ?? [];
+          const targetSession = sessions.find((session) => session.id === sessionId);
+          nextActiveTaskId = targetSession
+            ? taskIdFromSession(targetSession, s.tasksByWorkspaceId[workspaceId] ?? [])
+            : null;
+
+          return {
+            activeSessionIdByWorkspaceId: {
+              ...s.activeSessionIdByWorkspaceId,
+              [workspaceId]: sessionId,
+            },
+            activeTaskId: sessionId ? nextActiveTaskId : null,
+          };
+        });
+
+        if (sessionId && nextActiveTaskId) {
+          const state = get();
+          if (!state.taskEventsByTaskId[nextActiveTaskId]) {
+            void state.loadTaskLogs(nextActiveTaskId);
+          }
+          void state.openTaskSession(nextActiveTaskId);
+        }
+      },
+
+      closeSessionTab: (sessionId) => {
+        const current = get();
+        const owningWorkspaceId = Object.entries(current.sessionsByWorkspaceId).find(([, list]) =>
+          list.some((t) => t.id === sessionId),
+        )?.[0];
+        const closingSession = owningWorkspaceId
+          ? current.sessionsByWorkspaceId[owningWorkspaceId]?.find(
+              (session) => session.id === sessionId,
+            )
+          : undefined;
+        const closingTaskId = owningWorkspaceId
+          ? taskIdFromSession(closingSession, current.tasksByWorkspaceId[owningWorkspaceId] ?? [])
+          : null;
+        const wasActive =
+          owningWorkspaceId !== undefined &&
+          current.activeSessionIdByWorkspaceId[owningWorkspaceId] === sessionId;
+        const remaining =
+          owningWorkspaceId !== undefined
+            ? (current.sessionsByWorkspaceId[owningWorkspaceId] ?? []).filter(
+                (session) => session.id !== sessionId,
+              )
+            : [];
+        const fallback = remaining[remaining.length - 1];
+
+        if (owningWorkspaceId && closingSession) {
+          const provider = current.agentProvidersByWorkspaceId[owningWorkspaceId];
+          if (provider) {
+            const persistClose = closingTaskId
+              ? provider
+                  .taskUpdate(closingTaskId, { sessionId: null })
+                  .then(() => persistence.sessions.delete(provider, sessionId))
+              : persistence.sessions.delete(provider, sessionId);
+            void persistClose.catch((err) => {
+              console.warn("[closeSessionTab] failed to persist session delete:", err);
+            });
+          }
+        }
+
+        set((s) => {
+          if (owningWorkspaceId === undefined) return {};
+          const nextSessions: Record<string, WorkspaceTerminal[]> = {};
+          for (const [wsId, list] of Object.entries(s.sessionsByWorkspaceId)) {
+            nextSessions[wsId] = list.filter((session) => session.id !== sessionId);
+          }
+
+          const nextActive: Record<string, string> = { ...s.activeSessionIdByWorkspaceId };
+          if (owningWorkspaceId !== undefined && wasActive) {
+            if (fallback?.id) nextActive[owningWorkspaceId] = fallback.id;
+            else delete nextActive[owningWorkspaceId];
+          }
+
+          const nextPinned: Record<string, string[]> = {};
+          for (const [wsId, pins] of Object.entries(s.pinnedSessionIdsByWorkspaceId)) {
+            nextPinned[wsId] = pins.filter((id) => id !== sessionId);
+          }
+
+          const nextMessages = { ...s.messagesBySessionId };
+          delete nextMessages[sessionId];
+
+          const nextSessionModes = { ...s.sessionModeBySessionId };
+          delete nextSessionModes[sessionId];
+
+          const nextTasksByWorkspaceId =
+            owningWorkspaceId && closingTaskId
+              ? {
+                  ...s.tasksByWorkspaceId,
+                  [owningWorkspaceId]: (s.tasksByWorkspaceId[owningWorkspaceId] ?? []).map(
+                    (task) =>
+                      task.id === closingTaskId
+                        ? {
+                            ...task,
+                            sessionId: null,
+                          }
+                        : task,
+                  ),
+                }
+              : s.tasksByWorkspaceId;
+
+          return {
+            sessionsByWorkspaceId: nextSessions,
+            activeSessionIdByWorkspaceId: nextActive,
+            pinnedSessionIdsByWorkspaceId: nextPinned,
+            messagesBySessionId: nextMessages,
+            sessionModeBySessionId: nextSessionModes,
+            tasksByWorkspaceId: nextTasksByWorkspaceId,
+          };
+        });
+
+        if (owningWorkspaceId !== undefined && wasActive) {
+          if (fallback) {
+            void get().setActiveSession(fallback.id);
+          } else {
+            void get().setActiveSession("");
+          }
+        }
+      },
 
       addAgentSession: (kind) => {
-        const titleByKind: Record<TerminalKind, string> = {
-          codex: "Codex",
-          claude: "Claude Code",
-          opencode: "OpenCode",
-          gemini: "Gemini",
-        };
-        const commandByKind: Record<TerminalKind, string> = {
-          codex: "codex run",
-          claude: "claude",
-          opencode: "opencode run",
-          gemini: "gemini",
-        };
+        let nextId = "";
         set((s) => {
           const workspaceId = s.activeWorkspaceId;
           const id = `${workspaceId}-${kind}-${crypto.randomUUID().slice(0, 8)}`;
           const session: WorkspaceTerminal = {
             id,
             kind,
-            title: titleByKind[kind],
+            title: TERMINAL_TITLE_BY_KIND[kind],
             status: "ready",
             workspaceId,
-            lastCommand: commandByKind[kind],
+            lastCommand: TERMINAL_COMMAND_BY_KIND[kind],
           };
           const current = s.sessionsByWorkspaceId[workspaceId] ?? [];
+          nextId = id;
           return {
             sessionsByWorkspaceId: {
               ...s.sessionsByWorkspaceId,
@@ -1819,6 +2056,7 @@ export const useIDE = create<State>()(
             },
           };
         });
+        return nextId;
       },
 
       closeAgentSession: (sessionId) => {
@@ -1837,12 +2075,22 @@ export const useIDE = create<State>()(
             .delete(provider, sessionId)
             .catch((err) => console.warn("[closeAgentSession] DB delete failed:", err));
         }
+        const wasActive = owningWorkspaceId
+          ? stateNow.activeSessionIdByWorkspaceId[owningWorkspaceId] === sessionId
+          : false;
+        const remainingAfterClose = owningWorkspaceId
+          ? (stateNow.sessionsByWorkspaceId[owningWorkspaceId] ?? []).filter(
+              (session) => session.id !== sessionId,
+            )
+          : [];
+        const fallbackSession = remainingAfterClose[remainingAfterClose.length - 1];
         set((s) => {
           const nextSessions: Record<string, WorkspaceTerminal[]> = {};
           for (const [wsId, list] of Object.entries(s.sessionsByWorkspaceId)) {
             nextSessions[wsId] = list.filter((t) => t.id !== sessionId);
           }
           const nextActive: Record<string, string> = { ...s.activeSessionIdByWorkspaceId };
+          const currentActiveInNext = owningWorkspaceId !== undefined ? nextActive[owningWorkspaceId] : undefined;
           for (const [wsId, id] of Object.entries(nextActive)) {
             if (id === sessionId) {
               const remaining = nextSessions[wsId] ?? [];
@@ -1857,13 +2105,46 @@ export const useIDE = create<State>()(
           for (const [wsId, pins] of Object.entries(s.pinnedSessionIdsByWorkspaceId)) {
             nextPinned[wsId] = pins.filter((id) => id !== sessionId);
           }
+          const nextComposerAgents = { ...s.composerAgentByWorkspaceId };
+          let nextActiveTaskId = s.activeTaskId;
+          if (owningWorkspaceId !== undefined && currentActiveInNext === sessionId) {
+            const remaining = nextSessions[owningWorkspaceId] ?? [];
+            const fallbackSession = remaining[remaining.length - 1];
+            if (fallbackSession) {
+              nextActive[owningWorkspaceId] = fallbackSession.id;
+            } else {
+              delete nextActive[owningWorkspaceId];
+            }
+            nextActiveTaskId = deriveActiveTaskId(
+              owningWorkspaceId,
+              nextActiveTaskId,
+              nextSessions,
+              s.tasksByWorkspaceId,
+              fallbackSession,
+            );
+            if (!fallbackSession) {
+              delete nextComposerAgents[owningWorkspaceId];
+            }
+          }
+          if (owningWorkspaceId !== undefined && (nextSessions[owningWorkspaceId] ?? []).length === 0) {
+            delete nextComposerAgents[owningWorkspaceId];
+          }
           return {
             sessionsByWorkspaceId: nextSessions,
             activeSessionIdByWorkspaceId: nextActive,
             messagesBySessionId: restMessages,
             pinnedSessionIdsByWorkspaceId: nextPinned,
+            composerAgentByWorkspaceId: nextComposerAgents,
+            activeTaskId: nextActiveTaskId,
           };
         });
+        if (owningWorkspaceId && wasActive) {
+          if (fallbackSession) {
+            void get().setActiveSession(fallbackSession.id);
+          } else {
+            void get().setActiveSession("");
+          }
+        }
       },
 
       pinSession: (sessionId) =>
@@ -1904,9 +2185,10 @@ export const useIDE = create<State>()(
         const workspaceId = Object.entries(get().activeSessionIdByWorkspaceId).find(
           ([, id]) => id === sessionId,
         )?.[0];
-        if (workspaceId) {
+        const provider = workspaceId ? get().agentProvidersByWorkspaceId[workspaceId] : undefined;
+        if (provider) {
           void persistence.sessions
-            .update(null as any, {
+            .update(provider, {
               id: sessionId,
               patch: { mode },
             })
@@ -1956,9 +2238,14 @@ export const useIDE = create<State>()(
         }));
       },
 
-      removeWorkspace: (workspaceId) => {
+      removeWorkspace: async (workspaceId) => {
         const s = get();
         const workspace = s.workspaces.find((w) => w.id === workspaceId);
+        if (workspace) {
+          await storage.removeWorkspace(workspace.orgId, workspaceId);
+        }
+        if (workspace?.source.kind === "remote-agent") dropProvider(workspace.source);
+        s.agentProvidersByWorkspaceId[workspaceId]?.disconnect().catch(() => {});
         // Cascade: remove all branches (which cascade to worktrees).
         const branches = s.branchesByWorkspaceId[workspaceId] ?? [];
         for (const branch of branches) {
@@ -1968,21 +2255,55 @@ export const useIDE = create<State>()(
           const { [workspaceId]: _branches, ...restBranches } = cur.branchesByWorkspaceId;
           const { [workspaceId]: _sessions, ...restSessions } = cur.sessionsByWorkspaceId;
           const { [workspaceId]: _worktrees, ...restWorktrees } = cur.worktreesByWorkspaceId;
+          const { [workspaceId]: _workspaceTasks, ...restWorkspaceTasks } = cur.tasksByWorkspaceId;
+          const { [workspaceId]: _activeSession, ...restActiveSessions } =
+            cur.activeSessionIdByWorkspaceId;
+          const { [workspaceId]: _pinnedSessions, ...restPinnedSessions } =
+            cur.pinnedSessionIdsByWorkspaceId;
+          const { [workspaceId]: _clearTick, ...restClearTicks } = cur.sessionClearTickByWorkspace;
+          const { [workspaceId]: _composerAgent, ...restComposerAgents } =
+            cur.composerAgentByWorkspaceId;
           const { [workspaceId]: _activeBranch, ...restActiveBranch } =
             cur.activeBranchIdByWorkspaceId;
           const { [workspaceId]: _provider, ...restProviders } = cur.agentProvidersByWorkspaceId;
+          const { [workspaceId]: _agentError, ...restAgentErrors } =
+            cur.agentConnectionErrorByWorkspaceId;
+          void _agentError;
+          const nextWorkspaces = cur.workspaces.filter((w) => w.id !== workspaceId);
+          const nextActiveWorkspaceId =
+            cur.activeWorkspaceId === workspaceId
+              ? (nextWorkspaces[0]?.id ?? "")
+              : cur.activeWorkspaceId;
+          const nextActiveBranchId =
+            cur.activeWorkspaceId === workspaceId
+              ? nextActiveWorkspaceId
+                ? (cur.activeBranchIdByWorkspaceId[nextActiveWorkspaceId] ?? "")
+                : ""
+              : cur.activeBranchId;
           return {
-            workspaces: cur.workspaces.filter((w) => w.id !== workspaceId),
+            workspaces: nextWorkspaces,
+            activeWorkspaceId: nextActiveWorkspaceId,
+            activeBranchId: nextActiveBranchId,
+            activeTaskId:
+              cur.activeTaskId &&
+              (cur.tasksByWorkspaceId[workspaceId] ?? []).some(
+                (task) => task.id === cur.activeTaskId,
+              )
+                ? null
+                : cur.activeTaskId,
             branchesByWorkspaceId: restBranches,
             sessionsByWorkspaceId: restSessions,
             worktreesByWorkspaceId: restWorktrees,
+            tasksByWorkspaceId: restWorkspaceTasks,
+            activeSessionIdByWorkspaceId: restActiveSessions,
+            pinnedSessionIdsByWorkspaceId: restPinnedSessions,
+            sessionClearTickByWorkspace: restClearTicks,
+            composerAgentByWorkspaceId: restComposerAgents,
             activeBranchIdByWorkspaceId: restActiveBranch,
             agentProvidersByWorkspaceId: restProviders,
+            agentConnectionErrorByWorkspaceId: restAgentErrors,
           };
         });
-        if (workspace) {
-          storage.removeWorkspace(workspace.orgId, workspaceId).catch(console.warn);
-        }
       },
 
       setCurrentOrgId: (id) => {
@@ -2002,37 +2323,114 @@ export const useIDE = create<State>()(
         const state = get();
         const workspace = state.workspaces.find((w) => w.id === workspaceId);
         if (!workspace || workspace.source.kind !== "remote-agent") return;
+        let hydratedActiveTaskId: string | null = null;
 
-        // Idempotency guard: if a provider is already wired (Strict Mode runs
-        // effects twice in dev; or another component triggered hydrate), just
-        // re-pull the task list and skip listener re-registration to avoid
-        // duplicate WS event handlers (which double every upsert/event).
+        // Mutex: StrictMode dev mode runs effects twice, and other components
+        // may also trigger hydrate. The first call's `await provider.connect()`
+        // happens BEFORE the provider is stored in state, so a naive
+        // `if (existingProvider)` guard is racy → both calls would create their
+        // own provider and attach their own listeners (every WS event fires
+        // twice). Serialize via a module-level in-flight promise.
+        const inflight = hydrateTasksInflight.get(workspaceId);
+        if (inflight) {
+          await inflight;
+          return;
+        }
+
         const existingProvider = state.agentProvidersByWorkspaceId[workspaceId];
         if (existingProvider) {
           try {
             const tasks = await existingProvider.taskList({ workspaceId });
             set((s) => {
               const dismissed = new Set(s.dismissedTaskIds);
+              const visibleTasks = tasks.filter((t) => !dismissed.has(t.id));
+              const reconciledSessions = reconcileTaskSessions(
+                visibleTasks,
+                s.sessionsByWorkspaceId[workspaceId] ?? [],
+              );
+              const activeSessionId = activeSessionFromTasks(s.activeTaskId, visibleTasks);
+              const activeTask = visibleTasks.find((task) => task.id === s.activeTaskId);
+              const activeCli =
+                activeTask && isTerminalKind(activeTask.cli) ? activeTask.cli : null;
+              const nextActiveTaskId = inferActiveTaskFromSession(
+                s.activeTaskId,
+                workspaceId,
+                s.activeSessionIdByWorkspaceId,
+                {
+                  ...s.sessionsByWorkspaceId,
+                  [workspaceId]: reconciledSessions,
+                },
+                {
+                  ...s.tasksByWorkspaceId,
+                  [workspaceId]: visibleTasks,
+                },
+              );
+              hydratedActiveTaskId = nextActiveTaskId;
               return {
                 tasksByWorkspaceId: {
                   ...s.tasksByWorkspaceId,
-                  [workspaceId]: tasks.filter((t) => !dismissed.has(t.id)),
+                  [workspaceId]: visibleTasks,
+                },
+                sessionsByWorkspaceId: {
+                  ...s.sessionsByWorkspaceId,
+                  [workspaceId]: reconciledSessions,
+                },
+                activeTaskId: nextActiveTaskId,
+                activeSessionIdByWorkspaceId: activeSessionId
+                  ? {
+                      ...s.activeSessionIdByWorkspaceId,
+                      [workspaceId]: activeSessionId,
+                    }
+                  : s.activeSessionIdByWorkspaceId,
+                composerAgentByWorkspaceId: activeCli
+                  ? {
+                      ...s.composerAgentByWorkspaceId,
+                      [workspaceId]: activeCli,
+                    }
+                  : s.composerAgentByWorkspaceId,
+                agentConnectionErrorByWorkspaceId: {
+                  ...s.agentConnectionErrorByWorkspaceId,
+                  [workspaceId]: undefined,
                 },
               };
             });
           } catch (err) {
-            console.warn(`[store.tasks] hydrateTasks refresh failed:`, err);
+            const message = agentConnectionErrorMessage(err);
+            await existingProvider.disconnect().catch(() => {});
+            set((s) => {
+              const { [workspaceId]: _removed, ...providers } = s.agentProvidersByWorkspaceId;
+              void _removed;
+              return {
+                agentProvidersByWorkspaceId: providers,
+                agentConnectionErrorByWorkspaceId: {
+                  ...s.agentConnectionErrorByWorkspaceId,
+                  [workspaceId]: message,
+                },
+              };
+            });
+            toast.error(message, { id: `agent-connection-${workspaceId}` });
+            console.warn(`[store.tasks] hydrateTasks refresh failed: ${message}`);
+          }
+          if (hydratedActiveTaskId) {
+            const current = get();
+            if (!current.taskEventsByTaskId[hydratedActiveTaskId]) {
+              void current.loadTaskLogs(hydratedActiveTaskId);
+            }
+            void current.openTaskSession(hydratedActiveTaskId);
           }
           return;
         }
 
-        try {
-          const provider = new RemoteAgentProvider(
-            workspace.source.label,
-            workspace.source.url,
-            workspace.source.token,
-          );
-          await provider.connect();
+        const source = workspace.source;
+        if (source.kind !== "remote-agent") return;
+        const work = (async () => {
+          const provider = new RemoteAgentProvider(source.label, source.url, source.token);
+          try {
+            await provider.connect();
+          } catch (err) {
+            await provider.disconnect().catch(() => {});
+            throw err;
+          }
 
           // Persist the provider to keep event listeners alive
           set((s) => ({
@@ -2047,16 +2445,27 @@ export const useIDE = create<State>()(
           set((s) => {
             const dismissed = new Set(s.dismissedTaskIds);
             const visibleTasks = tasks.filter((t) => !dismissed.has(t.id));
-            // Mirror live tasks as session-tabs so the Workspace surfaces them
-            // after refresh. Sort by createdAt ASC so root tasks are processed
-            // before their children (ensures conversation aggregation works).
-            const sorted = [...visibleTasks].sort(
-              (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
+            const reconciledSessions = reconcileTaskSessions(
+              visibleTasks,
+              s.sessionsByWorkspaceId[workspaceId] ?? [],
             );
-            let nextSessions = s.sessionsByWorkspaceId[workspaceId] ?? [];
-            for (const t of sorted) {
-              nextSessions = buildSessionTabFor(t, sorted, nextSessions);
-            }
+            const activeSessionId = activeSessionFromTasks(s.activeTaskId, visibleTasks);
+            const activeTask = visibleTasks.find((task) => task.id === s.activeTaskId);
+            const activeCli = activeTask && isTerminalKind(activeTask.cli) ? activeTask.cli : null;
+            const nextActiveTaskId = inferActiveTaskFromSession(
+              s.activeTaskId,
+              workspaceId,
+              s.activeSessionIdByWorkspaceId,
+              {
+                ...s.sessionsByWorkspaceId,
+                [workspaceId]: reconciledSessions,
+              },
+              {
+                ...s.tasksByWorkspaceId,
+                [workspaceId]: visibleTasks,
+              },
+            );
+            hydratedActiveTaskId = nextActiveTaskId;
             return {
               tasksByWorkspaceId: {
                 ...s.tasksByWorkspaceId,
@@ -2064,10 +2473,34 @@ export const useIDE = create<State>()(
               },
               sessionsByWorkspaceId: {
                 ...s.sessionsByWorkspaceId,
-                [workspaceId]: nextSessions,
+                [workspaceId]: reconciledSessions,
+              },
+              activeTaskId: nextActiveTaskId,
+              activeSessionIdByWorkspaceId: activeSessionId
+                ? {
+                    ...s.activeSessionIdByWorkspaceId,
+                    [workspaceId]: activeSessionId,
+                  }
+                : s.activeSessionIdByWorkspaceId,
+              composerAgentByWorkspaceId: activeCli
+                ? {
+                    ...s.composerAgentByWorkspaceId,
+                    [workspaceId]: activeCli,
+                  }
+                : s.composerAgentByWorkspaceId,
+              agentConnectionErrorByWorkspaceId: {
+                ...s.agentConnectionErrorByWorkspaceId,
+                [workspaceId]: undefined,
               },
             };
           });
+
+          if (hydratedActiveTaskId) {
+            if (!get().taskEventsByTaskId[hydratedActiveTaskId]) {
+              void get().loadTaskLogs(hydratedActiveTaskId);
+            }
+            void get().openTaskSession(hydratedActiveTaskId);
+          }
 
           provider.onTaskCreated((task) => {
             console.debug("[store.tasks] created", task.id, task.title);
@@ -2091,6 +2524,14 @@ export const useIDE = create<State>()(
                     : t,
                 ),
               },
+              sessionsByWorkspaceId: {
+                ...s.sessionsByWorkspaceId,
+                [workspaceId]: (s.sessionsByWorkspaceId[workspaceId] ?? []).map((session) =>
+                  session.taskRootId === e.taskId || session.taskId === e.taskId
+                    ? { ...session, status: "busy" }
+                    : session,
+                ),
+              },
             }));
             // worktree_path / branch_name are set asynchronously after the
             // started event fires (server emits started BEFORE setupWorktree
@@ -2100,23 +2541,17 @@ export const useIDE = create<State>()(
               .then((fresh) => {
                 set((s) => {
                   const dismissed = new Set(s.dismissedTaskIds);
-                  const visibleTasks = fresh.filter((t) => !dismissed.has(t.id));
-                  // Rebuild session-tabs from fresh list (parent-aware).
-                  const sorted = [...visibleTasks].sort(
-                    (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
-                  );
-                  let nextSessions = s.sessionsByWorkspaceId[workspaceId] ?? [];
-                  for (const t of sorted) {
-                    nextSessions = buildSessionTabFor(t, sorted, nextSessions);
-                  }
                   return {
                     tasksByWorkspaceId: {
                       ...s.tasksByWorkspaceId,
-                      [workspaceId]: visibleTasks,
+                      [workspaceId]: fresh.filter((t) => !dismissed.has(t.id)),
                     },
                     sessionsByWorkspaceId: {
                       ...s.sessionsByWorkspaceId,
-                      [workspaceId]: nextSessions,
+                      [workspaceId]: reconcileTaskSessions(
+                        fresh.filter((t) => !dismissed.has(t.id)),
+                        s.sessionsByWorkspaceId[workspaceId] ?? [],
+                      ),
                     },
                   };
                 });
@@ -2161,6 +2596,14 @@ export const useIDE = create<State>()(
                     : t,
                 ),
               },
+              sessionsByWorkspaceId: {
+                ...s.sessionsByWorkspaceId,
+                [workspaceId]: (s.sessionsByWorkspaceId[workspaceId] ?? []).map((session) =>
+                  session.taskRootId === e.taskId || session.taskId === e.taskId
+                    ? { ...session, status: "idle" }
+                    : session,
+                ),
+              },
             }));
             // Final pull to capture any field set during the run
             // (worktree_path, exit_code, error_message, etc.)
@@ -2173,6 +2616,13 @@ export const useIDE = create<State>()(
                     tasksByWorkspaceId: {
                       ...s.tasksByWorkspaceId,
                       [workspaceId]: fresh.filter((t) => !dismissed.has(t.id)),
+                    },
+                    sessionsByWorkspaceId: {
+                      ...s.sessionsByWorkspaceId,
+                      [workspaceId]: reconcileTaskSessions(
+                        fresh.filter((t) => !dismissed.has(t.id)),
+                        s.sessionsByWorkspaceId[workspaceId] ?? [],
+                      ),
                     },
                   };
                 });
@@ -2205,8 +2655,23 @@ export const useIDE = create<State>()(
               };
             });
           });
-        } catch (err) {
-          console.warn(`[store] hydrateTasks failed for workspace ${workspaceId}:`, err);
+        })().catch((err) => {
+          const message = agentConnectionErrorMessage(err);
+          set((s) => ({
+            agentConnectionErrorByWorkspaceId: {
+              ...s.agentConnectionErrorByWorkspaceId,
+              [workspaceId]: message,
+            },
+          }));
+          toast.error(message, { id: `agent-connection-${workspaceId}` });
+          console.warn(`[store] hydrateTasks failed for workspace ${workspaceId}: ${message}`);
+        });
+
+        hydrateTasksInflight.set(workspaceId, work);
+        try {
+          await work;
+        } finally {
+          hydrateTasksInflight.delete(workspaceId);
         }
       },
 
@@ -2219,7 +2684,22 @@ export const useIDE = create<State>()(
           const t = tasks.find((task) => task.id === id);
           if (t) {
             const sessionId = t.sessionId ?? `${id}-session`;
+            const session = sessionForTask(t);
+            const next = state.sessionsByWorkspaceId[wsId] ?? [];
+            const hasTaskSession = next.some(
+              (entry) =>
+                entry.id === sessionId ||
+                entry.taskRootId === t.id ||
+                entry.taskId === t.id ||
+                entry.taskId === t.sessionId,
+            );
             set((s) => ({
+              sessionsByWorkspaceId: hasTaskSession
+                ? s.sessionsByWorkspaceId
+                : {
+                    ...s.sessionsByWorkspaceId,
+                    [wsId]: [...(s.sessionsByWorkspaceId[wsId] ?? []), session],
+                  },
               activeSessionIdByWorkspaceId: {
                 ...s.activeSessionIdByWorkspaceId,
                 [wsId]: sessionId,
@@ -2243,10 +2723,10 @@ export const useIDE = create<State>()(
         const workspace = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
         if (!workspace || workspace.source.kind !== "remote-agent") {
           toast.error("Active workspace is not a remote agent");
-          return;
+          return null;
         }
 
-        const cli = (options.cli as any) ?? state.activeAgent;
+        const cli = options.cli && isTerminalKind(options.cli) ? options.cli : state.activeAgent;
         const model = options.model ?? state.selectedModelByCli[cli];
         const effort = options.effort;
 
@@ -2284,11 +2764,49 @@ export const useIDE = create<State>()(
           console.info(
             `[store.createTaskFromPrompt] taskCreate ok id=${taskId} sessionId=${sessionId}`,
           );
+          const title = prompt.split("\n")[0].slice(0, 60) || "Untitled task";
+          const cliKind = cli as TerminalKind;
+
+          set((s) => {
+            const current = s.sessionsByWorkspaceId[workspace.id] ?? [];
+            const taskSession: WorkspaceTerminal = {
+              id: sessionId,
+              kind: cliKind,
+              title,
+              status: "busy",
+              workspaceId: workspace.id,
+              lastCommand: TERMINAL_COMMAND_BY_KIND[cliKind],
+              taskId,
+              taskRootId: taskId,
+              cliSessions: [sessionId],
+            };
+            return {
+              sessionsByWorkspaceId: {
+                ...s.sessionsByWorkspaceId,
+                [workspace.id]: current.some((session) => session.id === sessionId)
+                  ? current
+                  : [...current, taskSession],
+              },
+              activeSessionIdByWorkspaceId: {
+                ...s.activeSessionIdByWorkspaceId,
+                [workspace.id]: sessionId,
+              },
+              sessionModeBySessionId: {
+                ...s.sessionModeBySessionId,
+                [sessionId]: "chat",
+              },
+              activeAgent: cliKind,
+              composerAgentByWorkspaceId: {
+                ...s.composerAgentByWorkspaceId,
+                [workspace.id]: cliKind,
+              },
+              activeTaskId: taskId,
+            };
+          });
 
           await provider.taskStart(taskId);
           console.info(`[store.createTaskFromPrompt] taskStart ok id=${taskId}`);
 
-          const cliKind = cli as TerminalKind;
           const synthTask: import("@/lib/fs/remote-agent").Task = {
             id: taskId,
             sessionId,
@@ -2304,6 +2822,7 @@ export const useIDE = create<State>()(
             baseRef: null,
             exitCode: null,
             errorMessage: null,
+            agentSessionId: null,
             parentSessionId: null,
             createdAt: Date.now(),
             startedAt: Date.now(),
@@ -2316,29 +2835,105 @@ export const useIDE = create<State>()(
             const tasksWithSynth = allTasks.some((t) => t.id === synthTask.id)
               ? allTasks
               : [...allTasks, synthTask];
-            const existing = s.sessionsByWorkspaceId[workspace.id] ?? [];
-            const nextSessions = buildSessionTabFor(synthTask, tasksWithSynth, existing);
             return {
               tasksByWorkspaceId: {
                 ...s.tasksByWorkspaceId,
                 [workspace.id]: tasksWithSynth,
               },
-              sessionsByWorkspaceId: {
-                ...s.sessionsByWorkspaceId,
-                [workspace.id]: nextSessions,
+              activeAgent: cliKind,
+              composerAgentByWorkspaceId: {
+                ...s.composerAgentByWorkspaceId,
+                [workspace.id]: cliKind,
               },
+              activeTaskId: taskId,
               activeSessionIdByWorkspaceId: {
                 ...s.activeSessionIdByWorkspaceId,
                 [workspace.id]: sessionId,
               },
-              activeAgent: cliKind,
-              activeTaskId: taskId,
             };
           });
-          toast.success("Task created and started");
+          return synthTask;
         } catch (err) {
           console.error("[store.createTaskFromPrompt] failed:", err);
           toast.error(err instanceof Error ? err.message : "Failed to create task");
+          return null;
+        }
+      },
+
+      continueTaskFromPrompt: async (taskId, prompt, options = {}) => {
+        const state = get();
+        let task: import("@/lib/fs/remote-agent").Task | undefined;
+        let workspace: Workspace | undefined;
+        for (const [wsId, tasks] of Object.entries(state.tasksByWorkspaceId)) {
+          const found = tasks.find((t) => t.id === taskId);
+          if (found) {
+            task = found;
+            workspace = state.workspaces.find((w) => w.id === wsId);
+            break;
+          }
+        }
+        if (!task || !workspace || workspace.source.kind !== "remote-agent") {
+          toast.error("Task workspace not found");
+          return;
+        }
+        if (task.status === "running" || task.status === "queued" || task.status === "awaiting") {
+          toast.error("Wait for the current turn to finish");
+          return;
+        }
+
+        try {
+          let provider = state.agentProvidersByWorkspaceId[workspace.id];
+          if (!provider) {
+            provider = new RemoteAgentProvider(
+              workspace.source.label,
+              workspace.source.url,
+              workspace.source.token,
+            );
+            await provider.connect();
+            set((s) => ({
+              agentProvidersByWorkspaceId: {
+                ...s.agentProvidersByWorkspaceId,
+                [workspace.id]: provider!,
+              },
+            }));
+          }
+
+          await provider.taskContinue({
+            taskId,
+            prompt,
+            model: options.model,
+            effort: options.effort,
+          });
+
+          const cliKind = task.cli as TerminalKind;
+          set((s) => {
+            return {
+              activeAgent: cliKind,
+              activeTaskId: taskId,
+              composerAgentByWorkspaceId: {
+                ...s.composerAgentByWorkspaceId,
+                [workspace.id]: cliKind,
+              },
+              tasksByWorkspaceId: {
+                ...s.tasksByWorkspaceId,
+                [workspace.id]: (s.tasksByWorkspaceId[workspace.id] ?? []).map((t) =>
+                  t.id === taskId
+                    ? {
+                        ...t,
+                        status: "running",
+                        startedAt: Date.now(),
+                        endedAt: null,
+                        exitCode: null,
+                        errorMessage: null,
+                      }
+                    : t,
+                ),
+              },
+            };
+          });
+        } catch (err) {
+          console.error("[store.continueTaskFromPrompt] failed:", err);
+          toast.error(err instanceof Error ? err.message : "Failed to continue task");
         }
       },
 
@@ -2348,15 +2943,14 @@ export const useIDE = create<State>()(
           const idx = tasks.findIndex((t) => t.id === task.id);
           const nextTasks = idx >= 0 ? [...tasks] : [...tasks, task];
           if (idx >= 0) nextTasks[idx] = task;
-
-          const existingSessions = s.sessionsByWorkspaceId[task.workspaceId] ?? [];
-          const nextSessions = buildSessionTabFor(task, nextTasks, existingSessions);
-
           return {
             tasksByWorkspaceId: { ...s.tasksByWorkspaceId, [task.workspaceId]: nextTasks },
             sessionsByWorkspaceId: {
               ...s.sessionsByWorkspaceId,
-              [task.workspaceId]: nextSessions,
+              [task.workspaceId]: reconcileTaskSessions(
+                nextTasks,
+                s.sessionsByWorkspaceId[task.workspaceId] ?? [],
+              ),
             },
           };
         });
@@ -2372,7 +2966,7 @@ export const useIDE = create<State>()(
           for (const [wsId, tasks] of Object.entries(s.tasksByWorkspaceId)) {
             const match = tasks.find((t) => t.id === taskId);
             if (match) {
-              sessionIdToDrop = match.sessionId;
+              sessionIdToDrop = taskSessionId(match);
               workspaceIdOfDrop = wsId;
             }
             next[wsId] = tasks.filter((t) => t.id !== taskId);
@@ -2393,7 +2987,12 @@ export const useIDE = create<State>()(
             const list = s.sessionsByWorkspaceId[workspaceIdOfDrop] ?? [];
             nextSessions = {
               ...s.sessionsByWorkspaceId,
-              [workspaceIdOfDrop]: list.filter((t) => t.id !== sessionIdToDrop),
+              [workspaceIdOfDrop]: list.filter(
+                (session) =>
+                  session.id !== sessionIdToDrop &&
+                  session.taskRootId !== taskId &&
+                  session.taskId !== taskId,
+              ),
             };
             if (s.activeSessionIdByWorkspaceId[workspaceIdOfDrop] === sessionIdToDrop) {
               const remaining = nextSessions[workspaceIdOfDrop];
@@ -2403,6 +3002,16 @@ export const useIDE = create<State>()(
               else delete nextActive[workspaceIdOfDrop];
             }
           }
+          const nextPinned: Record<string, string[]> = {};
+          for (const [wsId, pins] of Object.entries(s.pinnedSessionIdsByWorkspaceId)) {
+            nextPinned[wsId] = sessionIdToDrop ? pins.filter((id) => id !== sessionIdToDrop) : pins;
+          }
+          const nextMessages = { ...s.messagesBySessionId };
+          const nextModes = { ...s.sessionModeBySessionId };
+          if (sessionIdToDrop) {
+            delete nextMessages[sessionIdToDrop];
+            delete nextModes[sessionIdToDrop];
+          }
 
           return {
             tasksByWorkspaceId: next,
@@ -2411,6 +3020,9 @@ export const useIDE = create<State>()(
             dismissedTaskIds: dismissed,
             sessionsByWorkspaceId: nextSessions,
             activeSessionIdByWorkspaceId: nextActive,
+            pinnedSessionIdsByWorkspaceId: nextPinned,
+            messagesBySessionId: nextMessages,
+            sessionModeBySessionId: nextModes,
           };
         });
       },
@@ -2766,6 +3378,7 @@ export const useIDE = create<State>()(
           activeBranchIdByWorkspaceId: state.activeBranchIdByWorkspaceId,
           activeSessionIdByWorkspaceId: state.activeSessionIdByWorkspaceId,
           pinnedSessionIdsByWorkspaceId: state.pinnedSessionIdsByWorkspaceId,
+          composerAgentByWorkspaceId: state.composerAgentByWorkspaceId,
           selectedModelByCli: state.selectedModelByCli,
           approvalModeByCli: state.approvalModeByCli,
           settingsSidebarCollapsed: state.settingsSidebarCollapsed,
@@ -2796,13 +3409,15 @@ export const useIDE = create<State>()(
 
 if (import.meta.env.DEV && typeof window !== "undefined") {
   import("@/lib/chat/codex-conversation-reducer").then(({ reduceCodexEvents }) => {
-    (window as any).__test = {
-      ...(window as any).__test,
+    const testWindow = window as unknown as { __test?: Record<string, unknown> };
+    testWindow.__test = {
+      ...testWindow.__test,
       reduceCodex: reduceCodexEvents,
     };
   });
 
-  (window as any).__test = {
+  const testWindow = window as unknown as { __test?: Record<string, unknown> };
+  testWindow.__test = {
     seedTask: (task: import("@/lib/fs/remote-agent").Task) => {
       useIDE.getState().upsertTask(task);
     },
@@ -2820,7 +3435,7 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
         return {
           taskEventsByTaskId: {
             ...s.taskEventsByTaskId,
-            [taskId]: [...cur, entry as any],
+            [taskId]: [...cur, entry],
           },
         };
       });

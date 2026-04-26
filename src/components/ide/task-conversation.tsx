@@ -6,7 +6,7 @@ import { reduceCodexEvents } from "@/lib/chat/codex-conversation-reducer";
 import { reduceClaudeEvents } from "@/lib/chat/claude-conversation-reducer";
 import { ConversationView } from "@/components/ide/conversation-view";
 import { useIDE, type Workspace } from "@/store/ide";
-import { RemoteAgentProvider, type Task, type TaskLogEntry } from "@/lib/fs/remote-agent";
+import { type Task, type TaskLogEntry } from "@/lib/fs/remote-agent";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -82,7 +82,7 @@ export function TaskConversation({ task, workspace }: { task: Task; workspace: W
   const reducer = task.cli === "claude" ? reduceClaudeEvents : reduceCodexEvents;
   const conversationState = useMemo(() => {
     return reducer(events, task.prompt);
-  }, [events, task.prompt, task.cli, reducer]);
+  }, [events, task.prompt, reducer]);
 
   const isRunning = task.status === "running" || task.status === "queued";
 
@@ -114,24 +114,10 @@ export function TaskConversation({ task, workspace }: { task: Task; workspace: W
       }
 
       try {
-        const provider = new RemoteAgentProvider(
-          workspace.source.label,
-          workspace.source.url,
-          workspace.source.token,
-        );
-        await provider.connect();
-        const baseRef = task.branchName ?? task.baseRef ?? "main";
-        const { id: childId } = await provider.taskCreate({
-          workspaceId: workspace.id,
-          title: `Follow-up: ${text.split("\n")[0].slice(0, 50) || task.title}`,
-          prompt: text,
-          cli: task.cli,
+        await useIDE.getState().continueTaskFromPrompt(task.id, text, {
           model: task.model ?? undefined,
           effort: task.effort ?? undefined,
-          baseRef,
-          parentSessionId: task.sessionId ?? undefined,
         });
-        await provider.taskStart(childId);
         setComposerText("");
         if (textareaRef.current) {
           textareaRef.current.style.height = "60px";

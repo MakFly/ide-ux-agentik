@@ -1,5 +1,4 @@
-import { AssistantRuntimeProvider } from "@assistant-ui/core/react";
-import { useLocalRuntime, type ChatModelAdapter } from "@assistant-ui/react";
+import { type ChatModelAdapter } from "@assistant-ui/react";
 import { useEffect, useRef } from "react";
 import { z } from "zod";
 import type { TabId } from "@/store/ide";
@@ -13,7 +12,6 @@ import { TerminalPanel } from "@/components/ide/terminal-panel";
 import { EditorPanel } from "@/components/ide/editor-panel";
 import { useIDE, useCurrentActiveTab, useCurrentOpenFiles } from "@/store/ide";
 import { MOCK_ENABLED } from "@/lib/env";
-import { taskLauncherAdapter } from "@/lib/chat/task-launcher-adapter";
 import { TaskDetailDialog } from "@/components/ide/task-detail-dialog";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -132,7 +130,6 @@ interface IdeShellProps {
 }
 
 export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
-  const runtime = useLocalRuntime(taskLauncherAdapter);
   const hydratedFromUrlRef = useRef(false);
 
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
@@ -216,26 +213,24 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
     : null;
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <TooltipProvider delayDuration={200}>
-        <div className="flex h-svh w-screen flex-col overflow-hidden bg-background text-foreground">
-          <TopBar />
-          <div className="flex min-h-0 flex-1 overflow-hidden bg-sidebar p-2">
-            <ResizableLayout />
-          </div>
-          {showTerminal && <TerminalPanel />}
-          <StatusBar />
-          {currentTask && taskWorkspace && (
-            <TaskDetailDialog
-              task={currentTask}
-              workspace={taskWorkspace}
-              open={!!taskDetailDialogTaskId}
-              onOpenChange={(open) => setTaskDetailDialogOpen(open ? taskDetailDialogTaskId : null)}
-            />
-          )}
+    <TooltipProvider delayDuration={200}>
+      <div className="flex h-svh w-screen flex-col overflow-hidden bg-background text-foreground">
+        <TopBar />
+        <div className="flex min-h-0 flex-1 overflow-hidden bg-sidebar p-2">
+          <ResizableLayout />
         </div>
-      </TooltipProvider>
-    </AssistantRuntimeProvider>
+        {showTerminal && <TerminalPanel />}
+        <StatusBar />
+        {currentTask && taskWorkspace && (
+          <TaskDetailDialog
+            task={currentTask}
+            workspace={taskWorkspace}
+            open={!!taskDetailDialogTaskId}
+            onOpenChange={(open) => setTaskDetailDialogOpen(open ? taskDetailDialogTaskId : null)}
+          />
+        )}
+      </div>
+    </TooltipProvider>
   );
 }
 

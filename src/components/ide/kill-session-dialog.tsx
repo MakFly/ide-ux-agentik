@@ -33,9 +33,16 @@ export function KillSessionDialog({
   trigger: ReactNode;
 }) {
   const closeAgentSession = useIDE((s) => s.closeAgentSession);
+  const closeSessionTab = useIDE((s) => s.closeSessionTab);
   const label = CLI_LABELS[session.kind];
+  const isTaskSession = !!(session.taskRootId || session.taskId);
 
   async function kill() {
+    if (isTaskSession) {
+      closeSessionTab(session.id);
+      return;
+    }
+
     const { workspaces } = useIDE.getState();
     const ws = workspaces.find((w) => w.id === session.workspaceId);
     if (ws && ws.source.kind === "remote-agent") {
@@ -57,16 +64,29 @@ export function KillSessionDialog({
       <AlertDialogTrigger asChild>{trigger}</AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Kill {label} session?</AlertDialogTitle>
-          <AlertDialogDescription>
-            Closes the running process, removes the tab, and deletes the transcript from the
-            database. Cascades to all messages and file snapshots for this session. This cannot be
-            undone.
-            <br />
-            <span className="mt-2 block font-mono text-[11.5px] text-muted-foreground">
-              {session.title || label} · {session.id}
-            </span>
-          </AlertDialogDescription>
+          <AlertDialogTitle>
+            {isTaskSession ? "Close task tab?" : `Kill ${label} session?`}
+          </AlertDialogTitle>
+          {isTaskSession ? (
+            <AlertDialogDescription>
+              Closes this tab only. The task stays in the sidebar and can be reopened from the task
+              list.
+              <br />
+              <span className="mt-2 block font-mono text-[11.5px] text-muted-foreground">
+                {session.title || label} · {session.id}
+              </span>
+            </AlertDialogDescription>
+          ) : (
+            <AlertDialogDescription>
+              Closes the running process, removes the tab, and deletes the transcript from the
+              database. Cascades to all messages and file snapshots for this session. This cannot be
+              undone.
+              <br />
+              <span className="mt-2 block font-mono text-[11.5px] text-muted-foreground">
+                {session.title || label} · {session.id}
+              </span>
+            </AlertDialogDescription>
+          )}
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
@@ -74,7 +94,7 @@ export function KillSessionDialog({
             className={cn(buttonVariants({ variant: "destructive" }))}
             onClick={() => void kill()}
           >
-            Kill session
+            {isTaskSession ? "Close tab" : "Kill session"}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
