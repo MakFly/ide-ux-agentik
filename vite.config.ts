@@ -16,9 +16,17 @@ logger.info = (msg, opts) => {
 };
 
 // `bun run dev` (scripts/dev.ts) injects these so the UI auto-registers a
-// `local-dev` remote-agent workspace on first load. Absent in prod builds.
-const devAgentUrl = process.env.VITE_DEV_AGENT_URL ?? "";
-const devAgentToken = process.env.VITE_DEV_AGENT_TOKEN ?? "";
+// `local-dev` remote-agent workspace on first load. Must NEVER reach prod
+// builds: the dev token would otherwise end up in dist/ as plain text.
+const isDev = process.env.NODE_ENV !== "production";
+const devAgentUrl = isDev ? (process.env.VITE_DEV_AGENT_URL ?? "") : "";
+const devAgentToken = isDev ? (process.env.VITE_DEV_AGENT_TOKEN ?? "") : "";
+
+if (!isDev && (process.env.VITE_DEV_AGENT_URL || process.env.VITE_DEV_AGENT_TOKEN)) {
+  throw new Error(
+    "VITE_DEV_AGENT_URL/VITE_DEV_AGENT_TOKEN are dev-only — refusing to bake into a production build.",
+  );
+}
 
 export default defineConfig({
   vite: {

@@ -3,7 +3,7 @@
 # ─── Config ──────────────────────────────────────────────────────────────
 AGENT_ROOT  ?= $(CURDIR)
 AGENT_PORT  ?= 7421
-AGENT_HOST  ?= 0.0.0.0
+AGENT_HOST  ?= 127.0.0.1
 AGENT_TOKEN ?=
 
 # Agent SQLite database (sessions, tasks, messages, file_snapshots, etc.)

@@ -359,7 +359,9 @@ function parseArgs(): ServerOpts {
   const root = path.resolve(args.get("root") ?? process.env.AGENT_ROOT ?? process.cwd());
   const port = Number(args.get("port") ?? process.env.AGENT_PORT ?? 7421);
   const token = args.get("token") ?? process.env.AGENT_TOKEN ?? "";
-  const host = args.get("host") ?? process.env.AGENT_HOST ?? "0.0.0.0";
+  // Default to loopback. Binding 0.0.0.0 exposes the agent to the local
+  // network and must be opt-in (Docker/remote dev), not the silent default.
+  const host = args.get("host") ?? process.env.AGENT_HOST ?? "127.0.0.1";
   if (!token) {
     console.error("[agent] AGENT_TOKEN required (pass --token XYZ or env AGENT_TOKEN=XYZ)");
     process.exit(1);
@@ -483,19 +485,23 @@ type Handler = (params: Record<string, unknown>, ctx: Ctx) => Promise<unknown>;
 async function validateGitRepo(workspacePath: unknown): Promise<string> {
   const wp = String(workspacePath ?? "").trim();
   if (!wp) throw new Error("workspacePath is required");
+  // Constrain to the agent root: an authenticated client must not be able
+  // to point git operations at arbitrary repos on the host (e.g. ~/.ssh
+  // or another user's project).
+  const safe = safeResolve(wp);
   try {
-    const stat = await fs.stat(wp);
-    if (!stat.isDirectory()) throw new Error(`not a directory: ${wp}`);
-  } catch (e) {
-    throw new Error(`workspacePath does not exist or is not accessible: ${wp}`);
+    const stat = await fs.stat(safe);
+    if (!stat.isDirectory()) throw new Error(`not a directory: ${safe}`);
+  } catch {
+    throw new Error(`workspacePath does not exist or is not accessible: ${safe}`);
   }
   try {
-    const gitStat = await fs.stat(path.join(wp, ".git"));
+    const gitStat = await fs.stat(path.join(safe, ".git"));
     if (!gitStat.isDirectory() && !gitStat.isFile()) throw new Error();
   } catch {
-    throw new Error(`not a git repository (no .git found): ${wp}`);
+    throw new Error(`not a git repository (no .git found): ${safe}`);
   }
-  return wp;
+  return safe;
 }
 
 function gitExec(args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
@@ -751,7 +757,17 @@ const methods: Record<string, Handler> = {
     const cwd = await validateGitRepo(workspacePath);
     if (!Array.isArray(paths) || paths.length === 0)
       throw new Error("git.stage: paths must be a non-empty array");
-    const safePaths = (paths as unknown[]).map((p) => String(p));
+    // Reject "../"-style escapes and any path that resolves outside the
+    // git repo (which is itself already constrained to the agent root by
+    // validateGitRepo).
+    const safePaths = (paths as unknown[]).map((p) => {
+      const rel = String(p);
+      const abs = path.resolve(cwd, rel);
+      if (abs !== cwd && !abs.startsWith(cwd + path.sep)) {
+        throw new Error(`git.stage: path escapes repo: ${rel}`);
+      }
+      return path.relative(cwd, abs) || ".";
+    });
     await gitExec(["add", "--", ...safePaths], cwd);
     return { ok: true };
   },
@@ -2224,7 +2240,16 @@ const methods: Record<string, Handler> = {
           transport,
           ...(entry.command !== undefined ? { command: entry.command } : {}),
           ...(Array.isArray(entry.args) ? { args: entry.args as string[] } : {}),
-          ...(entry.env && typeof entry.env === "object" ? { env: entry.env } : {}),
+          // Mask values: env entries often hold API keys (OPENAI_API_KEY,
+          // ANTHROPIC_API_KEY, …). The client only needs to know which keys
+          // are configured, not their values.
+          ...(entry.env && typeof entry.env === "object"
+            ? {
+                env: Object.fromEntries(
+                  Object.keys(entry.env as Record<string, string>).map((k) => [k, "***"]),
+                ),
+              }
+            : {}),
           ...(entry.url !== undefined ? { url: entry.url } : {}),
           status: "configured",
           source: filePath,

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +15,7 @@ import { expect, test, type Page } from "@playwright/test";
  */
 
 const AGENT_PORT = 7592;
-const AGENT_TOKEN = "e2e-slash-clear-token";
+const AGENT_TOKEN = process.env.E2E_AGENT_TOKEN ?? randomUUID();
 
 let agent: ChildProcessWithoutNullStreams | null = null;
 let tmpRoot: string | null = null;

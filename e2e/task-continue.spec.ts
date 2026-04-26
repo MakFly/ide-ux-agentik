@@ -1,4 +1,5 @@
 import { execSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +15,7 @@ type JsonRpcMessage = {
 };
 
 const AGENT_PORT = 7605;
-const AGENT_TOKEN = "e2e-task-continue-token";
+const AGENT_TOKEN = process.env.E2E_AGENT_TOKEN ?? randomUUID();
 const AGENT_BASE_URL = `ws://127.0.0.1:${AGENT_PORT}`;
 const WARNING_MARKER = "codex_core::session: failed to record rollout items: thread";
 
