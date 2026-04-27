@@ -3,6 +3,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Cpu,
+  Building2,
   KeyRound,
   Layout as LayoutIcon,
   Palette,
@@ -19,6 +20,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 export type SectionId =
   | "agent"
+  | "organization"
   | "workspace"
   | "appearance"
   | "layout"
@@ -34,6 +36,7 @@ type Item = {
 
 const ITEMS: Item[] = [
   { id: "agent", label: "Agent", icon: KeyRound },
+  { id: "organization", label: "Organization", icon: Building2 },
   { id: "workspace", label: "Workspace", icon: FolderKanban },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "layout", label: "Layout", icon: LayoutIcon },
@@ -50,13 +53,17 @@ export function SettingsSidebar({
   collapsed,
   onToggleCollapsed,
   onNavigate,
+  showOrganization = true,
 }: {
   section: SectionId;
   provider?: ProviderId;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onNavigate: (section: SectionId, provider?: ProviderId) => void;
+  showOrganization?: boolean;
 }) {
+  const items = showOrganization ? ITEMS : ITEMS.filter((item) => item.id !== "organization");
+
   return (
     <TooltipProvider delayDuration={100}>
       <aside
@@ -69,7 +76,7 @@ export function SettingsSidebar({
       >
         <nav className="flex-1 overflow-y-auto py-4">
           <ul className="flex flex-col gap-0.5 px-2">
-            {ITEMS.map((item) => {
+            {items.map((item) => {
               const active = item.id === section;
               const Icon = item.icon;
               const row = (

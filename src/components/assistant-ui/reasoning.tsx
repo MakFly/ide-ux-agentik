@@ -10,11 +10,7 @@ import {
   type ReasoningGroupComponent,
 } from "@assistant-ui/react";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 
 const ANIMATION_DURATION = 200;
@@ -78,10 +74,7 @@ function ReasoningRoot({
       data-variant={variant}
       open={isOpen}
       onOpenChange={handleOpenChange}
-      className={cn(
-        "group/reasoning-root",
-        reasoningVariants({ variant, className }),
-      )}
+      className={cn("group/reasoning-root", reasoningVariants({ variant, className }))}
       style={
         {
           "--animation-duration": `${ANIMATION_DURATION}ms`,
@@ -118,15 +111,11 @@ function ReasoningFade({ className, ...props }: React.ComponentProps<"div">) {
 
 function ReasoningTrigger({
   active,
-  duration,
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
   active?: boolean;
-  duration?: number;
 }) {
-  const durationText = duration ? ` (${duration}s)` : "";
-
   return (
     <CollapsibleTrigger
       data-slot="reasoning-trigger"
@@ -144,14 +133,14 @@ function ReasoningTrigger({
         data-slot="reasoning-trigger-label"
         className="aui-reasoning-trigger-label-wrapper relative inline-block leading-none"
       >
-        <span>Reasoning{durationText}</span>
+        <span>Reasoning</span>
         {active ? (
           <span
             aria-hidden
             data-slot="reasoning-trigger-shimmer"
             className="aui-reasoning-trigger-shimmer shimmer pointer-events-none absolute inset-0 motion-reduce:animate-none"
           >
-            Reasoning{durationText}
+            Reasoning
           </span>
         ) : null}
       </span>
@@ -219,11 +208,7 @@ function ReasoningText({ className, ...props }: React.ComponentProps<"div">) {
 
 const ReasoningImpl: ReasoningMessagePartComponent = () => <MarkdownText />;
 
-const ReasoningGroupImpl: ReasoningGroupComponent = ({
-  children,
-  startIndex,
-  endIndex,
-}) => {
+const ReasoningGroupImpl: ReasoningGroupComponent = ({ children, startIndex, endIndex }) => {
   const isReasoningStreaming = useAuiState((s) => {
     if (s.message.status?.type !== "running") return false;
     const lastIndex = s.message.parts.length - 1;
@@ -234,7 +219,7 @@ const ReasoningGroupImpl: ReasoningGroupComponent = ({
   });
 
   return (
-    <ReasoningRoot defaultOpen={isReasoningStreaming}>
+    <ReasoningRoot defaultOpen>
       <ReasoningTrigger active={isReasoningStreaming} />
       <ReasoningContent aria-busy={isReasoningStreaming}>
         <ReasoningText>{children}</ReasoningText>
@@ -243,9 +228,7 @@ const ReasoningGroupImpl: ReasoningGroupComponent = ({
   );
 };
 
-const Reasoning = memo(
-  ReasoningImpl,
-) as unknown as ReasoningMessagePartComponent & {
+const Reasoning = memo(ReasoningImpl) as unknown as ReasoningMessagePartComponent & {
   Root: typeof ReasoningRoot;
   Trigger: typeof ReasoningTrigger;
   Content: typeof ReasoningContent;

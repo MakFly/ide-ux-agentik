@@ -55,6 +55,14 @@ export type Task = {
   createdAt: number;
   startedAt: number | null;
   endedAt: number | null;
+  parentTaskId: string | null;
+};
+
+export type AgentTaskAttachment = {
+  name: string;
+  contentType: string;
+  kind: "image" | "document" | "file" | string;
+  data: string;
 };
 
 /**
@@ -77,6 +85,7 @@ export type Task = {
  *
  * Notifications (server → client):
  *   - { method: "watch", params: { subId, event } }
+ *   - { method: "task.queued", params: { taskId: string, reason?: string } }
  */
 
 type JsonRpcId = string | number;
@@ -127,6 +136,7 @@ function taskFromDb(row: Record<string, unknown>): Task {
     createdAt: row.created_at as number,
     startedAt: (row.started_at as number) || null,
     endedAt: (row.ended_at as number) || null,
+    parentTaskId: (row.parent_task_id as string) || null,
   };
 }
 
@@ -148,6 +158,7 @@ export class RemoteAgentProvider implements FsProvider {
   >();
   private cloneEndListeners = new Map<string, Set<(r: { code: number; dest: string }) => void>>();
   private taskCreatedListeners = new Set<(t: Task) => void>();
+  private taskQueuedListeners = new Set<(e: { taskId: string; reason?: string }) => void>();
   private taskStartedListeners = new Set<
     (e: { taskId: string; sessionId: string; worktreePath: string; branchName: string }) => void
   >();
@@ -201,6 +212,7 @@ export class RemoteAgentProvider implements FsProvider {
           this.cloneProgressListeners.clear();
           this.cloneEndListeners.clear();
           this.taskCreatedListeners.clear();
+          this.taskQueuedListeners.clear();
           this.taskStartedListeners.clear();
           this.taskEventListeners.clear();
           this.taskEndedListeners.clear();
@@ -234,14 +246,33 @@ export class RemoteAgentProvider implements FsProvider {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.ws?.close();
+    // Send code 1000 (normal closure) explicitly so the `close` listener
+    // skips the auto-reconnect branch. Without an explicit code, browsers
+    // emit code 1005 ("no status received"), which our reconnect logic
+    // treats as abnormal and triggers a useless reconnect cycle (toast spam).
+    this.ws?.close(1000, "client disconnect");
     this.ws = null;
     this.watchers.clear();
+    this.reconnectAttempts = 0;
+  }
+
+  private _clearPending(reason: string): void {
+    for (const p of this.pending.values()) {
+      try {
+        p.reject(new FsError(reason, "io"));
+      } catch {
+        /* ignore */
+      }
+    }
+    this.pending.clear();
   }
 
   private async _reconnect(): Promise<void> {
     const delays = [1000, 2000, 4000, 8000, 16000];
     const maxAttempts = 5;
+
+    // Reject all in-flight RPCs immediately so callers don't hang during reconnect.
+    this._clearPending("Agent connection lost — reconnecting");
 
     // Skip the toast on the first attempt: short flaps (HMR, brief network
     // blip, dev-agent restart) usually reconnect within ~1s and the toast
@@ -272,6 +303,7 @@ export class RemoteAgentProvider implements FsProvider {
       this.cloneProgressListeners.clear();
       this.cloneEndListeners.clear();
       this.taskCreatedListeners.clear();
+      this.taskQueuedListeners.clear();
       this.taskStartedListeners.clear();
       this.taskEventListeners.clear();
       this.taskEndedListeners.clear();
@@ -370,6 +402,20 @@ export class RemoteAgentProvider implements FsProvider {
       }
       return;
     }
+    if ("method" in msg && msg.method === "task.queued") {
+      const { taskId, reason } = msg.params as {
+        taskId: string;
+        reason?: string;
+      };
+      for (const cb of this.taskQueuedListeners) {
+        try {
+          cb({ taskId, reason });
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
     if ("method" in msg && msg.method === "task.started") {
       const { taskId, sessionId, worktreePath, branchName } = msg.params as {
         taskId: string;
@@ -460,6 +506,12 @@ export class RemoteAgentProvider implements FsProvider {
 
   async list(path: string): Promise<FsEntry[]> {
     return this.call<FsEntry[]>("ls", { path });
+  }
+  async hostHome(): Promise<{ path: string }> {
+    return this.call<{ path: string }>("host.home", {});
+  }
+  async hostPickDirectory(): Promise<{ path: string; name: string } | null> {
+    return this.call<{ path: string; name: string } | null>("host.pickDirectory", {});
   }
   async stat(path: string): Promise<FsEntry> {
     return this.call<FsEntry>("stat", { path });
@@ -601,6 +653,8 @@ export class RemoteAgentProvider implements FsProvider {
     effort?: string;
     baseRef?: string;
     parentSessionId?: string;
+    parentTaskId?: string;
+    attachments?: AgentTaskAttachment[];
   }): Promise<{ id: string; sessionId: string }> {
     return this.call("task.create", params);
   }
@@ -637,8 +691,8 @@ export class RemoteAgentProvider implements FsProvider {
     });
   }
 
-  async taskStart(id: string): Promise<void> {
-    await this.call<void>("task.start", { id });
+  async taskStart(id: string): Promise<{ status?: Task["status"] } | null> {
+    return this.call<{ status?: Task["status"] } | null>("task.start", { id });
   }
 
   async taskContinue(params: {
@@ -646,8 +700,9 @@ export class RemoteAgentProvider implements FsProvider {
     prompt: string;
     model?: string;
     effort?: string;
-  }): Promise<void> {
-    await this.call<void>("task.continue", params);
+    attachments?: AgentTaskAttachment[];
+  }): Promise<{ status?: Task["status"] } | null> {
+    return this.call<{ status?: Task["status"] } | null>("task.continue", params);
   }
 
   async taskCancel(id: string): Promise<void> {
@@ -695,6 +750,11 @@ export class RemoteAgentProvider implements FsProvider {
   onTaskCreated(cb: (task: Task) => void): () => void {
     this.taskCreatedListeners.add(cb);
     return () => this.taskCreatedListeners.delete(cb);
+  }
+
+  onTaskQueued(cb: (e: { taskId: string; reason?: string }) => void): () => void {
+    this.taskQueuedListeners.add(cb);
+    return () => this.taskQueuedListeners.delete(cb);
   }
 
   onTaskStarted(

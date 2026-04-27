@@ -4,17 +4,14 @@ import {
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
-import { TypingDots } from "@/components/assistant-ui/typing-dots";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Reasoning, ReasoningGroup } from "@/components/assistant-ui/reasoning";
 import { ThinkingIndicator } from "@/components/assistant-ui/thinking-indicator";
-import { ThoughtSummaryForCurrentMessage } from "@/components/assistant-ui/thought-summary";
 import { useRunTracker, useRegisterThreadStateRef } from "@/hooks/use-message-summary";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
-  ActionBarMorePrimitive,
   ActionBarPrimitive,
   AuiIf,
   BranchPickerPrimitive,
@@ -28,25 +25,21 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import {
-  ArrowDownIcon,
   ArrowUpIcon,
-  CheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
-  CopyIcon,
-  DownloadIcon,
-  MoreHorizontalIcon,
+  PencilIcon,
   SquareIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FC } from "react";
 import { toast } from "sonner";
-import { useIDE, type TerminalKind } from "@/store/ide";
+import { useIDE, type LargeComposerDraft, type TerminalKind } from "@/store/ide";
 import { ModelPill } from "@/components/ide/model-pill";
 import { ReasoningPill } from "@/components/ide/reasoning-pill";
 import { ContextRing } from "@/components/assistant-ui/context-ring";
 import { StatusButton } from "@/components/assistant-ui/status-button";
-import { getContextWindow } from "@/lib/chat/context-windows";
-import { SkillsTrigger } from "@/components/ide/skills-trigger";
+import { getDisplayContextWindow } from "@/lib/chat/context-windows";
+import { DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL } from "@/lib/chat/models";
 import { PlanToggle } from "@/components/ide/plan-toggle";
 import { ComposerModeTabs } from "@/components/ide/composer-mode-tabs";
 import { FileMentionPopover } from "@/components/ide/composer-file-mention";
@@ -68,14 +61,188 @@ const CLI_OPTIONS: Array<{ id: TerminalKind; label: string; detail: string; icon
   { id: "opencode", label: "OpenCode", detail: "OpenCode run", icon: "/agents/opencode.ico" },
 ];
 
+const MAX_INLINE_COMPOSER_CHARS = 12_000;
+
 type PartLike = { type?: string; text?: string };
-type MessageLike = { content?: ReadonlyArray<PartLike> };
+type MessageLike = {
+  role?: string;
+  content?: ReadonlyArray<PartLike>;
+  metadata?: { custom?: Record<string, unknown> };
+};
+type SnapshotKind = "cumulative" | "perTurn";
+type CliContextSnapshot = {
+  kind: SnapshotKind;
+  /** Stable id used to dedupe per-turn snapshots (Claude message.id). */
+  turnKey?: string;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  contextWindow?: number;
+};
+
+function buildLargeDraftPreview(text: string): string {
+  const omitted = Math.max(0, text.length - MAX_INLINE_COMPOSER_CHARS);
+  const head = text.slice(0, MAX_INLINE_COMPOSER_CHARS);
+  const notice =
+    omitted > 0
+      ? `[Large draft collapsed for performance: ${omitted.toLocaleString("en-US")} hidden chars]\n\n`
+      : "";
+  return `${notice}${head}`;
+}
+
+function largeDraftHiddenChars(draft: LargeComposerDraft): number {
+  return Math.max(0, draft.fullText.length - draft.previewText.length);
+}
+
 function messageTextLength(m: MessageLike): number {
+  const agentPrompt = m.metadata?.custom?.agentPrompt;
+  if (m.role === "user" && typeof agentPrompt === "string") return agentPrompt.length;
+
   if (!m.content) return 0;
   let n = 0;
   for (const p of m.content)
     if (p?.type === "text" && typeof p.text === "string") n += p.text.length;
   return n;
+}
+
+function num(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function inputTokensFromUsage(u: Record<string, unknown>): number | undefined {
+  const total =
+    (num(u.input_tokens) ?? num(u.inputTokens) ?? 0) +
+    (num(u.cache_creation_input_tokens) ?? num(u.cacheCreationInputTokens) ?? 0) +
+    (num(u.cache_read_input_tokens) ?? num(u.cacheReadInputTokens) ?? 0);
+  return total || undefined;
+}
+
+function outputTokensFromUsage(u: Record<string, unknown>): number | undefined {
+  return num(u.output_tokens) ?? num(u.outputTokens);
+}
+
+function runtimeModelFromUsageKey(key: string): string {
+  return key.replace(/\[.*\]$/, "");
+}
+
+function contextSnapshotFromEvent(data: unknown): CliContextSnapshot | null {
+  if (!data || typeof data !== "object") return null;
+  const obj = data as Record<string, unknown>;
+
+  const modelUsage = obj.modelUsage;
+  if (modelUsage && typeof modelUsage === "object") {
+    const entries = Object.entries(modelUsage as Record<string, Record<string, unknown>>);
+    const [modelKey, usage] = entries[entries.length - 1] ?? [];
+    if (modelKey && usage) {
+      return {
+        kind: "cumulative",
+        model: runtimeModelFromUsageKey(modelKey),
+        inputTokens: inputTokensFromUsage(usage),
+        outputTokens: outputTokensFromUsage(usage),
+        contextWindow: num(usage.contextWindow),
+      };
+    }
+  }
+
+  // Claude `--output-format stream-json` emits successive `assistant`
+  // events for the SAME message.id — usage.input_tokens stays constant for
+  // a turn while output_tokens grows. We dedupe by message.id so multiple
+  // streamed snapshots of the same turn don't get summed.
+  const message = obj.message;
+  if (message && typeof message === "object") {
+    const msg = message as Record<string, unknown>;
+    const usage = msg.usage;
+    if (usage && typeof usage === "object") {
+      const u = usage as Record<string, unknown>;
+      return {
+        kind: "perTurn",
+        turnKey: typeof msg.id === "string" ? msg.id : undefined,
+        model: typeof msg.model === "string" ? msg.model : undefined,
+        inputTokens: inputTokensFromUsage(u),
+        outputTokens: outputTokensFromUsage(u),
+      };
+    }
+  }
+
+  // Claude `result` event: canonical session total at the end of a task.
+  if (obj.type === "result") {
+    const u = obj.usage as Record<string, unknown> | undefined;
+    if (u && typeof u === "object") {
+      return {
+        kind: "cumulative",
+        model: typeof obj.model === "string" ? obj.model : undefined,
+        inputTokens: inputTokensFromUsage(u),
+        outputTokens: outputTokensFromUsage(u),
+      };
+    }
+  }
+
+  // Generic per-turn fallback (Codex CLI deltas, OpenAI-style chunks).
+  const usage = obj.usage;
+  if (usage && typeof usage === "object") {
+    const u = usage as Record<string, unknown>;
+    return {
+      kind: "perTurn",
+      turnKey: typeof obj.id === "string" ? obj.id : undefined,
+      model: typeof obj.model === "string" ? obj.model : undefined,
+      inputTokens: inputTokensFromUsage(u),
+      outputTokens: outputTokensFromUsage(u),
+    };
+  }
+
+  return null;
+}
+
+function latestContextSnapshot(eventsByTaskId: Record<string, unknown[]>, taskIds: string[]) {
+  let cumulativeIn: number | undefined;
+  let cumulativeOut: number | undefined;
+  // Per-turn aggregation: keep the LATEST usage per turnKey to avoid double
+  // counting Claude's repeated `assistant` events for the same message.
+  const perTurn = new Map<string, { in: number; out: number }>();
+  // Anonymous per-turn snapshots (no turnKey) get bucketed under their
+  // index so each event is its own bucket — keeps Codex/OpenAI delta chunks
+  // working as a fallback.
+  let anonIdx = 0;
+  let model: string | undefined;
+  let contextWindow: number | undefined;
+  let saw = false;
+  for (const taskId of taskIds) {
+    for (const entry of eventsByTaskId[taskId] ?? []) {
+      const data = (entry as { data?: unknown })?.data;
+      const snap = contextSnapshotFromEvent(data);
+      if (!snap) continue;
+      saw = true;
+      if (snap.model) model = snap.model;
+      if (snap.contextWindow !== undefined) contextWindow = snap.contextWindow;
+      if (snap.kind === "cumulative") {
+        cumulativeIn = snap.inputTokens ?? cumulativeIn;
+        cumulativeOut = snap.outputTokens ?? cumulativeOut;
+        perTurn.clear();
+      } else {
+        const key = snap.turnKey ?? `__anon_${anonIdx++}`;
+        perTurn.set(key, {
+          in: snap.inputTokens ?? 0,
+          out: snap.outputTokens ?? 0,
+        });
+      }
+    }
+  }
+  if (!saw) return null;
+  let summedIn = 0;
+  let summedOut = 0;
+  for (const v of perTurn.values()) {
+    summedIn += v.in;
+    summedOut += v.out;
+  }
+  const inputTokens = (cumulativeIn ?? 0) + summedIn;
+  const outputTokens = (cumulativeOut ?? 0) + summedOut;
+  return {
+    kind: "cumulative" as const,
+    model,
+    inputTokens: inputTokens || undefined,
+    outputTokens: outputTokens || undefined,
+    contextWindow,
+  };
 }
 
 export const Thread: FC = () => {
@@ -85,61 +252,36 @@ export const Thread: FC = () => {
 
   return (
     <ThreadPrimitive.Root
-      className="aui-root aui-thread-root @container flex h-full flex-col bg-background"
+      className="aui-root aui-thread-root @container flex h-full flex-col bg-background text-sm"
       style={{
-        ["--thread-max-width" as string]: "100%",
-        ["--composer-radius" as string]: "24px",
-        ["--composer-padding" as string]: "10px",
+        ["--thread-max-width" as string]: "48rem",
+        ["--accent-color" as string]: "#10a37f",
+        ["--accent-foreground" as string]: "#ffffff",
       }}
     >
-      {/* No `turnAnchor="top"` — that disables auto-scroll entirely in
-          assistant-ui (see useThreadViewportAutoScroll). We want the
-          ChatGPT-style "stick to bottom when new messages arrive" behavior. */}
       <ThreadPrimitive.Viewport
+        turnAnchor="top"
         data-slot="aui_thread-viewport"
         data-testid="chat-thread"
-        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-6"
+        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-4"
       >
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
         </AuiIf>
 
-        <div
-          data-slot="aui_message-group"
-          className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-y-8 pb-10 empty:hidden"
-        >
-          <ThreadPrimitive.Messages>{() => <ThreadMessage />}</ThreadPrimitive.Messages>
-        </div>
+        <ThreadPrimitive.Messages
+          components={{
+            UserMessage,
+            EditComposer,
+            AssistantMessage,
+          }}
+        />
 
-        <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-(--composer-radius) bg-background pb-4 md:pb-6">
-          <ThreadScrollToBottom />
+        <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-[var(--thread-max-width)] flex-col gap-4 overflow-visible rounded-t-3xl bg-background pb-4">
           <Composer />
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
-  );
-};
-
-const ThreadMessage: FC = () => {
-  const role = useAuiState((s) => s.message.role);
-  const isEditing = useAuiState((s) => s.message.composer.isEditing);
-
-  if (isEditing) return <EditComposer />;
-  if (role === "user") return <UserMessage />;
-  return <AssistantMessage />;
-};
-
-const ThreadScrollToBottom: FC = () => {
-  return (
-    <ThreadPrimitive.ScrollToBottom asChild>
-      <TooltipIconButton
-        tooltip="Scroll to bottom"
-        variant="outline"
-        className="aui-thread-scroll-to-bottom absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible dark:border-border dark:bg-background dark:hover:bg-accent"
-      >
-        <ArrowDownIcon />
-      </TooltipIconButton>
-    </ThreadPrimitive.ScrollToBottom>
   );
 };
 
@@ -149,16 +291,16 @@ const ThreadWelcome: FC = () => {
   const setComposerAgent = useIDE((s) => s.setComposerAgent);
 
   return (
-    <div className="aui-thread-welcome-root my-auto flex grow flex-col">
-      <div className="aui-thread-welcome-center flex w-full grow flex-col items-center justify-center">
-        <div className="aui-thread-welcome-message flex size-full flex-col justify-center px-4">
-          <h1 className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both font-semibold text-2xl duration-200">
-            Choose your CLI
-          </h1>
-          <p className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-muted-foreground text-xl delay-75 duration-200">
-            Pick the agent runtime before starting this task.
-          </p>
-          <div className="mt-6 grid w-full max-w-3xl grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="aui-thread-welcome-root mx-auto my-auto flex w-full max-w-[var(--thread-max-width)] flex-grow flex-col">
+      <div className="flex w-full flex-grow flex-col items-center justify-center">
+        <div className="flex size-full flex-col justify-center px-8">
+          <div className="fade-in slide-in-from-bottom-1 animate-in text-2xl font-semibold duration-200">
+            Hello there!
+          </div>
+          <div className="fade-in slide-in-from-bottom-1 animate-in text-2xl text-muted-foreground/65 delay-75 duration-200">
+            How can I help you today?
+          </div>
+          <div className="mt-6 grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
             {CLI_OPTIONS.map((cli) => {
               const active = selectedCli === cli.id;
               return (
@@ -218,31 +360,36 @@ const ThreadSuggestionItem: FC = () => {
 };
 
 const Composer: FC = () => {
+  const workspaceId = useIDE((s) => s.activeWorkspaceId);
+  const largeDraft = useIDE((s) => s.largeComposerDraftByWorkspaceId[s.activeWorkspaceId]);
   const activeAgent = useIDE((s) => {
-    const activeTask = s.activeTaskId
-      ? (s.tasksByWorkspaceId[s.activeWorkspaceId] ?? []).find((t) => t.id === s.activeTaskId)
-      : null;
-    if (activeTask?.cli) return activeTask.cli as TerminalKind;
+    const activeThread = s.selectActiveAgentThread(s.activeWorkspaceId);
+    if (activeThread?.cli) return activeThread.cli;
     const composerAgent = s.composerAgentByWorkspaceId[s.activeWorkspaceId];
     if (composerAgent) return composerAgent;
     const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
     const activeId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
     return sessions.find((t) => t.id === activeId)?.kind ?? s.activeAgent;
   });
-  const requiresCli = useIDE(
-    (s) =>
-      !s.activeTaskId &&
+  const requiresCli = useIDE((s) => {
+    const activeThread = s.selectActiveAgentThread(s.activeWorkspaceId);
+    return (
+      !activeThread &&
       !s.composerAgentByWorkspaceId[s.activeWorkspaceId] &&
-      !s.activeSessionIdByWorkspaceId[s.activeWorkspaceId],
-  );
+      !s.activeSessionIdByWorkspaceId[s.activeWorkspaceId]
+    );
+  });
 
   const placeholder = CLI_PLACEHOLDERS[activeAgent] ?? CLI_PLACEHOLDERS.codex;
 
   const shellRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const inputGuardRef = useRef(false);
+  const [inputReadyTick, setInputReadyTick] = useState(0);
   const [popover, setPopover] = useState<"files" | "slash" | null>(null);
   const [query, setQuery] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
+  const setLargeComposerDraft = useIDE((s) => s.setLargeComposerDraft);
 
   // Reactive detection: watch composer.text directly from the assistant-ui
   // runtime. More reliable than attaching DOM listeners — React re-runs this
@@ -255,7 +402,10 @@ const Composer: FC = () => {
       const shell = shellRef.current;
       if (shell) {
         const found = shell.querySelector("textarea");
-        if (found) inputRef.current = found as HTMLTextAreaElement;
+        if (found) {
+          inputRef.current = found as HTMLTextAreaElement;
+          setInputReadyTick((tick) => tick + 1);
+        }
       }
     }
 
@@ -281,9 +431,76 @@ const Composer: FC = () => {
     console.debug("[composer] trigger=", trigger, "query=", q);
   }, [composerText]);
 
+  useEffect(() => {
+    if (composerText.length > MAX_INLINE_COMPOSER_CHARS) {
+      const previewText = buildLargeDraftPreview(composerText);
+      if (
+        !largeDraft ||
+        largeDraft.fullText !== composerText ||
+        largeDraft.previewText !== previewText
+      ) {
+        setLargeComposerDraft(workspaceId, {
+          fullText: composerText,
+          previewText,
+        });
+        const el = inputRef.current;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        if (el && setter && el.value !== previewText) {
+          inputGuardRef.current = true;
+          setter.call(el, previewText);
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.selectionStart = el.selectionEnd = 0;
+        }
+      }
+      return;
+    }
+
+    if (largeDraft) setLargeComposerDraft(workspaceId, null);
+  }, [composerText, largeDraft, setLargeComposerDraft, workspaceId]);
+
+  useEffect(() => {
+    const el =
+      inputRef.current ??
+      ((shellRef.current?.querySelector("textarea") as HTMLTextAreaElement) || null);
+    if (!el) return;
+    inputRef.current = el;
+
+    const handler = () => {
+      if (inputGuardRef.current) {
+        inputGuardRef.current = false;
+        return;
+      }
+
+      const currentValue = el.value;
+      const currentDraft = useIDE.getState().largeComposerDraftByWorkspaceId[workspaceId];
+
+      if (currentValue.length > MAX_INLINE_COMPOSER_CHARS) {
+        const previewText = buildLargeDraftPreview(currentValue);
+        setLargeComposerDraft(workspaceId, {
+          fullText: currentValue,
+          previewText,
+        });
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        inputGuardRef.current = true;
+        setter?.call(el, previewText);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.selectionStart = el.selectionEnd = 0;
+        toast.warning("Large draft collapsed for performance", {
+          id: `large-draft-${workspaceId}`,
+          description: "The full prompt is preserved for send/context counting.",
+        });
+        return;
+      }
+
+      if (currentDraft) setLargeComposerDraft(workspaceId, null);
+    };
+
+    el.addEventListener("input", handler, true);
+    return () => el.removeEventListener("input", handler, true);
+  }, [inputReadyTick, setLargeComposerDraft, workspaceId]);
+
   // Split into individual primitive/ref selectors so each one is snapshot-stable
   // (useSyncExternalStore would otherwise loop on a fresh object every call).
-  const workspaceId = useIDE((s) => s.activeWorkspaceId);
   const workspaceSource = useIDE(
     (s) => s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.source,
   );
@@ -297,6 +514,7 @@ const Composer: FC = () => {
   function clearInput() {
     const el = inputRef.current;
     if (!el) return;
+    setLargeComposerDraft(workspaceId, null);
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
     setter?.call(el, "");
     el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -335,18 +553,26 @@ const Composer: FC = () => {
           <div
             ref={shellRef}
             data-slot="aui_composer-shell"
-            className="flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-background p-(--composer-padding) transition-shadow focus-within:border-ring/75 focus-within:ring-2 focus-within:ring-ring/20 data-[dragging=true]:border-ring data-[dragging=true]:border-dashed data-[dragging=true]:bg-accent/50"
+            className="flex w-full flex-col rounded-3xl border border-input bg-background px-1 pt-2 outline-none transition-shadow focus-within:border-ring/75 focus-within:ring-2 focus-within:ring-ring/20 data-[dragging=true]:border-ring data-[dragging=true]:border-dashed data-[dragging=true]:bg-accent/50"
           >
             <ComposerAttachments />
             <ComposerPrimitive.Input
               data-testid="chat-composer-input"
               placeholder={placeholder}
               disabled={requiresCli}
-              className="aui-composer-input max-h-32 min-h-10 w-full resize-none bg-transparent px-1.75 py-1 text-sm outline-none placeholder:text-muted-foreground/80"
+              className="aui-composer-input mb-1 max-h-32 min-h-14 w-full resize-none bg-transparent px-4 pt-2 pb-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-0"
               rows={1}
               autoFocus
               aria-label="Message input"
             />
+            {largeDraft && (
+              <div className="mx-3 mb-2 rounded-xl border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-[11px] text-status-warn">
+                <span className="font-medium">Large draft mode.</span>{" "}
+                {largeDraft.fullText.length.toLocaleString("en-US")} chars buffered,{" "}
+                {largeDraftHiddenChars(largeDraft).toLocaleString("en-US")} hidden from the textarea
+                for performance.
+              </div>
+            )}
             <ComposerAction onHelp={() => setHelpOpen(true)} />
           </div>
         </ComposerPrimitive.AttachmentDropzone>
@@ -427,6 +653,10 @@ const SendOrStopButton: FC = () => {
         variant="default"
         size="icon"
         className="aui-composer-cancel size-8 rounded-full"
+        style={{
+          backgroundColor: "var(--accent-color)",
+          color: "var(--accent-foreground)",
+        }}
         aria-label="Stop generating"
         data-testid="chat-composer-stop"
         onClick={(e) => {
@@ -464,6 +694,10 @@ const SendOrStopButton: FC = () => {
         variant="default"
         size="icon"
         className="aui-composer-send size-8 rounded-full"
+        style={{
+          backgroundColor: "var(--accent-color)",
+          color: "var(--accent-foreground)",
+        }}
         aria-label="Send message"
         disabled={(!composerText.trim() && composerAttachmentsCount === 0) || requiresCli}
       >
@@ -474,11 +708,14 @@ const SendOrStopButton: FC = () => {
 };
 
 const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
+  const activeTaskId = useIDE((s) => s.activeTaskId);
+  const activeThreadTaskIdsKey = useIDE((s) => {
+    const thread = s.selectActiveAgentThread(s.activeWorkspaceId);
+    return thread?.tasks.map((task) => task.id).join(",") ?? "";
+  });
   const activeAgent = useIDE((s) => {
-    const activeTask = s.activeTaskId
-      ? (s.tasksByWorkspaceId[s.activeWorkspaceId] ?? []).find((t) => t.id === s.activeTaskId)
-      : null;
-    if (activeTask?.cli) return activeTask.cli as TerminalKind;
+    const activeThread = s.selectActiveAgentThread(s.activeWorkspaceId);
+    if (activeThread?.cli) return activeThread.cli;
     const composerAgent = s.composerAgentByWorkspaceId[s.activeWorkspaceId];
     if (composerAgent) return composerAgent;
     const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
@@ -488,29 +725,72 @@ const ComposerAction: FC<{ onHelp?: () => void }> = ({ onHelp: _onHelp }) => {
   const messagesChars = useAuiState((s) =>
     s.thread.messages.reduce((acc, m) => acc + messageTextLength(m as MessageLike), 0),
   );
-  const composerChars = useAuiState((s) => (s.composer.text ?? "").length);
+  const largeDraft = useIDE((s) => s.largeComposerDraftByWorkspaceId[s.activeWorkspaceId]);
+  const composerChars = useAuiState((s) =>
+    largeDraft ? largeDraft.fullText.length : (s.composer.text ?? "").length,
+  );
+  const draftTokens = Math.round(composerChars / 4);
   const estimatedUsed = Math.round((messagesChars + composerChars) / 4);
-  const model = useIDE((s) => s.selectedModelByCli[activeAgent]);
+  const configuredModel = useIDE((s) => {
+    const selected = s.selectedModelByCli[activeAgent];
+    if (activeAgent === "claude") return selected ?? DEFAULT_CLAUDE_MODEL;
+    if (activeAgent === "codex") return s.codexModel ?? DEFAULT_CODEX_MODEL;
+    return selected;
+  });
   const claudeOverride = useIDE((s) => s.claudeContextOverride);
-  const lastUsage = useIDE((s) => s.lastUsageByCli[activeAgent]);
-  const realUsed = lastUsage ? lastUsage.inputTokens + lastUsage.outputTokens : undefined;
-  const used = realUsed ?? estimatedUsed;
-  const max = getContextWindow(activeAgent, model, claudeOverride);
+  const taskEventsByTaskId = useIDE((s) => s.taskEventsByTaskId);
+  const contextTaskIds = useMemo(
+    () =>
+      activeThreadTaskIdsKey
+        ? activeThreadTaskIdsKey.split(",").filter(Boolean)
+        : activeTaskId
+          ? [activeTaskId]
+          : [],
+    [activeTaskId, activeThreadTaskIdsKey],
+  );
+  const cliContext = useMemo(
+    () => latestContextSnapshot(taskEventsByTaskId, contextTaskIds),
+    [contextTaskIds, taskEventsByTaskId],
+  );
+  const model = cliContext?.model ?? configuredModel;
+  const realUsed =
+    cliContext?.inputTokens !== undefined && cliContext.outputTokens !== undefined
+      ? cliContext.inputTokens + cliContext.outputTokens
+      : undefined;
+  const used =
+    realUsed !== undefined ? Math.max(realUsed + draftTokens, estimatedUsed) : estimatedUsed;
+  const max = getDisplayContextWindow({
+    cli: activeAgent,
+    configuredModel: configuredModel,
+    runtimeModel: model,
+    runtimeContextWindow: cliContext?.contextWindow,
+    override: claudeOverride,
+  });
 
   return (
-    <div className="aui-composer-action-wrapper flex items-center justify-between gap-2">
+    <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between gap-2">
       <div className="flex items-center gap-1">
         <ComposerAddAttachment />
         <ModelPill cli={activeAgent} />
         <ReasoningPill cli={activeAgent} />
         <PlanToggle cli={activeAgent} />
-        <SkillsTrigger />
       </div>
       <div className="flex items-center gap-1">
         <span className="hidden h-8 items-center justify-center sm:inline-flex">
           <ContextRing used={used} max={max} />
         </span>
-        <StatusButton cli={activeAgent} estimatedUsed={estimatedUsed} />
+        <StatusButton
+          cli={activeAgent}
+          estimatedUsed={estimatedUsed}
+          draftTokens={draftTokens}
+          runtimeModel={model}
+          runtimeUsage={
+            cliContext?.inputTokens !== undefined && cliContext.outputTokens !== undefined
+              ? { inputTokens: cliContext.inputTokens, outputTokens: cliContext.outputTokens }
+              : undefined
+          }
+          runtimeContextWindow={cliContext?.contextWindow}
+        />
         <SendOrStopButton />
       </div>
     </div>
@@ -528,95 +808,32 @@ const MessageError: FC = () => {
 };
 
 const AssistantMessage: FC = () => {
-  // reserves space for action bar and compensates with `-mb` for consistent msg spacing
-  // keeps hovered action bar from shifting layout (autohide doesn't support absolute positioning well)
-  // for pt-[n] use -mb-[n + 6] & min-h-[n + 6] to preserve compensation
-  const ACTION_BAR_PT = "pt-1.5";
-  const ACTION_BAR_HEIGHT = `-mb-7.5 min-h-7.5 ${ACTION_BAR_PT}`;
-
-  // Show typing dots when streaming text (last part is text, no pending tool call)
-  const showTypingDots = useAuiState((s) => {
-    if (!s.thread.isRunning) return false;
-    const parts = s.message.content;
-    if (!parts || parts.length === 0) return false;
-    const last = parts[parts.length - 1] as PartLike;
-    return last?.type === "text";
-  });
-
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 relative animate-in duration-150"
+      className="fade-in slide-in-from-bottom-1 relative mx-auto w-full max-w-[var(--thread-max-width)] animate-in py-3 duration-150"
     >
       <div
         data-slot="aui_assistant-message-content"
-        className="wrap-break-word px-2 text-foreground leading-relaxed"
+        className="wrap-break-word break-words px-2 leading-relaxed text-foreground"
       >
-        <ThoughtSummaryForCurrentMessage />
         <MessagePrimitive.Parts
           components={{
             Text: MarkdownText,
+            tools: { Fallback: ToolFallback },
             Reasoning,
             ReasoningGroup,
-            tools: { Fallback: ToolFallback },
           }}
         />
-        {showTypingDots && <TypingDots />}
-        <AuiIf condition={(s) => s.thread.isRunning}>
-          <ThinkingIndicator />
-        </AuiIf>
         <MessageError />
+        <ThinkingIndicator />
       </div>
 
-      <div
-        data-slot="aui_assistant-message-footer"
-        className={cn("ml-2 flex items-center", ACTION_BAR_HEIGHT)}
-      >
+      <div data-slot="aui_assistant-message-footer" className="mt-1 ml-2 flex min-h-6 items-center">
         <BranchPicker />
-        <AssistantActionBar />
       </div>
     </MessagePrimitive.Root>
-  );
-};
-
-const AssistantActionBar: FC = () => {
-  return (
-    <ActionBarPrimitive.Root
-      hideWhenRunning
-      autohide="not-last"
-      className="aui-assistant-action-bar-root col-start-3 row-start-2 -ml-1 flex gap-1 text-muted-foreground"
-    >
-      <ActionBarPrimitive.Copy asChild>
-        <TooltipIconButton tooltip="Copy">
-          <AuiIf condition={(s) => s.message.isCopied}>
-            <CheckIcon />
-          </AuiIf>
-          <AuiIf condition={(s) => !s.message.isCopied}>
-            <CopyIcon />
-          </AuiIf>
-        </TooltipIconButton>
-      </ActionBarPrimitive.Copy>
-      <ActionBarMorePrimitive.Root>
-        <ActionBarMorePrimitive.Trigger asChild>
-          <TooltipIconButton tooltip="More" className="data-[state=open]:bg-accent">
-            <MoreHorizontalIcon />
-          </TooltipIconButton>
-        </ActionBarMorePrimitive.Trigger>
-        <ActionBarMorePrimitive.Content
-          side="bottom"
-          align="start"
-          className="aui-action-bar-more-content z-50 min-w-32 overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
-        >
-          <ActionBarPrimitive.ExportMarkdown asChild>
-            <ActionBarMorePrimitive.Item className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground">
-              <DownloadIcon className="size-4" />
-              Export as Markdown
-            </ActionBarMorePrimitive.Item>
-          </ActionBarPrimitive.ExportMarkdown>
-        </ActionBarMorePrimitive.Content>
-      </ActionBarMorePrimitive.Root>
-    </ActionBarPrimitive.Root>
   );
 };
 
@@ -624,29 +841,46 @@ const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
-      className="fade-in slide-in-from-bottom-1 grid animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [&:where(>*)]:col-start-2"
+      className="fade-in slide-in-from-bottom-1 mx-auto grid w-full max-w-[var(--thread-max-width)] animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-3 duration-150"
       data-role="user"
     >
       <UserMessageAttachments />
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
-        <div className="aui-user-message-content wrap-break-word peer rounded-2xl bg-muted px-4 py-2.5 text-foreground empty:hidden">
+        <div className="aui-user-message-content wrap-break-word rounded-3xl bg-muted px-4 py-2.5 break-words text-foreground empty:hidden">
           <MessagePrimitive.Parts />
         </div>
+        <div className="absolute top-1/2 left-0 -translate-x-full -translate-y-1/2 pr-2">
+          <UserActionBar />
+        </div>
       </div>
-
-      <BranchPicker
-        data-slot="aui_user-branch-picker"
-        className="col-span-full col-start-1 row-start-3 -mr-1 justify-end"
-      />
     </MessagePrimitive.Root>
+  );
+};
+
+const UserActionBar: FC = () => {
+  return (
+    <ActionBarPrimitive.Root
+      hideWhenRunning
+      autohide="not-last"
+      className="flex flex-col items-end"
+    >
+      <ActionBarPrimitive.Edit asChild>
+        <TooltipIconButton tooltip="Edit" className="p-4">
+          <PencilIcon />
+        </TooltipIconButton>
+      </ActionBarPrimitive.Edit>
+    </ActionBarPrimitive.Root>
   );
 };
 
 const EditComposer: FC = () => {
   return (
-    <MessagePrimitive.Root data-slot="aui_edit-composer-wrapper" className="flex flex-col px-2">
-      <ComposerPrimitive.Root className="aui-edit-composer-root ml-auto flex w-full max-w-[85%] flex-col rounded-2xl bg-muted">
+    <MessagePrimitive.Root
+      data-slot="aui_edit-composer-wrapper"
+      className="mx-auto flex w-full max-w-[var(--thread-max-width)] flex-col px-2 py-3"
+    >
+      <ComposerPrimitive.Root className="aui-edit-composer-root ml-auto flex w-full max-w-[85%] flex-col rounded-3xl bg-muted">
         <ComposerPrimitive.Input
           className="aui-edit-composer-input min-h-14 w-full resize-none bg-transparent p-4 text-foreground text-sm outline-none"
           autoFocus

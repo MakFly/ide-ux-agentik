@@ -46,6 +46,11 @@ export function getMessageSummary(messageId: string): MessageSummary | null {
   return summaryMap.get(messageId) ?? null;
 }
 
+/** Live-running run started-at timestamp (ms), or null if no run in flight. */
+export function getRunStartedAt(): number | null {
+  return pendingRun?.startedAt ?? null;
+}
+
 export function subscribeMessageSummary(listener: Listener): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);

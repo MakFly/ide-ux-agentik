@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useEffect, useRef, useState, useCallback } from "react";
-import { FileText } from "lucide-react";
+import { FileText, Folder, Search } from "lucide-react";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -15,43 +15,110 @@ export type FileMentionPopoverProps = {
   onClose: () => void;
 };
 
-const MAX_FILES = 500;
-const MAX_DEPTH = 8;
-const MAX_VISIBLE = 15;
+const MAX_INDEXED_ENTRIES = 5_000;
+const MAX_DEPTH = 12;
+const MAX_VISIBLE = 18;
 const DEBOUNCE_MS = 100;
+const SKIP_DIRS = new Set([
+  ".git",
+  ".multica",
+  ".next",
+  ".turbo",
+  ".wrangler",
+  "dist",
+  "build",
+  "coverage",
+  "node_modules",
+  "test-results",
+]);
 
-async function collectFiles(
+type MentionEntry = {
+  path: string;
+  type: FsEntry["type"];
+};
+
+type ScoredMentionEntry = MentionEntry & {
+  score: number;
+};
+
+function joinWorkspaceProviderPath(rootPath: string, relativePath: string): string {
+  const root = rootPath.replace(/\/+$/, "");
+  const relative = relativePath.replace(/^\/+/, "");
+  return relative ? `${root}/${relative}` : root;
+}
+
+function relativePathFromRoot(rootPath: string, providerPath: string): string {
+  const root = rootPath.replace(/\/+$/, "");
+  if (providerPath === root) return "";
+  if (providerPath.startsWith(`${root}/`)) return providerPath.slice(root.length + 1);
+  return providerPath;
+}
+
+async function collectEntries(
   list: (path: string) => Promise<FsEntry[]>,
   path: string,
   depth: number,
-  acc: string[],
+  acc: MentionEntry[],
 ): Promise<void> {
-  if (depth > MAX_DEPTH || acc.length >= MAX_FILES) return;
-  let entries: FsEntry[];
-  try {
-    entries = await list(path);
-  } catch {
-    return;
-  }
-  for (const e of entries) {
-    if (acc.length >= MAX_FILES) break;
-    if (e.type === "file") {
-      acc.push(e.path);
-    } else if (e.type === "directory") {
-      await collectFiles(list, e.path, depth + 1, acc);
+  const queue: Array<{ path: string; depth: number }> = [{ path, depth }];
+  while (queue.length > 0 && acc.length < MAX_INDEXED_ENTRIES) {
+    const current = queue.shift()!;
+    if (current.depth > MAX_DEPTH) continue;
+
+    let entries: FsEntry[];
+    try {
+      entries = await list(current.path);
+    } catch {
+      continue;
+    }
+
+    for (const e of entries) {
+      if (acc.length >= MAX_INDEXED_ENTRIES) break;
+      if (!e.path || SKIP_DIRS.has(e.name)) continue;
+      acc.push({ path: e.path, type: e.type });
+      if (e.type === "directory") {
+        queue.push({ path: e.path, depth: current.depth + 1 });
+      }
     }
   }
 }
 
-function fuzzyMatch(path: string, query: string): boolean {
-  if (!query) return true;
-  const lower = path.toLowerCase();
-  const q = query.toLowerCase();
+function fuzzyIndex(path: string, query: string): number {
+  const lower = path.replaceAll("/", " ").toLowerCase();
+  const q = query.toLowerCase().replaceAll("/", " ").trim();
+  if (!q) return 0;
   let qi = 0;
-  for (let i = 0; i < lower.length && qi < q.length; i++) {
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < lower.length && qi < q.length; i += 1) {
     if (lower[i] === q[qi]) qi++;
+    if (lower[i] === q[qi - 1]) {
+      if (first === -1) first = i;
+      last = i;
+    }
   }
-  return qi === q.length;
+  if (qi !== q.length) return -1;
+  return Math.max(0, last - first);
+}
+
+function scoreEntry(entry: MentionEntry, query: string): number {
+  const q = query.toLowerCase().trim();
+  if (!q) return entry.type === "directory" ? 1 : 2;
+
+  const path = entry.path.toLowerCase();
+  const base = path.split("/").pop() ?? path;
+  const fuzzySpan = fuzzyIndex(path, q);
+  if (fuzzySpan < 0) return Number.POSITIVE_INFINITY;
+
+  let score = 100 + fuzzySpan;
+  if (path === q) score -= 90;
+  if (base === q) score -= 80;
+  if (path.startsWith(q)) score -= 50;
+  if (base.startsWith(q)) score -= 45;
+  if (path.includes(`/${q}`)) score -= 25;
+  if (entry.type === "directory") score -= 5;
+  score += path.split("/").length;
+  return score;
 }
 
 function highlightMatch(text: string, query: string): React.ReactNode {
@@ -88,7 +155,7 @@ export function FileMentionPopover({ anchorRef, query, onPick, onClose }: FileMe
   const workspaces = useIDE((s) => s.workspaces);
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
 
-  const [allFiles, setAllFiles] = useState<string[]>([]);
+  const [allEntries, setAllEntries] = useState<MentionEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeIndex, setActiveIndex] = useState(0);
   const [debouncedQuery, setDebouncedQuery] = useState(query);
@@ -113,10 +180,26 @@ export function FileMentionPopover({ anchorRef, query, onPick, onClose }: FileMe
     setLoading(true);
     providerFor(ws.source, ws.name)
       .then(async (provider) => {
-        const acc: string[] = [];
-        await collectFiles((p) => provider.list(p), "", 0, acc);
+        const acc: MentionEntry[] = [];
+        await collectEntries(
+          async (p) => {
+            const providerPath =
+              ws.source.kind === "remote-agent" && ws.rootPath
+                ? joinWorkspaceProviderPath(ws.rootPath, p)
+                : p;
+            const entries = await provider.list(providerPath);
+            if (ws.source.kind !== "remote-agent" || !ws.rootPath) return entries;
+            return entries.map((entry) => ({
+              ...entry,
+              path: relativePathFromRoot(ws.rootPath!, entry.path),
+            }));
+          },
+          "",
+          0,
+          acc,
+        );
         if (!cancelled) {
-          setAllFiles(acc);
+          setAllEntries(acc);
           setLoading(false);
         }
       })
@@ -128,10 +211,16 @@ export function FileMentionPopover({ anchorRef, query, onPick, onClose }: FileMe
     };
   }, [workspaces, activeWorkspaceId]);
 
-  const filtered = React.useMemo(
-    () => allFiles.filter((p) => fuzzyMatch(p, debouncedQuery)).slice(0, MAX_VISIBLE),
-    [allFiles, debouncedQuery],
-  );
+  const filtered = React.useMemo(() => {
+    const scored: ScoredMentionEntry[] = [];
+    for (const entry of allEntries) {
+      const score = scoreEntry(entry, debouncedQuery);
+      if (Number.isFinite(score)) scored.push({ ...entry, score });
+    }
+    return scored
+      .sort((a, b) => a.score - b.score || a.path.localeCompare(b.path))
+      .slice(0, MAX_VISIBLE);
+  }, [allEntries, debouncedQuery]);
 
   useEffect(() => {
     setActiveIndex(0);
@@ -153,7 +242,8 @@ export function FileMentionPopover({ anchorRef, query, onPick, onClose }: FileMe
         setActiveIndex((i) => Math.max(i - 1, 0));
       } else if (e.key === "Enter") {
         e.preventDefault();
-        if (filtered[activeIndex]) onPick(filtered[activeIndex]);
+        const entry = filtered[activeIndex];
+        if (entry) onPick(entry.type === "directory" ? `${entry.path}/` : entry.path);
       } else if (e.key === "Escape") {
         e.preventDefault();
         onClose();
@@ -174,14 +264,22 @@ export function FileMentionPopover({ anchorRef, query, onPick, onClose }: FileMe
         align="start"
         side="top"
         sideOffset={6}
-        className="w-96 p-1 max-h-[280px] flex flex-col"
+        className="w-[30rem] max-w-[calc(100vw-2rem)] p-1 max-h-[340px] flex flex-col"
         onOpenAutoFocus={(e) => e.preventDefault()}
         onInteractOutside={onClose}
       >
+        <div className="flex items-center gap-2 border-b px-2 py-1.5 text-[11px] text-muted-foreground">
+          <Search className="size-3.5" />
+          <span>
+            {loading
+              ? "Indexing workspace files..."
+              : `${allEntries.length} indexed files and folders`}
+          </span>
+        </div>
         <div
           ref={listRef}
-          className="overflow-y-auto flex flex-col gap-0.5"
-          style={{ maxHeight: 260 }}
+          className="overflow-y-auto flex flex-col gap-0.5 pt-1"
+          style={{ maxHeight: 300 }}
         >
           {loading ? (
             Array.from({ length: 5 }).map((_, i) => (
@@ -192,27 +290,54 @@ export function FileMentionPopover({ anchorRef, query, onPick, onClose }: FileMe
             ))
           ) : filtered.length === 0 ? (
             <div className="px-3 py-4 text-sm text-muted-foreground text-center">
-              No files found
+              No files or folders found
             </div>
           ) : (
-            filtered.map((path, i) => {
-              const slash = path.lastIndexOf("/");
-              const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
-              const base = slash >= 0 ? path.slice(slash + 1) : path;
+            filtered.map((entry, i) => {
+              const pickPath = entry.type === "directory" ? `${entry.path}/` : entry.path;
+              const slash = entry.path.lastIndexOf("/");
+              const dir = slash >= 0 ? entry.path.slice(0, slash + 1) : "";
+              const base = slash >= 0 ? entry.path.slice(slash + 1) : entry.path;
+              const Icon = entry.type === "directory" ? Folder : FileText;
               return (
                 <div
-                  key={path}
+                  key={`${entry.type}:${entry.path}`}
                   className={cn(
-                    "flex items-center gap-2 px-2 py-1.5 rounded-sm cursor-pointer text-sm select-none",
+                    "flex items-center gap-2 rounded-md px-2 py-1.5 cursor-pointer text-sm select-none",
                     i === activeIndex ? "bg-accent text-accent-foreground" : "hover:bg-accent/60",
                   )}
                   onMouseEnter={() => setActiveIndex(i)}
-                  onClick={() => onPick(path)}
+                  onClick={() => onPick(pickPath)}
                 >
-                  <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  <span className="truncate min-w-0">
-                    {dir && <span className="text-muted-foreground">{dir}</span>}
-                    <span className="text-foreground">{highlightMatch(base, debouncedQuery)}</span>
+                  <Icon
+                    className={cn(
+                      "h-3.5 w-3.5 shrink-0",
+                      entry.type === "directory" ? "text-amber-500" : "text-muted-foreground",
+                    )}
+                  />
+                  <span className="min-w-0 flex-1 truncate">
+                    {dir && (
+                      <span
+                        className={cn(
+                          "text-muted-foreground",
+                          i === activeIndex && "text-accent-foreground/70",
+                        )}
+                      >
+                        {highlightMatch(dir, debouncedQuery)}
+                      </span>
+                    )}
+                    <span className="text-foreground">
+                      {highlightMatch(base, debouncedQuery)}
+                      {entry.type === "directory" ? "/" : ""}
+                    </span>
+                  </span>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground",
+                      i === activeIndex && "border-accent-foreground/30 text-accent-foreground/70",
+                    )}
+                  >
+                    {entry.type === "directory" ? "dir" : "file"}
                   </span>
                 </div>
               );

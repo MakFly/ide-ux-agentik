@@ -25,6 +25,12 @@ const ENTRIES: Entry[] = [
   },
   {
     kind: "section",
+    id: "organization",
+    label: "Organization",
+    keywords: ["org", "profile", "user", "workspace token", "slug"],
+  },
+  {
+    kind: "section",
     id: "workspace",
     label: "Workspace",
     keywords: ["projects", "repositories", "delete", "folder", "root"],
@@ -60,12 +66,17 @@ export function CommandPalette({
   open,
   onOpenChange,
   onNavigate,
+  showOrganization = true,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onNavigate: (section: SectionId, provider?: ProviderId) => void;
+  showOrganization?: boolean;
 }) {
   const [query, setQuery] = useState("");
+  const entries = showOrganization
+    ? ENTRIES
+    : ENTRIES.filter((entry) => entry.kind !== "section" || entry.id !== "organization");
 
   useEffect(() => {
     if (!open) setQuery("");
@@ -81,32 +92,36 @@ export function CommandPalette({
       <CommandList>
         <CommandEmpty>No match.</CommandEmpty>
         <CommandGroup heading="Sections">
-          {ENTRIES.filter((e) => e.kind === "section").map((e) => (
-            <CommandItem
-              key={`section-${e.id}`}
-              value={`${e.label} ${e.keywords.join(" ")}`}
-              onSelect={() => {
-                onNavigate(e.id as SectionId);
-                onOpenChange(false);
-              }}
-            >
-              {e.label}
-            </CommandItem>
-          ))}
+          {entries
+            .filter((e) => e.kind === "section")
+            .map((e) => (
+              <CommandItem
+                key={`section-${e.id}`}
+                value={`${e.label} ${e.keywords.join(" ")}`}
+                onSelect={() => {
+                  onNavigate(e.id as SectionId);
+                  onOpenChange(false);
+                }}
+              >
+                {e.label}
+              </CommandItem>
+            ))}
         </CommandGroup>
         <CommandGroup heading="Providers">
-          {ENTRIES.filter((e) => e.kind === "provider").map((e) => (
-            <CommandItem
-              key={`provider-${e.id}`}
-              value={`${e.label} ${e.keywords.join(" ")}`}
-              onSelect={() => {
-                onNavigate("providers", e.id as ProviderId);
-                onOpenChange(false);
-              }}
-            >
-              {e.label}
-            </CommandItem>
-          ))}
+          {entries
+            .filter((e) => e.kind === "provider")
+            .map((e) => (
+              <CommandItem
+                key={`provider-${e.id}`}
+                value={`${e.label} ${e.keywords.join(" ")}`}
+                onSelect={() => {
+                  onNavigate("providers", e.id as ProviderId);
+                  onOpenChange(false);
+                }}
+              >
+                {e.label}
+              </CommandItem>
+            ))}
         </CommandGroup>
       </CommandList>
     </CommandDialog>

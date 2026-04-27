@@ -77,6 +77,7 @@ type WireWorkspace = {
   color: string;
   gitUrl?: string;
   rootPath?: string;
+  rootPathOwnership?: "user-selected" | "app-created";
   source: WorkspaceSource;
 };
 
@@ -97,6 +98,7 @@ function toWorkspace(w: WireWorkspace): Workspace {
     color: w.color,
     gitUrl: w.gitUrl,
     rootPath: w.rootPath,
+    rootPathOwnership: w.rootPathOwnership,
     source: w.source,
     orgId: w.orgId,
   };

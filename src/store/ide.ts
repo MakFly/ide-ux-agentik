@@ -5,9 +5,11 @@ import { toast } from "sonner";
 import { dropProvider, providerFor, FsError, type FsEntry } from "@/lib/fs";
 import { computeStatus, type GitStatusMap } from "@/lib/git/status";
 import { persistence } from "@/lib/persistence/client";
-import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
+import { RemoteAgentProvider, type AgentTaskAttachment } from "@/lib/fs/remote-agent";
 import { MOCK_ENABLED } from "@/lib/env";
 import { storage } from "@/lib/storage";
+import { getEndpoint } from "@/lib/storage/endpoint";
+import { resolveLaunchModel } from "@/lib/chat/context-windows";
 
 export type BranchStatus = "active" | "warn" | "loading" | "dot" | "none";
 
@@ -39,9 +41,49 @@ export type BranchTask = WorkTask;
 export type TerminalKind = "codex" | "claude" | "opencode" | "gemini";
 export const TERMINAL_KINDS: readonly TerminalKind[] = ["codex", "claude", "opencode", "gemini"];
 
+/**
+ * Extended session kind — includes CLI agent kinds plus DB-only session types
+ * spawned by session.spawnSetup / session.spawnRun on the server side.
+ * UI components keep using TerminalKind (the 4 CLI kinds).
+ */
+export type SessionKind = TerminalKind | "chat" | "terminal" | "setup" | "run";
+
 export function isTerminalKind(value: string): value is TerminalKind {
   return (TERMINAL_KINDS as readonly string[]).includes(value);
 }
+
+export type TaskDiffStat = {
+  added: number;
+  deleted: number;
+  files: Array<{ path: string; added: number; deleted: number }>;
+};
+
+export type TaskNode = import("@/lib/fs/remote-agent").Task & {
+  children: TaskNode[];
+};
+
+export type AgentThreadStatus = import("@/lib/fs/remote-agent").Task["status"] | "draft";
+
+export type AgentThreadView = {
+  id: string;
+  workspaceId: string;
+  session: WorkspaceTerminal;
+  sessionId: string;
+  rootTaskId: string | null;
+  latestTaskId: string | null;
+  title: string;
+  cli: TerminalKind;
+  model: string | null;
+  effort: string | null;
+  status: AgentThreadStatus;
+  tasks: import("@/lib/fs/remote-agent").Task[];
+  createdAt: number;
+  updatedAt: number;
+  branchName: string | null;
+  worktreePath: string | null;
+  baseRef: string | null;
+  turnCount: number;
+};
 
 const TERMINAL_TITLE_BY_KIND: Record<TerminalKind, string> = {
   codex: "Codex",
@@ -75,8 +117,58 @@ export type WorkspaceTerminal = {
   taskId?: string;
 };
 
+export type SpecializedSubagentPreset = "browser";
+
+export type LargeComposerDraft = {
+  fullText: string;
+  previewText: string;
+};
+
+const SPECIALIZED_SUBAGENT_LABEL: Record<SpecializedSubagentPreset, string> = {
+  browser: "Browser",
+};
+
+const SPECIALIZED_SUBAGENT_PROMPT: Record<SpecializedSubagentPreset, string> = {
+  browser: [
+    "[@browser-use](plugin://browser-use@openai-bundled)",
+    "",
+    "Use the in-app browser to inspect, navigate, test, and verify the local app.",
+    "Prefer browser interactions over shell guesses when the task is visual or interaction-based.",
+  ].join("\n"),
+};
+
 function taskSessionId(task: import("@/lib/fs/remote-agent").Task): string {
   return task.sessionId || `${task.id}-session`;
+}
+
+function conversationRootTask(
+  tasks: import("@/lib/fs/remote-agent").Task[],
+  task: import("@/lib/fs/remote-agent").Task,
+): import("@/lib/fs/remote-agent").Task {
+  let cur = task;
+  const seen = new Set<string>();
+  while (cur.parentTaskId || cur.parentSessionId) {
+    if (seen.has(cur.id)) break;
+    seen.add(cur.id);
+    const parentByTask = cur.parentTaskId
+      ? tasks.find((candidate) => candidate.id === cur.parentTaskId)
+      : undefined;
+    const parentBySession = cur.parentSessionId
+      ? tasks.find((candidate) => candidate.sessionId === cur.parentSessionId)
+      : undefined;
+    const parent = parentByTask ?? parentBySession;
+    if (!parent) break;
+    cur = parent;
+  }
+  return cur;
+}
+
+function taskThreadId(
+  tasks: import("@/lib/fs/remote-agent").Task[],
+  task: import("@/lib/fs/remote-agent").Task,
+): string {
+  const root = conversationRootTask(tasks, task);
+  return root.sessionId || task.parentSessionId || task.sessionId || `${root.id}-session`;
 }
 
 function taskSessionStatus(
@@ -102,6 +194,93 @@ function sessionForTask(task: import("@/lib/fs/remote-agent").Task): WorkspaceTe
     taskRootId: task.id,
     cliSessions: [id],
   };
+}
+
+function threadStatus(tasks: import("@/lib/fs/remote-agent").Task[]): AgentThreadStatus {
+  if (tasks.length === 0) return "draft";
+  if (tasks.some((task) => task.status === "running")) return "running";
+  if (tasks.some((task) => task.status === "queued")) return "queued";
+  if (tasks.some((task) => task.status === "awaiting")) return "awaiting";
+  const latest = [...tasks].sort((a, b) => b.createdAt - a.createdAt)[0];
+  return latest?.status ?? "draft";
+}
+
+function threadUpdatedAt(tasks: import("@/lib/fs/remote-agent").Task[], fallback: number): number {
+  return tasks.reduce(
+    (max, task) => Math.max(max, task.endedAt ?? task.startedAt ?? task.createdAt),
+    fallback,
+  );
+}
+
+function deriveAgentThreads(
+  workspaceId: string,
+  tasks: import("@/lib/fs/remote-agent").Task[],
+  sessions: WorkspaceTerminal[],
+): AgentThreadView[] {
+  const groups = new Map<string, import("@/lib/fs/remote-agent").Task[]>();
+  for (const task of tasks) {
+    const id = taskThreadId(tasks, task);
+    groups.set(id, [...(groups.get(id) ?? []), task]);
+  }
+
+  const peerSessionIds = new Set<string>();
+  for (const session of sessions) {
+    for (const id of session.cliSessions ?? []) {
+      if (id !== session.id) peerSessionIds.add(id);
+    }
+  }
+
+  const byId = new Map<string, AgentThreadView>();
+  const addThread = (id: string, session: WorkspaceTerminal, taskGroup: typeof tasks) => {
+    const ordered = [...taskGroup].sort((a, b) => a.createdAt - b.createdAt);
+    const root = ordered[0] ?? null;
+    const latest = ordered[ordered.length - 1] ?? null;
+    const rawCli = latest?.cli ?? session.kind;
+    const cli: TerminalKind = isTerminalKind(rawCli) ? rawCli : "codex";
+    byId.set(id, {
+      id,
+      workspaceId,
+      session,
+      sessionId: id,
+      rootTaskId: root?.id ?? null,
+      latestTaskId: latest?.id ?? null,
+      title: session.title || root?.title || TERMINAL_TITLE_BY_KIND[cli],
+      cli,
+      model: latest?.model ?? null,
+      effort: latest?.effort ?? null,
+      status: threadStatus(ordered),
+      tasks: ordered,
+      createdAt: root?.createdAt ?? Date.now(),
+      updatedAt: threadUpdatedAt(ordered, root?.createdAt ?? Date.now()),
+      branchName: latest?.branchName ?? root?.branchName ?? null,
+      worktreePath: latest?.worktreePath ?? root?.worktreePath ?? null,
+      baseRef: latest?.baseRef ?? root?.baseRef ?? null,
+      turnCount: Math.max(ordered.length, ordered.length === 0 ? 0 : 1),
+    });
+  };
+
+  for (const session of sessions) {
+    if (peerSessionIds.has(session.id)) continue;
+    const taskGroup =
+      groups.get(session.id) ??
+      tasks.filter(
+        (task) =>
+          task.sessionId === session.id ||
+          task.parentSessionId === session.id ||
+          task.id === session.taskRootId ||
+          task.id === session.taskId,
+      );
+    addThread(session.id, session, taskGroup);
+  }
+
+  for (const [id, taskGroup] of groups) {
+    if (byId.has(id)) continue;
+    const root = [...taskGroup].sort((a, b) => a.createdAt - b.createdAt)[0];
+    if (!root) continue;
+    addThread(id, sessionForTask(root), taskGroup);
+  }
+
+  return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 function reconcileTaskSessions(
@@ -182,9 +361,7 @@ function deriveActiveTaskId(
 
   const activeTaskId = currentActiveTaskId;
 
-  const belongsToWorkspace = tasksForWorkspace.some(
-    (task) => task.id === activeTaskId,
-  );
+  const belongsToWorkspace = tasksForWorkspace.some((task) => task.id === activeTaskId);
   if (!belongsToWorkspace) {
     return activeTaskId;
   }
@@ -214,6 +391,18 @@ export type WorkspaceSource =
   | { kind: "local-web"; handleId: string; name: string }
   | { kind: "remote-agent"; url: string; token: string; label: string };
 
+/**
+ * Tracks the provenance of `rootPath`:
+ *  - "user-selected": the user pointed at a folder that already existed on disk
+ *    (e.g. via "Choose folder from file system…"). Removing the workspace must
+ *    NOT delete the folder.
+ *  - "app-created": the app itself created the folder (e.g. github clone).
+ *    Removing the workspace also removes the folder.
+ *  - undefined: legacy / unknown — treated as "user-selected" by the agent
+ *    (safe default, never delete).
+ */
+export type WorkspaceRootOwnership = "user-selected" | "app-created";
+
 // Workspace no longer carries branches — they live in branchesByWorkspaceId.
 export type Workspace = {
   id: string;
@@ -222,6 +411,7 @@ export type Workspace = {
   color: string;
   gitUrl?: string;
   rootPath?: string;
+  rootPathOwnership?: WorkspaceRootOwnership;
   source: WorkspaceSource;
   orgId: string;
 };
@@ -343,6 +533,9 @@ type State = {
   // in the buffering reducer below (2000 entries / task).
   taskEventsByTaskId: Record<string, import("@/lib/fs/remote-agent").TaskLogEntry[]>;
 
+  // Diff stat cache — keyed by taskId, 30s TTL
+  taskDiffStatById: Record<string, { value: TaskDiffStat; fetchedAt: number }>;
+
   // Client-side soft-delete tombstones. When the user removes a task we
   // record its id here so that it stays hidden even if the agent failed to
   // delete the SQLite row (e.g. running an older agent build). Persisted to
@@ -382,6 +575,7 @@ type State = {
   applyingFromUrl: boolean;
   activeAgent: TerminalKind;
   composerAgentByWorkspaceId: Record<string, TerminalKind | undefined>;
+  largeComposerDraftByWorkspaceId: Record<string, LargeComposerDraft | undefined>;
   previewMode: boolean;
   filesTab: "files" | "changes" | "checks";
   settingsSidebarCollapsed: boolean;
@@ -447,6 +641,7 @@ type State = {
   setApplyingFromUrl: (v: boolean) => void;
   setActiveAgent: (k: TerminalKind) => void;
   setComposerAgent: (workspaceId: string, cli: TerminalKind) => void;
+  setLargeComposerDraft: (workspaceId: string, draft: LargeComposerDraft | null) => void;
   setActiveSession: (sessionId: string) => void;
   closeSessionTab: (sessionId: string) => void;
   addAgentSession: (kind: TerminalKind) => string;
@@ -474,7 +669,11 @@ type State = {
   addWorkspace: (
     name: string,
     source?: WorkspaceSource,
-    opts?: { rootPath?: string; gitUrl?: string },
+    opts?: {
+      rootPath?: string;
+      gitUrl?: string;
+      rootPathOwnership?: WorkspaceRootOwnership;
+    },
   ) => string;
   updateWorkspace: (workspace: Workspace) => Promise<void>;
   addTask: (worktreeId: string, title: string, description?: string) => void;
@@ -516,12 +715,19 @@ type State = {
   setTaskDetailDialogOpen: (taskId: string | null) => void;
   createTaskFromPrompt: (
     prompt: string,
-    options?: { cli?: string; model?: string; effort?: string },
+    options?: {
+      cli?: string;
+      model?: string;
+      effort?: string;
+      parentTaskId?: string;
+      displayPrompt?: string;
+      attachments?: AgentTaskAttachment[];
+    },
   ) => Promise<import("@/lib/fs/remote-agent").Task | null>;
   continueTaskFromPrompt: (
     taskId: string,
     prompt: string,
-    options?: { model?: string; effort?: string },
+    options?: { model?: string; effort?: string; attachments?: AgentTaskAttachment[] },
   ) => Promise<void>;
   upsertTask: (task: import("@/lib/fs/remote-agent").Task) => void;
   removeTaskById: (taskId: string) => void;
@@ -532,8 +738,23 @@ type State = {
     cli: TerminalKind,
     opts?: { model?: string; effort?: string },
   ) => Promise<void>;
+  /** Spawn a specialized child task from the active task. */
+  spawnSpecializedSubagent: (preset: SpecializedSubagentPreset) => Promise<void>;
   /** Close and detach a session from its task (peer only, not primary). */
   detachCliFromTask: (sessionId: string) => Promise<void>;
+
+  // Section 3.1
+  loadTaskDiffStat: (taskId: string) => Promise<TaskDiffStat | null>;
+  selectTaskDiffStat: (taskId: string) => TaskDiffStat | null;
+
+  // Section 3.2
+  selectSessionsByKind: (workspaceId: string, kind: string) => WorkspaceTerminal[];
+
+  // Section 3.4
+  selectTaskTree: (workspaceId: string) => TaskNode[];
+  selectAgentThreads: (workspaceId: string) => AgentThreadView[];
+  selectActiveAgentThread: (workspaceId: string) => AgentThreadView | null;
+  setActiveThread: (threadId: string | null) => void;
 };
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
@@ -768,6 +989,34 @@ function makeScopeRootNode(_sk: ScopeKey): TreeNode {
   return { path: "", name: "", type: "dir", children: [], loaded: false };
 }
 
+function joinWorkspaceProviderPath(rootPath: string, relativePath: string): string {
+  const root = rootPath.replace(/\/+$/, "");
+  const relative = relativePath.replace(/^\/+/, "");
+  return relative ? `${root}/${relative}` : root;
+}
+
+function providerPathForWorkspace(ws: Workspace, relativePath: string): string {
+  if (ws.source.kind === "remote-agent" && ws.rootPath) {
+    return joinWorkspaceProviderPath(ws.rootPath, relativePath);
+  }
+  return relativePath;
+}
+
+function relativePathForWorkspace(ws: Workspace, providerPath: string): string {
+  if (ws.source.kind !== "remote-agent" || !ws.rootPath) return providerPath;
+  const root = ws.rootPath.replace(/\/+$/, "");
+  if (providerPath === root) return "";
+  if (providerPath.startsWith(`${root}/`)) return providerPath.slice(root.length + 1);
+  return providerPath;
+}
+
+function entriesForWorkspace(ws: Workspace, entries: FsEntry[]): FsEntry[] {
+  return entries.map((entry) => ({
+    ...entry,
+    path: relativePathForWorkspace(ws, entry.path),
+  }));
+}
+
 function isMockWorkspace(workspaces: Workspace[], workspaceId: string): boolean {
   const ws = workspaces.find((w) => w.id === workspaceId);
   return ws?.source.kind === "mock";
@@ -982,6 +1231,7 @@ export const useIDE = create<State>()(
       activeTaskId: null,
       taskDetailDialogTaskId: null,
       taskEventsByTaskId: {},
+      taskDiffStatById: {},
       dismissedTaskIds: [],
       worktreesByWorkspaceId: initialWorktrees,
       sessionsByWorkspaceId: {},
@@ -1000,6 +1250,7 @@ export const useIDE = create<State>()(
       applyingFromUrl: false,
       activeAgent: "claude",
       composerAgentByWorkspaceId: {},
+      largeComposerDraftByWorkspaceId: {},
       previewMode: false,
       filesTab: "files",
       settingsSidebarCollapsed: false,
@@ -1127,8 +1378,8 @@ export const useIDE = create<State>()(
             ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
           );
 
-          const raw = await provider.list("");
-          const entries = sortEntries(raw);
+          const raw = await provider.list(providerPathForWorkspace(ws, ""));
+          const entries = sortEntries(entriesForWorkspace(ws, raw));
           const children = entriesToTreeNodes(entries, "");
           const { fileTree, rootFiles } = flatFieldsFromEntries(entries);
 
@@ -1189,8 +1440,8 @@ export const useIDE = create<State>()(
             ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
           );
 
-          const raw = await provider.list(path);
-          const entries = sortEntries(raw);
+          const raw = await provider.list(providerPathForWorkspace(ws, path));
+          const entries = sortEntries(entriesForWorkspace(ws, raw));
           const children = entriesToTreeNodes(entries, path);
 
           set((s) => {
@@ -1242,9 +1493,9 @@ export const useIDE = create<State>()(
           );
 
           if (type === "dir") {
-            await provider.mkdir(fullPath);
+            await provider.mkdir(providerPathForWorkspace(ws, fullPath));
           } else {
-            await provider.writeFile(fullPath, "");
+            await provider.writeFile(providerPathForWorkspace(ws, fullPath), "");
           }
 
           if (parentPath === "") {
@@ -1277,7 +1528,7 @@ export const useIDE = create<State>()(
             ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
           );
 
-          await provider.remove(path);
+          await provider.remove(providerPathForWorkspace(ws, path));
 
           if (parentPath === "") {
             await get().loadRoot(sk);
@@ -1323,34 +1574,38 @@ export const useIDE = create<State>()(
                   ws.source.token,
                 );
                 await provider.connect();
-                const sessions = await persistence.sessions.list(provider, ws.id);
-                if (sessions.length === 0) {
+                try {
+                  const sessions = await persistence.sessions.list(provider, ws.id);
+                  if (sessions.length === 0) {
+                    anySuccess = true;
+                    continue;
+                  }
+                  const workspaceTerminals = sessions.map((s) => ({
+                    id: s.id,
+                    kind: (s.cli as import("@/store/ide").TerminalKind) ?? "codex",
+                    title: s.title ?? s.cli,
+                    status: (s.status === "busy" ? "busy" : "idle") as "ready" | "busy" | "idle",
+                    workspaceId: ws.id,
+                    lastCommand: s.cli,
+                  }));
+                  const sessionModes: Record<string, "chat" | "terminal"> = {};
+                  for (const s of sessions) {
+                    sessionModes[s.id] = s.mode ?? "chat";
+                  }
+                  set((cur) => ({
+                    sessionsByWorkspaceId: {
+                      ...cur.sessionsByWorkspaceId,
+                      [ws.id]: workspaceTerminals,
+                    },
+                    sessionModeBySessionId: {
+                      ...cur.sessionModeBySessionId,
+                      ...sessionModes,
+                    },
+                  }));
                   anySuccess = true;
-                  continue;
+                } finally {
+                  await provider.disconnect().catch(() => {});
                 }
-                const workspaceTerminals = sessions.map((s) => ({
-                  id: s.id,
-                  kind: (s.cli as import("@/store/ide").TerminalKind) ?? "codex",
-                  title: s.title ?? s.cli,
-                  status: (s.status === "busy" ? "busy" : "idle") as "ready" | "busy" | "idle",
-                  workspaceId: ws.id,
-                  lastCommand: s.cli,
-                }));
-                const sessionModes: Record<string, "chat" | "terminal"> = {};
-                for (const s of sessions) {
-                  sessionModes[s.id] = s.mode ?? "chat";
-                }
-                set((cur) => ({
-                  sessionsByWorkspaceId: {
-                    ...cur.sessionsByWorkspaceId,
-                    [ws.id]: workspaceTerminals,
-                  },
-                  sessionModeBySessionId: {
-                    ...cur.sessionModeBySessionId,
-                    ...sessionModes,
-                  },
-                }));
-                anySuccess = true;
               } catch (e) {
                 if (attempt === MAX_ATTEMPTS) {
                   console.warn(
@@ -1486,6 +1741,13 @@ export const useIDE = create<State>()(
           composerAgentByWorkspaceId: {
             ...s.composerAgentByWorkspaceId,
             [workspaceId]: cli,
+          },
+        })),
+      setLargeComposerDraft: (workspaceId, draft) =>
+        set((s) => ({
+          largeComposerDraftByWorkspaceId: {
+            ...s.largeComposerDraftByWorkspaceId,
+            [workspaceId]: draft ?? undefined,
           },
         })),
       togglePreview: () => set((s) => ({ previewMode: !s.previewMode })),
@@ -1664,6 +1926,7 @@ export const useIDE = create<State>()(
           orgId: get().currentOrgId ?? "personal-org",
           ...(opts?.rootPath ? { rootPath: opts.rootPath } : {}),
           ...(opts?.gitUrl ? { gitUrl: opts.gitUrl } : {}),
+          ...(opts?.rootPathOwnership ? { rootPathOwnership: opts.rootPathOwnership } : {}),
         };
         set((s) => ({
           workspaces: [...s.workspaces, workspace],
@@ -1907,10 +2170,12 @@ export const useIDE = create<State>()(
 
       setActiveSession: (sessionId) => {
         let nextActiveTaskId: string | null = null;
+        let nextComposerAgent: TerminalKind | undefined = undefined;
         set((s) => {
           const workspaceId = s.activeWorkspaceId;
           const sessions = s.sessionsByWorkspaceId[workspaceId] ?? [];
           const targetSession = sessions.find((session) => session.id === sessionId);
+          nextComposerAgent = targetSession?.kind;
           nextActiveTaskId = targetSession
             ? taskIdFromSession(targetSession, s.tasksByWorkspaceId[workspaceId] ?? [])
             : null;
@@ -1919,6 +2184,10 @@ export const useIDE = create<State>()(
             activeSessionIdByWorkspaceId: {
               ...s.activeSessionIdByWorkspaceId,
               [workspaceId]: sessionId,
+            },
+            composerAgentByWorkspaceId: {
+              ...s.composerAgentByWorkspaceId,
+              [workspaceId]: nextComposerAgent ?? s.activeAgent,
             },
             activeTaskId: sessionId ? nextActiveTaskId : null,
           };
@@ -2090,7 +2359,8 @@ export const useIDE = create<State>()(
             nextSessions[wsId] = list.filter((t) => t.id !== sessionId);
           }
           const nextActive: Record<string, string> = { ...s.activeSessionIdByWorkspaceId };
-          const currentActiveInNext = owningWorkspaceId !== undefined ? nextActive[owningWorkspaceId] : undefined;
+          const currentActiveInNext =
+            owningWorkspaceId !== undefined ? nextActive[owningWorkspaceId] : undefined;
           for (const [wsId, id] of Object.entries(nextActive)) {
             if (id === sessionId) {
               const remaining = nextSessions[wsId] ?? [];
@@ -2126,7 +2396,10 @@ export const useIDE = create<State>()(
               delete nextComposerAgents[owningWorkspaceId];
             }
           }
-          if (owningWorkspaceId !== undefined && (nextSessions[owningWorkspaceId] ?? []).length === 0) {
+          if (
+            owningWorkspaceId !== undefined &&
+            (nextSessions[owningWorkspaceId] ?? []).length === 0
+          ) {
             delete nextComposerAgents[owningWorkspaceId];
           }
           return {
@@ -2313,7 +2586,35 @@ export const useIDE = create<State>()(
       hydrateWorkspacesFromStorage: async (orgId) => {
         try {
           const workspaces = await storage.getWorkspaces(orgId);
-          set({ workspaces });
+          const endpoint = getEndpoint();
+          const normalizedWorkspaces = workspaces.map((workspace) => {
+            if (
+              !endpoint ||
+              workspace.source.kind !== "remote-agent" ||
+              workspace.source.url !== endpoint.url
+            ) {
+              return workspace;
+            }
+            return {
+              ...workspace,
+              source: {
+                ...workspace.source,
+                token: endpoint.token,
+                label: endpoint.label,
+              },
+            };
+          });
+          set({ workspaces: normalizedWorkspaces });
+          for (const workspace of normalizedWorkspaces) {
+            const original = workspaces.find((candidate) => candidate.id === workspace.id);
+            if (
+              original?.source.kind === "remote-agent" &&
+              workspace.source.kind === "remote-agent" &&
+              original.source.token !== workspace.source.token
+            ) {
+              void storage.putWorkspace(workspace.orgId, workspace).catch(console.warn);
+            }
+          }
         } catch (e) {
           console.warn("Failed to hydrate workspaces from storage:", e);
         }
@@ -2507,6 +2808,35 @@ export const useIDE = create<State>()(
             get().upsertTask(task);
           });
 
+          provider.onTaskQueued((e) => {
+            console.debug("[store.tasks] queued", e.taskId, e.reason);
+            set((s) => ({
+              tasksByWorkspaceId: {
+                ...s.tasksByWorkspaceId,
+                [workspaceId]: (s.tasksByWorkspaceId[workspaceId] ?? []).map((t) =>
+                  t.id === e.taskId
+                    ? {
+                        ...t,
+                        status: "queued",
+                        startedAt: null,
+                        endedAt: null,
+                        exitCode: null,
+                        errorMessage: null,
+                      }
+                    : t,
+                ),
+              },
+              sessionsByWorkspaceId: {
+                ...s.sessionsByWorkspaceId,
+                [workspaceId]: (s.sessionsByWorkspaceId[workspaceId] ?? []).map((session) =>
+                  session.taskRootId === e.taskId || session.taskId === e.taskId
+                    ? { ...session, status: "busy" }
+                    : session,
+                ),
+              },
+            }));
+          });
+
           provider.onTaskStarted((e) => {
             console.debug("[store.tasks] started", e.taskId);
             set((s) => ({
@@ -2676,38 +3006,58 @@ export const useIDE = create<State>()(
       },
 
       setActiveTask: (id) => {
-        set({ activeTaskId: id });
-        if (!id) return;
+        if (!id) {
+          set({ activeTaskId: null });
+          return;
+        }
+
         const state = get();
-        // Locate the workspace that owns this task to also activate its session tab.
+        // Locate the workspace that owns this task to activate the matching session tab.
+        let owningWorkspaceId: string | null = null;
+        let taskToActivate: import("@/lib/fs/remote-agent").Task | null = null;
         for (const [wsId, tasks] of Object.entries(state.tasksByWorkspaceId)) {
           const t = tasks.find((task) => task.id === id);
           if (t) {
-            const sessionId = t.sessionId ?? `${id}-session`;
-            const session = sessionForTask(t);
-            const next = state.sessionsByWorkspaceId[wsId] ?? [];
-            const hasTaskSession = next.some(
-              (entry) =>
-                entry.id === sessionId ||
-                entry.taskRootId === t.id ||
-                entry.taskId === t.id ||
-                entry.taskId === t.sessionId,
-            );
-            set((s) => ({
-              sessionsByWorkspaceId: hasTaskSession
-                ? s.sessionsByWorkspaceId
-                : {
-                    ...s.sessionsByWorkspaceId,
-                    [wsId]: [...(s.sessionsByWorkspaceId[wsId] ?? []), session],
-                  },
-              activeSessionIdByWorkspaceId: {
-                ...s.activeSessionIdByWorkspaceId,
-                [wsId]: sessionId,
-              },
-            }));
+            owningWorkspaceId = wsId;
+            taskToActivate = t;
             break;
           }
         }
+
+        if (!owningWorkspaceId || !taskToActivate) {
+          set({ activeTaskId: id });
+          return;
+        }
+
+        const sessionId = taskToActivate.sessionId ?? `${id}-session`;
+        const session = sessionForTask(taskToActivate);
+        const next = state.sessionsByWorkspaceId[owningWorkspaceId] ?? [];
+        const hasTaskSession = next.some(
+          (entry) =>
+            entry.id === sessionId ||
+            entry.taskRootId === taskToActivate.id ||
+            entry.taskId === taskToActivate.id ||
+            entry.taskId === taskToActivate.sessionId,
+        );
+
+        set((s) => ({
+          activeWorkspaceId: owningWorkspaceId,
+          activeTaskId: id,
+          sessionsByWorkspaceId: hasTaskSession
+            ? s.sessionsByWorkspaceId
+            : {
+                ...s.sessionsByWorkspaceId,
+                [owningWorkspaceId]: [
+                  ...(s.sessionsByWorkspaceId[owningWorkspaceId] ?? []),
+                  session,
+                ],
+              },
+          activeSessionIdByWorkspaceId: {
+            ...s.activeSessionIdByWorkspaceId,
+            [owningWorkspaceId]: sessionId,
+          },
+        }));
+
         if (!state.taskEventsByTaskId[id]) {
           void state.loadTaskLogs(id);
         }
@@ -2727,8 +3077,14 @@ export const useIDE = create<State>()(
         }
 
         const cli = options.cli && isTerminalKind(options.cli) ? options.cli : state.activeAgent;
-        const model = options.model ?? state.selectedModelByCli[cli];
+        const requestedModel = options.model ?? state.selectedModelByCli[cli];
+        const model =
+          cli === "claude"
+            ? resolveLaunchModel(cli, requestedModel, state.claudeContextOverride)
+            : requestedModel;
         const effort = options.effort;
+        const parentTaskId = options.parentTaskId;
+        const displayPrompt = options.displayPrompt ?? prompt;
 
         try {
           console.info(
@@ -2755,16 +3111,23 @@ export const useIDE = create<State>()(
 
           const { id: taskId, sessionId } = await provider.taskCreate({
             workspaceId: workspace.id,
-            title: prompt.split("\n")[0].slice(0, 60) || "Untitled task",
+            title: displayPrompt.split("\n")[0].slice(0, 60) || "Untitled task",
             prompt,
             cli,
             model,
             effort,
+            parentTaskId,
+            attachments: options.attachments,
           });
           console.info(
             `[store.createTaskFromPrompt] taskCreate ok id=${taskId} sessionId=${sessionId}`,
           );
-          const title = prompt.split("\n")[0].slice(0, 60) || "Untitled task";
+          const startResult = await provider.taskStart(taskId);
+          const startStatus = startResult?.status === "queued" ? "queued" : "running";
+          console.info(
+            `[store.createTaskFromPrompt] taskStart ok id=${taskId} status=${startStatus}`,
+          );
+          const title = displayPrompt.split("\n")[0].slice(0, 60) || "Untitled task";
           const cliKind = cli as TerminalKind;
 
           set((s) => {
@@ -2804,19 +3167,16 @@ export const useIDE = create<State>()(
             };
           });
 
-          await provider.taskStart(taskId);
-          console.info(`[store.createTaskFromPrompt] taskStart ok id=${taskId}`);
-
           const synthTask: import("@/lib/fs/remote-agent").Task = {
             id: taskId,
             sessionId,
             workspaceId: workspace.id,
-            title: prompt.split("\n")[0].slice(0, 40),
+            title: displayPrompt.split("\n")[0].slice(0, 40),
             prompt,
             cli,
             model: model ?? null,
             effort: effort ?? null,
-            status: "running",
+            status: startStatus,
             worktreePath: null,
             branchName: null,
             baseRef: null,
@@ -2825,8 +3185,9 @@ export const useIDE = create<State>()(
             agentSessionId: null,
             parentSessionId: null,
             createdAt: Date.now(),
-            startedAt: Date.now(),
+            startedAt: startStatus === "queued" ? null : Date.now(),
             endedAt: null,
+            parentTaskId: options?.parentTaskId ?? null,
           };
           set((s) => {
             // Dedup by id — if the `task.created` WS event already populated
@@ -2876,11 +3237,6 @@ export const useIDE = create<State>()(
           toast.error("Task workspace not found");
           return;
         }
-        if (task.status === "running" || task.status === "queued" || task.status === "awaiting") {
-          toast.error("Wait for the current turn to finish");
-          return;
-        }
-
         try {
           let provider = state.agentProvidersByWorkspaceId[workspace.id];
           if (!provider) {
@@ -2898,12 +3254,21 @@ export const useIDE = create<State>()(
             }));
           }
 
-          await provider.taskContinue({
+          const continueResult = await provider.taskContinue({
             taskId,
             prompt,
-            model: options.model,
+            model:
+              task.cli === "claude"
+                ? resolveLaunchModel(
+                    "claude",
+                    options.model ?? task.model ?? undefined,
+                    state.claudeContextOverride,
+                  )
+                : options.model,
             effort: options.effort,
+            attachments: options.attachments,
           });
+          const continueQueued = continueResult?.status === "queued";
 
           const cliKind = task.cli as TerminalKind;
           set((s) => {
@@ -2920,8 +3285,8 @@ export const useIDE = create<State>()(
                   t.id === taskId
                     ? {
                         ...t,
-                        status: "running",
-                        startedAt: Date.now(),
+                        status: continueQueued ? "queued" : "running",
+                        startedAt: continueQueued ? null : Date.now(),
                         endedAt: null,
                         exitCode: null,
                         errorMessage: null,
@@ -3159,6 +3524,47 @@ export const useIDE = create<State>()(
         }
       },
 
+      spawnSpecializedSubagent: async (preset) => {
+        const state = get();
+        const workspaceId = state.activeWorkspaceId;
+        const parentTaskId = state.activeTaskId;
+        const activeThread = state.selectActiveAgentThread(workspaceId);
+        if (!parentTaskId || !activeThread?.id) {
+          toast.error("No active task");
+          return;
+        }
+
+        const rootTaskId = activeThread.rootTaskId ?? activeThread.latestTaskId ?? parentTaskId;
+        const requestedModel = state.codexModel ?? state.selectedModelByCli.codex;
+        const promptPrefix = SPECIALIZED_SUBAGENT_PROMPT[preset];
+        const label = SPECIALIZED_SUBAGENT_LABEL[preset];
+        const prompt = `${promptPrefix}\n\nStart by inspecting the current app state and continue from the parent task context.`;
+
+        const createdTask = await get().createTaskFromPrompt(prompt, {
+          cli: "codex",
+          model: requestedModel,
+          effort: "high",
+          parentTaskId,
+          displayPrompt: label,
+        });
+        if (!createdTask) return;
+
+        set((s) => ({
+          activeTaskId: rootTaskId,
+          activeAgent: "codex",
+          activeSessionIdByWorkspaceId: {
+            ...s.activeSessionIdByWorkspaceId,
+            [workspaceId]: activeThread.id,
+          },
+          composerAgentByWorkspaceId: {
+            ...s.composerAgentByWorkspaceId,
+            [workspaceId]: "codex",
+          },
+        }));
+
+        void get().loadTaskLogs(createdTask.id);
+      },
+
       detachCliFromTask: async (sessionId) => {
         const state = get();
         // Find the workspace that owns this session
@@ -3193,6 +3599,124 @@ export const useIDE = create<State>()(
         } catch (err) {
           console.warn("[store.detachCliFromTask] failed:", err);
         }
+      },
+
+      // ─── Section 3.1 — diff stat ───────────────────────────────────────────
+
+      loadTaskDiffStat: async (taskId) => {
+        const state = get();
+        const cached = state.taskDiffStatById[taskId];
+        if (cached && Date.now() - cached.fetchedAt < 30_000) {
+          return cached.value;
+        }
+        // Find the workspace that owns this task to get a provider
+        let provider: RemoteAgentProvider | undefined;
+        for (const [wsId, tasks] of Object.entries(state.tasksByWorkspaceId)) {
+          if (tasks.some((t) => t.id === taskId)) {
+            provider = state.agentProvidersByWorkspaceId[wsId];
+            break;
+          }
+        }
+        if (!provider) return null;
+        try {
+          const result = await provider.call<TaskDiffStat>("task.diffStat", { taskId });
+          set((s) => ({
+            taskDiffStatById: {
+              ...s.taskDiffStatById,
+              [taskId]: { value: result, fetchedAt: Date.now() },
+            },
+          }));
+          return result;
+        } catch (err) {
+          console.warn("[store.loadTaskDiffStat] failed:", err);
+          return null;
+        }
+      },
+
+      selectTaskDiffStat: (taskId) => {
+        return get().taskDiffStatById[taskId]?.value ?? null;
+      },
+
+      // ─── Section 3.2 — sessions by kind ───────────────────────────────────
+
+      selectSessionsByKind: (workspaceId, kind) => {
+        const sessions = get().sessionsByWorkspaceId[workspaceId] ?? [];
+        return sessions.filter((s) => (s.kind as string) === kind);
+      },
+
+      // ─── Section 3.4 — task tree ───────────────────────────────────────────
+
+      selectTaskTree: (workspaceId) => {
+        const tasks = get().tasksByWorkspaceId[workspaceId] ?? [];
+        const nodeMap = new Map<string, TaskNode>();
+        for (const t of tasks) {
+          nodeMap.set(t.id, { ...t, children: [] });
+        }
+        const roots: TaskNode[] = [];
+        for (const node of nodeMap.values()) {
+          const parentId = node.parentTaskId;
+          if (parentId && nodeMap.has(parentId)) {
+            nodeMap.get(parentId)!.children.push(node);
+          } else {
+            roots.push(node);
+          }
+        }
+        return roots;
+      },
+
+      selectAgentThreads: (workspaceId) => {
+        const state = get();
+        return deriveAgentThreads(
+          workspaceId,
+          state.tasksByWorkspaceId[workspaceId] ?? [],
+          state.sessionsByWorkspaceId[workspaceId] ?? [],
+        );
+      },
+
+      selectActiveAgentThread: (workspaceId) => {
+        const state = get();
+        const threads = deriveAgentThreads(
+          workspaceId,
+          state.tasksByWorkspaceId[workspaceId] ?? [],
+          state.sessionsByWorkspaceId[workspaceId] ?? [],
+        );
+        const activeId = state.activeSessionIdByWorkspaceId[workspaceId];
+        return activeId ? (threads.find((thread) => thread.id === activeId) ?? null) : null;
+      },
+
+      setActiveThread: (threadId) => {
+        if (!threadId) {
+          get().setActiveSession("");
+          return;
+        }
+        const state = get();
+        const workspaceId = state.activeWorkspaceId;
+        const thread = deriveAgentThreads(
+          workspaceId,
+          state.tasksByWorkspaceId[workspaceId] ?? [],
+          state.sessionsByWorkspaceId[workspaceId] ?? [],
+        ).find((candidate) => candidate.id === threadId);
+        const rootTaskId = thread?.rootTaskId ?? thread?.latestTaskId ?? null;
+
+        set((s) => ({
+          activeSessionIdByWorkspaceId: {
+            ...s.activeSessionIdByWorkspaceId,
+            [workspaceId]: threadId,
+          },
+          activeTaskId: rootTaskId,
+          activeAgent: thread?.cli ?? s.activeAgent,
+          composerAgentByWorkspaceId: thread?.cli
+            ? {
+                ...s.composerAgentByWorkspaceId,
+                [workspaceId]: thread.cli,
+              }
+            : s.composerAgentByWorkspaceId,
+        }));
+
+        for (const task of thread?.tasks ?? []) {
+          if (!state.taskEventsByTaskId[task.id]) void state.loadTaskLogs(task.id);
+        }
+        if (rootTaskId) void state.openTaskSession(rootTaskId);
       },
 
       createFolder: (name) => {
@@ -3258,7 +3782,7 @@ export const useIDE = create<State>()(
               ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
             );
 
-            const text = await provider.readFile(path);
+            const text = await provider.readFile(providerPathForWorkspace(ws, path));
 
             set((s) => {
               const files = s.openFilesByScope[key] ?? [];
@@ -3309,7 +3833,7 @@ export const useIDE = create<State>()(
             ws.source.kind === "mock" ? MOCK_PROVIDER_TREE : undefined,
           );
 
-          await provider.writeFile(tab.path, tab.content);
+          await provider.writeFile(providerPathForWorkspace(ws, tab.path), tab.content);
 
           set((s) => {
             const f = s.openFilesByScope[key] ?? [];
@@ -3577,6 +4101,8 @@ export function useCurrentGitStatus(): GitStatusMap {
 import type { Task as RemoteTask, TaskLogEntry } from "@/lib/fs/remote-agent";
 
 const EMPTY_TASK_EVENTS: TaskLogEntry[] = [];
+const EMPTY_REMOTE_TASKS: RemoteTask[] = [];
+const EMPTY_WORKSPACE_TERMINALS: WorkspaceTerminal[] = [];
 
 export function useActiveTaskId(): string | null {
   return useIDE((s) => s.activeTaskId);
@@ -3599,6 +4125,26 @@ export function useActiveTaskEvents(): TaskLogEntry[] {
       ? (s.taskEventsByTaskId[s.activeTaskId] ?? EMPTY_TASK_EVENTS)
       : EMPTY_TASK_EVENTS,
   );
+}
+
+export function useCurrentAgentThreads(): AgentThreadView[] {
+  const workspaceId = useIDE((s) => s.activeWorkspaceId);
+  const tasks = useIDE((s) => s.tasksByWorkspaceId[workspaceId] ?? EMPTY_REMOTE_TASKS);
+  const sessions = useIDE((s) => s.sessionsByWorkspaceId[workspaceId] ?? EMPTY_WORKSPACE_TERMINALS);
+  return useMemo(
+    () => deriveAgentThreads(workspaceId, tasks, sessions),
+    [workspaceId, tasks, sessions],
+  );
+}
+
+export function useActiveAgentThread(): AgentThreadView | null {
+  const workspaceId = useIDE((s) => s.activeWorkspaceId);
+  const activeThreadId = useIDE((s) => s.activeSessionIdByWorkspaceId[workspaceId] ?? null);
+  const threads = useCurrentAgentThreads();
+  return useMemo(() => {
+    if (!activeThreadId) return null;
+    return threads.find((thread) => thread.id === activeThreadId) ?? null;
+  }, [activeThreadId, threads]);
 }
 
 export function useActiveTaskWorkspace(): Workspace | null {

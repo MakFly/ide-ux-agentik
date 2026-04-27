@@ -23,6 +23,14 @@ function formatCompact(n: number): string {
   return `${(n / 1_000_000).toFixed(n < 100_000 ? 2 : 1)}M`;
 }
 
+function formatPercent(pct: number): string {
+  const percent = pct * 100;
+  if (percent <= 0) return "0%";
+  if (percent < 0.1) return "<0.1%";
+  if (percent < 1) return `${percent.toFixed(1)}%`;
+  return `${Math.round(percent)}%`;
+}
+
 export const ContextRing: FC<{
   used: number;
   max: number;
@@ -69,7 +77,7 @@ export const ContextRing: FC<{
       </TooltipTrigger>
       <TooltipContent side="top" className="font-mono text-[11px]">
         <div className="font-medium">
-          {formatCompact(used)} / {formatCompact(max)} tokens ({Math.round(pct * 100)}%)
+          {formatCompact(used)} / {formatCompact(max)} tokens ({formatPercent(pct)})
         </div>
         {breakdown?.length ? (
           <div className="mt-1 space-y-0.5 text-muted-foreground">

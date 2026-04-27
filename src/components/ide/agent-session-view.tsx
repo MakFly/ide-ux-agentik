@@ -42,6 +42,8 @@ const AGENT_OPTIONS: Array<{ value: TerminalKind; label: string }> = [
   { value: "gemini", label: "Gemini" },
 ];
 
+const SPECIALIZED_OPTIONS = [{ value: "browser", label: "Browser" }] as const;
+
 /** Per-kind CLI args are derived from the store (user-selected model, etc.). */
 function argsFor(kind: TerminalKind, codexModel: string | undefined): string[] | undefined {
   if (kind === "codex") return codexExtraArgs(codexModel);
@@ -72,6 +74,7 @@ export function AgentSessionView({
   });
 
   const attachCliToActiveTask = useIDE((s) => s.attachCliToActiveTask);
+  const spawnSpecializedSubagent = useIDE((s) => s.spawnSpecializedSubagent);
   const detachCliFromTask = useIDE((s) => s.detachCliFromTask);
   const allSessions = useIDE((s) => s.sessionsByWorkspaceId[session.workspaceId] ?? []);
 
@@ -91,39 +94,40 @@ export function AgentSessionView({
   return (
     <div className="flex h-full flex-col bg-black">
       {/* Sub-tabs strip for multi-CLI tasks */}
-      {showSubTabs && (
+      {task && (
         <div className="flex items-center gap-1 border-b border-border bg-background/40 px-2 py-1">
-          {sessionList.map((s, idx) => {
-            const isPrimary = idx === 0;
-            return (
-              <div
-                key={s.id}
-                className="flex items-center gap-0.5 rounded border border-border/50 bg-background/60 px-2 py-1"
-              >
-                <button
-                  onClick={() => setActiveSubTabSessionId(s.id)}
-                  className={cn(
-                    "text-[11px] font-medium transition-colors",
-                    activeSession.id === s.id
-                      ? "text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                  title={`${s.kind} session`}
+          {showSubTabs &&
+            sessionList.map((s, idx) => {
+              const isPrimary = idx === 0;
+              return (
+                <div
+                  key={s.id}
+                  className="flex items-center gap-0.5 rounded border border-border/50 bg-background/60 px-2 py-1"
                 >
-                  {s.kind}
-                </button>
-                {!isPrimary && (
                   <button
-                    onClick={() => void detachCliFromTask(s.id)}
-                    className="ml-1 flex h-4 w-4 items-center justify-center text-muted-foreground hover:text-foreground"
-                    title="Detach session"
+                    onClick={() => setActiveSubTabSessionId(s.id)}
+                    className={cn(
+                      "text-[11px] font-medium transition-colors",
+                      activeSession.id === s.id
+                        ? "text-foreground"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                    title={`${s.kind} session`}
                   >
-                    <X className="h-2.5 w-2.5" />
+                    {s.kind}
                   </button>
-                )}
-              </div>
-            );
-          })}
+                  {!isPrimary && (
+                    <button
+                      onClick={() => void detachCliFromTask(s.id)}
+                      className="ml-1 flex h-4 w-4 items-center justify-center text-muted-foreground hover:text-foreground"
+                      title="Detach session"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
@@ -135,6 +139,20 @@ export function AgentSessionView({
                 <DropdownMenuItem
                   key={opt.value}
                   onClick={() => void attachCliToActiveTask(opt.value)}
+                >
+                  {opt.label}
+                </DropdownMenuItem>
+              ))}
+              <DropdownMenuItem
+                disabled
+                className="pointer-events-none mt-1 border-t border-border pt-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground opacity-100"
+              >
+                Specialized
+              </DropdownMenuItem>
+              {SPECIALIZED_OPTIONS.map((opt) => (
+                <DropdownMenuItem
+                  key={opt.value}
+                  onClick={() => void spawnSpecializedSubagent(opt.value)}
                 >
                   {opt.label}
                 </DropdownMenuItem>

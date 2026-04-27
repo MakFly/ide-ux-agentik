@@ -30,7 +30,9 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
-      testMatch: WITH_AGENT ? /.*\.spec\.ts/ : /(smoke|task-workflow)\.spec\.ts/,
+      testMatch: WITH_AGENT
+        ? /.*\.spec\.ts/
+        : /(smoke|task-workflow|workflow-task-tree|regression-disconnect-loop)\.spec\.ts$/,
     },
   ],
   webServer: {

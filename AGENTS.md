@@ -16,6 +16,14 @@
 - For JS and TS work, use `bun` and `bunx`.
 - Do not use `npm`, `npx`, `pnpm`, or `yarn` unless the repo clearly requires it.
 
+## Agent Thread Reasoning UI
+- The chat surface is `src/components/assistant-ui/thread.tsx`, but task-log to assistant-ui message conversion is owned by `src/components/ide/Workspace.tsx`.
+- If a reasoning block is missing, first inspect `~/.ide-ux-agentik/data.sqlite` `task_logs.data_json` for the active task. Do not assume the CLI emits assistant-ui `type: "reasoning"` parts.
+- Codex `exec --json` can report hidden reasoning only in usage (`reasoning_output_tokens`) while emitting interim `item.completed` `agent_message` entries such as "I will check...". In the UI, those interim `agent_message` entries should map to assistant-ui `type: "reasoning"` parts; only the last `agent_message` in a turn should render as final assistant text.
+- Claude Code's native Ctrl+O-style execution output is reconstructed from `stream-json`: map assistant `tool_use` / `input_json_delta` to assistant-ui `type: "tool-call"` parts and patch them with user `tool_result` output. Do not render Claude `tool_result` events as user chat bubbles, and do not create fake `reasoning` parts when Claude only sends a thinking signature.
+- `ReasoningGroup` lives in `src/components/assistant-ui/reasoning.tsx`. Keep the block open by default so the user sees the model's visible analysis/status text immediately after sending.
+- URLs with `?thread=<sessionId>` must hydrate tasks before calling `setActiveThread`; otherwise refresh can fall back to the empty "New Agent" composer even though the thread exists in SQLite.
+
 ## Delegation
 - Prefer custom subagents for parallelizable work instead of overloading the main thread.
 - Delegate automatically when the request semantically matches a specialized subagent, even if the user does not mention the subagent by name.

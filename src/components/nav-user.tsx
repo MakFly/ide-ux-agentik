@@ -92,8 +92,7 @@ export function NavUser() {
 				<DropdownMenuSeparator />
 				<DropdownMenuGroup>
 					<DropdownMenuItem
-						className="w-full cursor-pointer"
-						variant="destructive"
+						className="w-full cursor-pointer text-destructive focus:text-destructive"
 					>
 						<LogOutIcon
 						/>

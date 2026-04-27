@@ -21,28 +21,31 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useIDE } from "@/store/ide";
-import { pickDirectory, providerFor, isLocalWebSupported, type WorkspaceSource } from "@/lib/fs";
+import { providerFor, type WorkspaceSource } from "@/lib/fs";
 import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
 import { MOCK_ENABLED } from "@/lib/env";
 
-type TabKey = "local" | "remote" | "github" | "mock";
+type TabKey = "workspace" | "github" | "connect" | "mock";
 
 export type WorkspaceInput = {
   name: string;
   source?: WorkspaceSource;
-  opts?: { rootPath?: string; gitUrl?: string };
+  opts?: {
+    rootPath?: string;
+    gitUrl?: string;
+    rootPathOwnership?: "user-selected" | "app-created";
+  };
 };
-
-function defaultTab(): TabKey {
-  if (isLocalWebSupported()) return "local";
-  return "remote";
-}
 
 function repoBasename(url: string): string {
   // https://github.com/owner/repo(.git)? OR git@host:owner/repo(.git)?
   const cleaned = url.trim().replace(/\.git$/, "");
   const last = cleaned.split(/[/:]/).pop() ?? "";
   return last || "workspace";
+}
+
+function basenameFromPath(path: string): string {
+  return path.split("/").filter(Boolean).pop() || "workspace";
 }
 
 export type AddWorkspaceFormProps = {
@@ -56,9 +59,17 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
   const setActiveWorkspace = useIDE((s) => s.setActiveWorkspace);
   const workspaces = useIDE((s) => s.workspaces);
 
-  const [tab, setTab] = useState<TabKey>(defaultTab);
+  const initialHasRemoteAgents = workspaces.some((w) => w.source.kind === "remote-agent");
+  const [tab, setTab] = useState<TabKey>(initialHasRemoteAgents ? "workspace" : "connect");
 
   const [mockName, setMockName] = useState("");
+
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [workspaceNameDirty, setWorkspaceNameDirty] = useState(false);
+  const [workspacePath, setWorkspacePath] = useState("");
+  const [workspaceAgentId, setWorkspaceAgentId] = useState("");
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [workspacePickerBusy, setWorkspacePickerBusy] = useState(false);
 
   const [remoteUrl, setRemoteUrl] = useState("");
   const [remoteToken, setRemoteToken] = useState("");
@@ -80,6 +91,29 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
     () => workspaces.filter((w) => w.source.kind === "remote-agent"),
     [workspaces],
   );
+  const hasRemoteAgents = remoteAgentWorkspaces.length > 0;
+  const selectedWorkspaceAgent = useMemo(
+    () =>
+      remoteAgentWorkspaces.find((w) => w.id === workspaceAgentId) ??
+      remoteAgentWorkspaces[0] ??
+      null,
+    [remoteAgentWorkspaces, workspaceAgentId],
+  );
+
+  useEffect(() => {
+    if (hasRemoteAgents && tab === "connect") {
+      setTab("workspace");
+    }
+    if (!hasRemoteAgents && (tab === "workspace" || tab === "github")) {
+      setTab("connect");
+    }
+  }, [hasRemoteAgents, tab]);
+
+  useEffect(() => {
+    if (!workspaceAgentId && remoteAgentWorkspaces.length > 0) {
+      setWorkspaceAgentId(remoteAgentWorkspaces[0]!.id);
+    }
+  }, [remoteAgentWorkspaces, workspaceAgentId]);
 
   // Auto-derive workspace name + dest from URL unless user overrode.
   useEffect(() => {
@@ -101,30 +135,6 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
     const el = ghLogRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [ghLog]);
-
-  const onPickLocal = async () => {
-    try {
-      const { handleId, name } = await pickDirectory();
-      const source: WorkspaceSource = { kind: "local-web", handleId, name };
-      if (onSubmit) {
-        await onSubmit({ name, source });
-      } else {
-        const id = addWorkspace(name, source);
-        setActiveWorkspace(id);
-        toast.success(`Workspace "${name}" added (local folder)`);
-      }
-      onSuccess?.();
-    } catch (e) {
-      if (
-        e &&
-        typeof e === "object" &&
-        "name" in e &&
-        (e as { name?: string }).name === "AbortError"
-      )
-        return;
-      toast.error(e instanceof Error ? e.message : "Failed to pick folder");
-    }
-  };
 
   const onConnectRemote = async () => {
     const url = remoteUrl.trim();
@@ -161,6 +171,74 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
       toast.error(e instanceof Error ? e.message : "Could not connect to agent");
     } finally {
       setRemoteBusy(false);
+    }
+  };
+
+  const selectWorkspacePath = (path: string, name: string) => {
+    setWorkspacePath(path);
+    if (!workspaceNameDirty) {
+      setWorkspaceName(name || basenameFromPath(path));
+    }
+  };
+
+  const onPickWorkspaceFolder = async () => {
+    const target = selectedWorkspaceAgent;
+    if (!target || target.source.kind !== "remote-agent") {
+      toast.error("No connected agent is available");
+      return;
+    }
+    setWorkspacePickerBusy(true);
+    try {
+      const provider = (await providerFor(target.source, target.name)) as RemoteAgentProvider;
+      const picked = await provider.hostPickDirectory();
+      if (!picked) return;
+      selectWorkspacePath(picked.path, picked.name);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not open the system folder picker");
+    } finally {
+      setWorkspacePickerBusy(false);
+    }
+  };
+
+  const onOpenAgentWorkspace = async () => {
+    const name = workspaceName.trim();
+    const rootPath = workspacePath.trim();
+    if (!name || !rootPath) {
+      toast.error("Select a folder and confirm the workspace name");
+      return;
+    }
+    const target = selectedWorkspaceAgent;
+    if (!target || target.source.kind !== "remote-agent") {
+      toast.error("No connected agent is available");
+      return;
+    }
+    setWorkspaceBusy(true);
+    try {
+      const provider = (await providerFor(target.source, target.name)) as RemoteAgentProvider;
+      const stat = await provider.stat(rootPath);
+      if (stat.type !== "directory") {
+        toast.error(`Selected path is not a folder: ${rootPath}`);
+        return;
+      }
+      if (onSubmit) {
+        await onSubmit({
+          name,
+          source: target.source,
+          opts: { rootPath, rootPathOwnership: "user-selected" },
+        });
+      } else {
+        const id = addWorkspace(name, target.source, {
+          rootPath,
+          rootPathOwnership: "user-selected",
+        });
+        setActiveWorkspace(id);
+      }
+      toast.success(`Workspace opened from ${target.name}`);
+      onSuccess?.();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not open workspace on agent");
+    } finally {
+      setWorkspaceBusy(false);
     }
   };
 
@@ -223,10 +301,18 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
         await onSubmit({
           name,
           source: target.source,
-          opts: { rootPath: resolvedDest, gitUrl: url },
+          opts: {
+            rootPath: resolvedDest,
+            gitUrl: url,
+            rootPathOwnership: "app-created",
+          },
         });
       } else {
-        const id = addWorkspace(name, target.source, { rootPath: resolvedDest, gitUrl: url });
+        const id = addWorkspace(name, target.source, {
+          rootPath: resolvedDest,
+          gitUrl: url,
+          rootPathOwnership: "app-created",
+        });
         setActiveWorkspace(id);
       }
       if (install) {
@@ -247,25 +333,35 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
     }
   };
 
-  const visibleTabs = (MOCK_ENABLED ? 4 : 3) as 3 | 4;
-  const tabsListClass = visibleTabs === 4 ? "grid grid-cols-4" : "grid grid-cols-3";
+  const visibleTabs = (hasRemoteAgents ? 2 : 1) + (MOCK_ENABLED ? 1 : 0);
+  const tabsListClass =
+    visibleTabs === 3
+      ? "grid grid-cols-3"
+      : visibleTabs === 2
+        ? "grid grid-cols-2"
+        : "grid grid-cols-1";
 
   return (
     <>
       <Tabs value={tab} onValueChange={(v) => setTab(v as TabKey)} className="mt-2">
         <TabsList className={tabsListClass}>
-          <TabsTrigger value="local" disabled={!isLocalWebSupported()}>
-            <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
-            Local folder
-          </TabsTrigger>
-          <TabsTrigger value="remote">
-            <Server className="mr-1.5 h-3.5 w-3.5" />
-            Remote
-          </TabsTrigger>
-          <TabsTrigger value="github">
-            <GitBranch className="mr-1.5 h-3.5 w-3.5" />
-            GitHub
-          </TabsTrigger>
+          {hasRemoteAgents ? (
+            <>
+              <TabsTrigger value="workspace">
+                <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+                New workspace
+              </TabsTrigger>
+              <TabsTrigger value="github">
+                <GitBranch className="mr-1.5 h-3.5 w-3.5" />
+                Clone repo
+              </TabsTrigger>
+            </>
+          ) : (
+            <TabsTrigger value="connect">
+              <Server className="mr-1.5 h-3.5 w-3.5" />
+              Connect agent
+            </TabsTrigger>
+          )}
           {MOCK_ENABLED && (
             <TabsTrigger value="mock">
               <Sparkles className="mr-1.5 h-3.5 w-3.5" />
@@ -274,31 +370,91 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
           )}
         </TabsList>
 
-        <TabsContent value="local" className="space-y-3 py-4">
-          {!isLocalWebSupported() ? (
-            <p className="text-[13px] text-muted-foreground">
-              Your browser does not support picking folders. Use Chrome, Edge, Arc or Brave — or run
-              the desktop build (coming soon).
-            </p>
+        <TabsContent value="workspace" className="space-y-3 py-4">
+          <p className="text-[13px] text-muted-foreground">
+            Select an existing folder from this machine through the connected agent. The agent is
+            reused automatically, so the workspace opens directly with Agent State.
+          </p>
+          {remoteAgentWorkspaces.length > 1 ? (
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium text-muted-foreground">Machine</label>
+              <Select
+                value={workspaceAgentId}
+                onValueChange={(next) => {
+                  setWorkspaceAgentId(next);
+                  setWorkspacePath("");
+                  setWorkspaceName("");
+                  setWorkspaceNameDirty(false);
+                }}
+                disabled={workspaceBusy}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select machine" />
+                </SelectTrigger>
+                <SelectContent>
+                  {remoteAgentWorkspaces.map((w) => (
+                    <SelectItem key={w.id} value={w.id}>
+                      {w.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           ) : (
-            <>
-              <p className="text-[13px] text-muted-foreground">
-                Pick a folder on this machine. Read + write access is granted per-tab; you'll be
-                re-prompted when reopening the app.
-              </p>
-              <Button onClick={onPickLocal} className="w-full">
-                <FolderOpen className="mr-2 h-4 w-4" />
-                Pick folder…
-              </Button>
-            </>
+            <div className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-[12px] text-muted-foreground">
+              Machine:{" "}
+              <code className="font-mono text-[12px] text-foreground">
+                {selectedWorkspaceAgent?.name ?? "connected agent"}
+              </code>
+            </div>
           )}
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-12 w-full justify-center gap-2"
+            disabled={workspacePickerBusy || workspaceBusy}
+            onClick={onPickWorkspaceFolder}
+          >
+            <FolderOpen className="h-4 w-4" />
+            {workspacePickerBusy ? "Opening file system…" : "Choose folder from file system…"}
+          </Button>
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-muted-foreground">Selected folder</label>
+            <Input
+              value={workspacePath}
+              readOnly
+              placeholder="Choose a folder from the file system"
+              className="font-mono"
+              disabled={workspaceBusy}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-muted-foreground">Workspace name</label>
+            <Input
+              value={workspaceName}
+              onChange={(e) => {
+                setWorkspaceName(e.target.value);
+                setWorkspaceNameDirty(true);
+              }}
+              placeholder="Choose a folder first"
+              disabled={workspaceBusy}
+              onKeyDown={(e) => e.key === "Enter" && onOpenAgentWorkspace()}
+            />
+          </div>
+          <Button
+            onClick={onOpenAgentWorkspace}
+            disabled={workspaceBusy || !workspaceName.trim() || !workspacePath.trim()}
+            className="w-full"
+          >
+            <FolderOpen className="mr-2 h-4 w-4" />
+            {workspaceBusy ? "Opening…" : "Open folder as workspace"}
+          </Button>
         </TabsContent>
 
-        <TabsContent value="remote" className="space-y-3 py-4">
+        <TabsContent value="connect" className="space-y-3 py-4">
           <p className="text-[13px] text-muted-foreground">
-            Connect to an <code className="font-mono text-[12px]">ide-ux-agentik</code> agent
-            running on another machine. See{" "}
-            <code className="font-mono text-[12px]">agent/README.md</code> for install.
+            No connected agent is available yet. Connect one once, then new workspaces and GitHub
+            clones can be created on that agent without re-entering it.
           </p>
           <div className="space-y-1">
             <label className="text-[12px] font-medium text-muted-foreground">Agent URL</label>
@@ -331,7 +487,7 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
           </div>
           <Button onClick={onConnectRemote} disabled={remoteBusy} className="w-full">
             <Server className="mr-2 h-4 w-4" />
-            {remoteBusy ? "Connecting…" : "Connect"}
+            {remoteBusy ? "Connecting…" : "Connect remote agent"}
           </Button>
         </TabsContent>
 
@@ -339,20 +495,19 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
           {remoteAgentWorkspaces.length === 0 ? (
             <div className="space-y-3">
               <p className="text-[13px] text-muted-foreground">
-                Cloning a GitHub repo runs on the agent host (the browser cannot clone). Connect a
-                remote agent first.
+                Cloning a repository runs on an agent host so the created workspace keeps the Agent
+                State UI. Connect a remote agent first.
               </p>
-              <Button variant="secondary" onClick={() => setTab("remote")} className="w-full">
+              <Button variant="secondary" onClick={() => setTab("connect")} className="w-full">
                 <Server className="mr-2 h-4 w-4" />
-                Go to Remote tab
+                Connect a remote agent
               </Button>
             </div>
           ) : (
             <>
               <p className="text-[13px] text-muted-foreground">
-                Clone via the agent's <code className="font-mono text-[12px]">git</code> binary. SSH
-                (<code className="font-mono text-[12px]">git@…</code>) uses the agent host's{" "}
-                <code className="font-mono text-[12px]">ssh-agent</code>.
+                Clone a repository on an agent. The resulting workspace stays connected to that
+                agent and opens with Agent State, not the legacy local-folder UI.
               </p>
               <div className="space-y-1">
                 <label className="text-[12px] font-medium text-muted-foreground">
@@ -432,7 +587,7 @@ export function AddWorkspaceForm({ onSuccess, onCancel, onSubmit }: AddWorkspace
                 className="w-full"
               >
                 <GitBranch className="mr-2 h-4 w-4" />
-                {ghBusy ? "Cloning…" : "Clone & open"}
+                {ghBusy ? "Cloning…" : "Clone repository on agent"}
               </Button>
             </>
           )}
@@ -485,7 +640,7 @@ export function AddWorkspaceDialog({ open, onOpenChange }: DialogProps) {
         <DialogHeader>
           <DialogTitle>Add workspace</DialogTitle>
           <DialogDescription>
-            Open a local folder, connect a remote agent, or clone a GitHub repo.
+            Create a workspace on an existing agent or clone a repository on an agent.
           </DialogDescription>
         </DialogHeader>
         <AddWorkspaceForm onSuccess={close} />

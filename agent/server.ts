@@ -43,6 +43,32 @@ import {
   type DbTask,
 } from "./persistence/db.ts";
 import { importCodexRollouts } from "./persistence/import-codex.ts";
+import { logger, truncateForLog } from "./logger.ts";
+import {
+  getCliResumeStrategy,
+  isCliMissingResumeSession,
+  shouldRetryCliWithoutResume,
+} from "./session-resume.ts";
+import {
+  appendTaskAttachmentsToPrompt,
+  latestTaskAttachmentBatch,
+  type MaterializedTaskAttachment,
+  materializeTaskAttachments,
+  readTaskAttachments,
+  stageTaskAttachmentsForWorktree,
+} from "./task-attachments.ts";
+
+let fatalExitScheduled = false;
+process.on("uncaughtException", (error) => {
+  logger.exception("process.uncaught_exception", error);
+  if (!fatalExitScheduled) {
+    fatalExitScheduled = true;
+    setTimeout(() => process.exit(1), 100).unref();
+  }
+});
+process.on("unhandledRejection", (reason) => {
+  logger.exception("process.unhandled_rejection", reason);
+});
 
 // node-pty provides a real PTY. Required for interactive CLIs (codex, claude, vim).
 // The agent runs under Node because Bun's spawn path breaks PTY IO for some CLIs.
@@ -51,7 +77,9 @@ let nodePty: typeof import("node-pty") | null = null;
 try {
   nodePty = await import("node-pty");
 } catch {
-  console.warn("[agent] node-pty unavailable — interactive CLIs will not work");
+  logger.warn("agent.node_pty_unavailable", {
+    message: "node-pty unavailable; interactive CLIs will not work",
+  });
 }
 
 /** Host env vars safe to inherit in child processes. Secrets (AWS_*, GITHUB_TOKEN,
@@ -60,6 +88,7 @@ try {
 const SAFE_ENV_KEYS = [
   "PATH",
   "HOME",
+  "TASK_RUN_MS",
   "USER",
   "LANG",
   "LC_ALL",
@@ -80,6 +109,110 @@ function safeEnv(extra: Record<string, string> = {}): Record<string, string> {
     if (typeof v === "string") base[k] = v;
   }
   return { ...base, ...extra };
+}
+
+/**
+ * Allowlist of per-command argument patterns for exec.run.
+ * Commands not listed here accept any args (legacy behaviour — `return` early).
+ * Covered: git, node, bun, bunx, npm (matches DEFAULT_EXEC_ALLOWLIST).
+ */
+const EXEC_ARG_ALLOWLIST: Record<string, RegExp[]> = {
+  git: [
+    /^[a-z][a-z0-9-]+$/i,
+    /^--?[a-z][a-z0-9-]*(=.+)?$/,
+    /^[A-Za-z0-9_./-]+$/,
+    /^HEAD(~\d+)?$/,
+    /^[a-f0-9]{4,40}$/,
+  ],
+  node: [/^[A-Za-z0-9_./-]+\.(c?js|mjs|ts)$/],
+  bun: [/^run$/, /^[A-Za-z0-9_./-]+$/],
+  bunx: [/^[@A-Za-z0-9_./-]+$/, /^--?[a-z][a-z0-9-]*(=.+)?$/],
+  npm: [/^(install|i|ci|run|test|exec)$/, /^[A-Za-z0-9_@./-]+$/, /^--?[a-z][a-z0-9-]*(=.+)?$/],
+};
+
+function assertExecArgsAllowed(cmd: string, args: string[]): void {
+  const base = path.basename(cmd);
+  const patterns = EXEC_ARG_ALLOWLIST[base];
+  if (!patterns) return; // commands without allowlist accept any args (legacy behaviour)
+  for (const a of args) {
+    if (!patterns.some((rx) => rx.test(a))) {
+      throw new Error(`exec.run: arg "${a}" not allowed for "${base}"`);
+    }
+  }
+}
+
+/** Global deduplication guard: prevents the same taskId from being started twice
+ * across concurrent WebSocket connections or rapid re-sends. */
+const globalRunningTaskIds = new Set<string>();
+const maxConcurrentTasksEnv = Number.parseInt(process.env.TASK_MAX_CONCURRENT ?? "", 10);
+const MAX_CONCURRENT_TASKS =
+  Number.isFinite(maxConcurrentTasksEnv) && maxConcurrentTasksEnv > 0 ? maxConcurrentTasksEnv : 3;
+const globalPendingTaskIds: string[] = [];
+const globalQueuedTaskIds = new Set<string>();
+const globalQueuedTaskContinuations = new Map<
+  string,
+  { prompt: string; model?: string; effort?: string; attachments?: MaterializedTaskAttachment[] }
+>();
+
+function setQueuedContinuation(
+  taskId: string,
+  continuation?: {
+    prompt: string;
+    model?: string;
+    effort?: string;
+    attachments?: MaterializedTaskAttachment[];
+  },
+) {
+  if (continuation) {
+    globalQueuedTaskContinuations.set(taskId, continuation);
+    return;
+  }
+  globalQueuedTaskContinuations.delete(taskId);
+}
+
+function takeQueuedContinuation(taskId: string) {
+  const continuation = globalQueuedTaskContinuations.get(taskId);
+  if (continuation) globalQueuedTaskContinuations.delete(taskId);
+  return continuation;
+}
+
+function clearQueuedContinuation(taskId: string): void {
+  globalQueuedTaskContinuations.delete(taskId);
+}
+
+const MAX_INLINE_ATTACHMENT_PREVIEW_BYTES = 5 * 1024 * 1024;
+
+async function attachmentsForUserEvent(attachments: MaterializedTaskAttachment[]) {
+  return Promise.all(
+    attachments.map(async (attachment) => {
+      const isImage =
+        attachment.kind === "image" || attachment.contentType.toLowerCase().startsWith("image/");
+      const canInlinePreview = isImage && attachment.bytes <= MAX_INLINE_ATTACHMENT_PREVIEW_BYTES;
+      const data = canInlinePreview
+        ? await fs.readFile(attachment.path).then((buffer) => buffer.toString("base64"))
+        : undefined;
+
+      return {
+        name: attachment.name,
+        contentType: attachment.contentType,
+        kind: attachment.kind,
+        path: attachment.path,
+        bytes: attachment.bytes,
+        ...(data ? { data } : {}),
+      };
+    }),
+  );
+}
+
+/** Strip any client-supplied env key that is not in the server's SAFE_ENV_KEYS list. */
+function sanitizeClientEnv(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object") return {};
+  const allowed = new Set<string>(SAFE_ENV_KEYS as unknown as string[]);
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (allowed.has(k) && typeof v === "string") out[k] = v;
+  }
+  return out;
 }
 
 const ALLOWED_CHAT_FLAGS: Record<string, ReadonlySet<string>> = {
@@ -143,7 +276,14 @@ function buildTaskCommand(
   }
 
   if (cli === "claude") {
-    const args = ["-p", prompt, "--output-format", "stream-json", "--verbose"];
+    const args = [
+      "-p",
+      prompt,
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+    ];
     if (model) args.push("--model", model);
     if (effort) args.push("--effort", effort);
     if (agentSessionId) args.push("--resume", agentSessionId);
@@ -195,6 +335,22 @@ function taskCommandEnv(cli: string): Record<string, string> {
   return safeEnv(extra);
 }
 
+function summarizeTaskCommandArgs(args: string[]): string[] {
+  return args.slice(0, 8).map((arg, index) => {
+    const previous = args[index - 1];
+    if (previous === "-p" || previous === "--prompt") return "[prompt]";
+    if (previous === "--resume" || previous === "--session" || previous === "-r")
+      return "[session]";
+    return arg;
+  });
+}
+
+function isClaudeImageProcessingErrorEvent(evt: unknown): boolean {
+  if (!evt || typeof evt !== "object") return false;
+  const text = JSON.stringify(evt);
+  return text.includes("Could not process image");
+}
+
 function writeTaskStdin(proc: ChildProcess, stdinText: string | undefined): void {
   if (stdinText === undefined) return;
   proc.stdin?.write(stdinText);
@@ -241,6 +397,7 @@ function rowToWorkspace(row: import("./persistence/db.ts").DbWorkspaceRow) {
     color: row.color,
     gitUrl: row.git_url ?? undefined,
     rootPath: row.root_path ?? undefined,
+    rootPathOwnership: row.root_path_ownership ?? undefined,
     source,
   };
 }
@@ -376,6 +533,18 @@ openDb();
 importCodexRollouts().catch((e) => console.warn("[persistence] importCodexRollouts error:", e));
 
 function safeResolve(p: string): string {
+  if (path.isAbsolute(p)) {
+    const abs = path.resolve(p);
+    const homeDir = path.resolve(process.env.HOME || "/root");
+    const allowedRoots = Array.from(new Set([root, homeDir]));
+    const allowed = allowedRoots.some(
+      (allowedRoot) => abs === allowedRoot || abs.startsWith(allowedRoot + path.sep),
+    );
+    if (!allowed) {
+      throw new Error(`path escapes allowed roots: ${p}`);
+    }
+    return abs;
+  }
   const clean = p.replace(/^\/+/, "").replace(/\.\./g, "");
   const abs = path.resolve(root, clean);
   // Guard against prefix-confusion: "/root" must not match "/rootBis/...".
@@ -386,12 +555,89 @@ function safeResolve(p: string): string {
   return abs;
 }
 
+function workspaceRootFor(workspaceId: string): string {
+  const workspace = workspacesRepo.get(workspaceId);
+  if (!workspace?.root_path) return root;
+  return safeResolve(workspace.root_path);
+}
+
+function appleScriptString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function execFileText(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    cpExecFile(cmd, args, { encoding: "utf8", env: safeEnv() }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(String(stderr || err.message)));
+        return;
+      }
+      resolve({ stdout: stdout as string, stderr: stderr as string });
+    });
+  });
+}
+
+async function pickDirectoryWithNativeDialog(): Promise<{ path: string; name: string } | null> {
+  const homeDir = path.resolve(process.env.HOME || "/root");
+
+  if (process.platform === "darwin") {
+    try {
+      const script = [
+        `set chosenFolder to choose folder with prompt "Choose a workspace folder" default location POSIX file "${appleScriptString(homeDir)}"`,
+        "POSIX path of chosenFolder",
+      ].join("\n");
+      const { stdout } = await execFileText("osascript", ["-e", script]);
+      const selected = stdout.trim().replace(/\/+$/, "") || "/";
+      const resolved = safeResolve(selected);
+      const stat = await fs.stat(resolved);
+      if (!stat.isDirectory()) throw new Error(`selected path is not a folder: ${resolved}`);
+      return { path: resolved, name: path.basename(resolved) || resolved };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (/User canceled|cancelled|canceled/i.test(message)) return null;
+      throw e;
+    }
+  }
+
+  if (process.platform === "linux") {
+    try {
+      const { stdout } = await execFileText("zenity", [
+        "--file-selection",
+        "--directory",
+        "--title=Choose a workspace folder",
+        `--filename=${homeDir}/`,
+      ]);
+      const selected = stdout.trim().replace(/\/+$/, "") || "/";
+      const resolved = safeResolve(selected);
+      const stat = await fs.stat(resolved);
+      if (!stat.isDirectory()) throw new Error(`selected path is not a folder: ${resolved}`);
+      return { path: resolved, name: path.basename(resolved) || resolved };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (/cancel/i.test(message)) return null;
+      throw e;
+    }
+  }
+
+  throw new Error(`native folder picker is not supported on ${process.platform}`);
+}
+
 // Allowlists for spawnable commands. Without these, any authenticated client
 // could pass cmd: "bash -c <anything>" and obtain RCE on the agent host.
 // Override at boot via AGENT_ALLOWED_EXEC_CMDS / AGENT_ALLOWED_PTY_CMDS
 // (comma-separated lists). PTY default also includes the user's $SHELL basename.
 const DEFAULT_EXEC_ALLOWLIST = ["git", "node", "bun", "bunx", "npm", "npx", "pnpm", "yarn", "make"];
-const DEFAULT_PTY_ALLOWLIST = ["bash", "zsh", "sh", "fish", "codex", "claude", "gemini", "opencode"];
+const DEFAULT_PTY_ALLOWLIST = [
+  "bash",
+  "zsh",
+  "sh",
+  "fish",
+  "codex",
+  "claude",
+  "gemini",
+  "opencode",
+  "bun",
+];
 
 function parseAllowlist(envVar: string | undefined, fallback: string[]): Set<string> {
   if (!envVar) return new Set(fallback);
@@ -476,7 +722,6 @@ type Ctx = {
   gitCloneSessions: Map<string, GitCloneSession>;
   taskSessions: Map<string, TaskSession>;
   runningTasks: Set<string>;
-  pendingTasks: string[];
   ws: { send: (d: string) => void };
 };
 
@@ -485,10 +730,15 @@ type Handler = (params: Record<string, unknown>, ctx: Ctx) => Promise<unknown>;
 async function validateGitRepo(workspacePath: unknown): Promise<string> {
   const wp = String(workspacePath ?? "").trim();
   if (!wp) throw new Error("workspacePath is required");
-  // Constrain to the agent root: an authenticated client must not be able
-  // to point git operations at arbitrary repos on the host (e.g. ~/.ssh
-  // or another user's project).
-  const safe = safeResolve(wp);
+  // Constrain to the configured agent root or the user's HOME.
+  const safe = path.isAbsolute(wp) ? path.resolve(wp) : safeResolve(wp);
+  const homeDir = path.resolve(process.env.HOME || "/root");
+  const allowed = [root, homeDir].some(
+    (allowedRoot) => safe === allowedRoot || safe.startsWith(allowedRoot + path.sep),
+  );
+  if (!allowed) {
+    throw new Error(`path escapes root: ${workspacePath}`);
+  }
   try {
     const stat = await fs.stat(safe);
     if (!stat.isDirectory()) throw new Error(`not a directory: ${safe}`);
@@ -548,17 +798,38 @@ function parseGitStatus(output: string): { branch: string; files: GitEntry[] } {
   return { branch, files };
 }
 
-// Per-connection draining: pending tasks are owned by the ctx that queued them.
-// A previous version used a module-level `globalCtx` singleton which broke
-// when a second client connected (overwriting it) or when the owner
-// disconnected (silently stalling all queued tasks).
+// Global task queueing: tasks wait here when concurrency limit is reached.
+function enqueuePendingTask(taskId: string, allowRunning = false): void {
+  if (globalQueuedTaskIds.has(taskId)) return;
+  if (!allowRunning && globalRunningTaskIds.has(taskId)) return;
+  globalQueuedTaskIds.add(taskId);
+  globalPendingTaskIds.push(taskId);
+}
+
+function removeQueuedTask(taskId: string): void {
+  if (!globalQueuedTaskIds.delete(taskId)) return;
+  const idx = globalPendingTaskIds.indexOf(taskId);
+  if (idx !== -1) globalPendingTaskIds.splice(idx, 1);
+}
+
 function drainPendingTasks(ctx: Ctx) {
-  if (ctx.runningTasks.size >= 3) return;
-  const next = ctx.pendingTasks.shift();
-  if (!next) return;
-  methods["task.start"]({ id: next }, ctx).catch((e) =>
-    console.error("[task] drain error:", e),
-  );
+  while (globalRunningTaskIds.size < MAX_CONCURRENT_TASKS) {
+    const nextId = globalPendingTaskIds.shift();
+    if (!nextId) return;
+    const wasQueued = globalQueuedTaskIds.has(nextId);
+    removeQueuedTask(nextId);
+
+    const nextTask = tasksRepo.get(nextId);
+    if (!nextTask) continue;
+    const shouldSkipFinished = ["done", "failed", "cancelled"].includes(nextTask.status);
+    const isReplayQueued = globalQueuedTaskContinuations.has(nextId) || wasQueued;
+    if (shouldSkipFinished && !isReplayQueued) continue;
+    if (globalRunningTaskIds.has(nextId)) continue;
+
+    methods["task.start"]({ id: nextId }, ctx).catch((e) =>
+      console.error("[task] drain error:", e),
+    );
+  }
 }
 
 const methods: Record<string, Handler> = {
@@ -567,13 +838,22 @@ const methods: Record<string, Handler> = {
     ctx.authed = true;
     return { ok: true, root };
   },
+  async "host.home"() {
+    return { path: path.resolve(process.env.HOME || "/root") };
+  },
+  async "host.pickDirectory"() {
+    return pickDirectoryWithNativeDialog();
+  },
   async ls({ path: p }) {
-    const abs = safeResolve(String(p ?? ""));
+    const requested = String(p ?? "");
+    const abs = safeResolve(requested);
+    const absoluteRequest = path.isAbsolute(requested);
+    const relativeBase = requested.replace(/^\/+/, "");
     const items = await fs.readdir(abs, { withFileTypes: true });
     return items
       .map((d) => ({
         name: d.name,
-        path: path.posix.join(String(p ?? "").replace(/^\/+/, ""), d.name),
+        path: absoluteRequest ? path.join(abs, d.name) : path.posix.join(relativeBase, d.name),
         type: d.isDirectory() ? ("directory" as const) : ("file" as const),
       }))
       .sort((a, b) =>
@@ -648,6 +928,13 @@ const methods: Record<string, Handler> = {
     const spawnCmd = cmd ? String(cmd) : shell;
     assertSpawnAllowed(spawnCmd, PTY_ALLOWLIST, "pty");
     const spawnArgs: string[] = Array.isArray(args) ? (args as string[]) : cmd ? [] : ["-il"];
+
+    // Prevent shell injection via args on shell binaries (interactive mode only).
+    const SHELL_BINARIES = new Set(["bash", "zsh", "sh", "fish"]);
+    const baseName = path.basename(spawnCmd);
+    if (SHELL_BINARIES.has(baseName) && spawnArgs.length > 0) {
+      throw new Error("pty.spawn: shell binaries must not receive args (use interactive mode)");
+    }
     const termCols = typeof cols === "number" ? cols : 80;
     const termRows = typeof rows === "number" ? rows : 24;
 
@@ -659,10 +946,7 @@ const methods: Record<string, Handler> = {
     }
 
     const id = randomUUID();
-    const mergedEnv = safeEnv({
-      TERM: "xterm-256color",
-      ...((env as Record<string, string> | undefined) ?? {}),
-    });
+    const mergedEnv = safeEnv({ TERM: "xterm-256color", ...sanitizeClientEnv(env) });
 
     if (nodePty) {
       const ptyProc = nodePty.spawn(spawnCmd, spawnArgs, {
@@ -686,6 +970,7 @@ const methods: Record<string, Handler> = {
         ctx.ws.send(JSON.stringify({ jsonrpc: "2.0", method: "pty.data", params: { id, data } }));
       });
       ptyProc.onExit(({ exitCode, signal }) => {
+        if (!session.alive) return; // already killed explicitly — skip parasitic broadcast
         session.alive = false;
         ctx.ws.send(
           JSON.stringify({
@@ -962,7 +1247,18 @@ const methods: Record<string, Handler> = {
   // ─── Task RPC ──────────────────────────────────────────────────────────────
 
   async "task.create"(
-    { workspaceId, title, prompt, cli, model, effort, baseRef, parentSessionId },
+    {
+      workspaceId,
+      title,
+      prompt,
+      cli,
+      model,
+      effort,
+      baseRef,
+      parentSessionId,
+      parentTaskId,
+      attachments,
+    },
     _ctx,
   ) {
     const wid = String(workspaceId ?? "").trim();
@@ -972,6 +1268,10 @@ const methods: Record<string, Handler> = {
     const m = model !== undefined && model !== null ? String(model).trim() || undefined : undefined;
     const eff =
       effort !== undefined && effort !== null ? String(effort).trim() || undefined : undefined;
+    const ptid =
+      parentTaskId !== undefined && parentTaskId !== null
+        ? String(parentTaskId).trim() || undefined
+        : undefined;
     if (!wid) throw new Error("task.create: workspaceId is required");
     if (!t) throw new Error("task.create: title is required");
     if (!p) throw new Error("task.create: prompt is required");
@@ -980,9 +1280,10 @@ const methods: Record<string, Handler> = {
 
     const taskId = randomUUID();
     const sessionId = randomUUID();
+    const createdAttachments = await materializeTaskAttachments(root, taskId, attachments);
 
     console.info(
-      `[task.create] id=${taskId} sessionId=${sessionId} ws=${wid} cli=${c} model=${m ?? "(default)"} effort=${eff ?? "(default)"} title="${t.slice(0, 60)}"`,
+      `[task.create] id=${taskId} sessionId=${sessionId} ws=${wid} cli=${c} model=${m ?? "(default)"} effort=${eff ?? "(default)"} attachments=${createdAttachments.length} title="${t.slice(0, 60)}"`,
     );
 
     // Create session first to avoid FK violation when creating task
@@ -1003,15 +1304,28 @@ const methods: Record<string, Handler> = {
       effort: eff,
       parentSessionId: parentSessionId !== undefined ? String(parentSessionId) : undefined,
       sessionId,
+      parentTaskId: ptid,
     });
 
     // Attach the primary session to the task.
     taskSessionsRepo.attach(taskId, sessionId, "primary");
 
+    const userEvent = {
+      type: "user_message",
+      text: p,
+      attachments: await attachmentsForUserEvent(createdAttachments),
+    };
+    taskLogsRepo.append(taskId, "info", "stdout", userEvent);
+
     broadcastAuthed({
       jsonrpc: "2.0",
       method: "task.created",
       params: { task: createdTask, sessionId },
+    });
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.event",
+      params: { taskId, event: userEvent },
     });
 
     return { id: taskId, sessionId };
@@ -1031,6 +1345,332 @@ const methods: Record<string, Handler> = {
       since: typeof since === "number" ? since : undefined,
       limit: typeof limit === "number" ? Math.min(limit, 5000) : 1000,
     });
+  },
+
+  // ─── Section 3.1 — worktree diff stat ─────────────────────────────────────
+
+  async "task.diffStat"({ taskId }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.diffStat: taskId is required");
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.diffStat: task not found: ${tid}`);
+    if (!task.worktree_path) throw new Error("task.diffStat: worktree_path not set");
+    if (!task.base_ref) throw new Error("task.diffStat: base_ref not set");
+    if (!task.branch_name) throw new Error("task.diffStat: branch_name not set");
+
+    const worktreePath = task.worktree_path;
+    const baseRef = task.base_ref;
+
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      assertExecArgsAllowed("git", ["diff", "--numstat", `${baseRef}...HEAD`]);
+      cpExecFile(
+        "git",
+        ["diff", "--numstat", `${baseRef}...HEAD`],
+        { cwd: worktreePath, encoding: "utf8", env: safeEnv() },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`git diff --numstat failed: ${stderr || err.message}`));
+          else resolve({ stdout, stderr });
+        },
+      );
+    });
+
+    let totalAdded = 0;
+    let totalDeleted = 0;
+    const files: { path: string; added: number; deleted: number }[] = [];
+
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split("\t");
+      if (parts.length < 3) continue;
+      const added = parseInt(parts[0], 10);
+      const deleted = parseInt(parts[1], 10);
+      const filePath = parts[2];
+      if (isNaN(added) || isNaN(deleted)) continue; // binary file (shows "-")
+      totalAdded += added;
+      totalDeleted += deleted;
+      files.push({ path: filePath, added, deleted });
+    }
+
+    // Persist to task row
+    tasksRepo.update(tid, {
+      diff_added: totalAdded,
+      diff_deleted: totalDeleted,
+      diff_files_count: files.length,
+    });
+
+    return { added: totalAdded, deleted: totalDeleted, files };
+  },
+
+  // ─── Section 3.3 — task.files ──────────────────────────────────────────────
+
+  async "task.files"({ taskId }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.files: taskId is required");
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.files: task not found: ${tid}`);
+    if (!task.worktree_path) throw new Error("task.files: worktree_path not set");
+    if (!task.base_ref) throw new Error("task.files: base_ref not set");
+
+    const worktreePath = task.worktree_path;
+    const baseRef = task.base_ref;
+
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      cpExecFile(
+        "git",
+        ["diff", "--name-status", `${baseRef}...HEAD`],
+        { cwd: worktreePath, encoding: "utf8", env: safeEnv() },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`git diff --name-status failed: ${stderr || err.message}`));
+          else resolve({ stdout, stderr });
+        },
+      );
+    });
+
+    const STATUS_MAP: Record<string, "modified" | "added" | "deleted" | "renamed"> = {
+      M: "modified",
+      A: "added",
+      D: "deleted",
+      R: "renamed",
+    };
+
+    const files: { path: string; status: "modified" | "added" | "deleted" | "renamed" }[] = [];
+    for (const line of stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split("\t");
+      const statusChar = parts[0][0]; // e.g. "M", "A", "D", "R100"
+      const filePath = parts[parts.length - 1]; // renamed: parts[2], others: parts[1]
+      const status = STATUS_MAP[statusChar] ?? "modified";
+      files.push({ path: filePath, status });
+    }
+
+    return { files };
+  },
+
+  // ─── Section 3.3 — task.changes ────────────────────────────────────────────
+
+  async "task.changes"({ taskId, file }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.changes: taskId is required");
+    const filePath = String(file ?? "").trim();
+    if (!filePath) throw new Error("task.changes: file is required");
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.changes: task not found: ${tid}`);
+    if (!task.worktree_path) throw new Error("task.changes: worktree_path not set");
+    if (!task.base_ref) throw new Error("task.changes: base_ref not set");
+
+    const worktreePath = task.worktree_path;
+    const baseRef = task.base_ref;
+
+    // Prevent path traversal: safeResolve relative to worktree
+    const absWorktree = path.resolve(worktreePath);
+    const absFile = path.resolve(worktreePath, filePath);
+    if (absFile !== absWorktree && !absFile.startsWith(absWorktree + path.sep)) {
+      throw new Error("task.changes: file path escapes worktree");
+    }
+    // Use relative path in the git command
+    const relFile = path.relative(worktreePath, absFile);
+
+    const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      cpExecFile(
+        "git",
+        ["diff", `${baseRef}...HEAD`, "--", relFile],
+        { cwd: worktreePath, encoding: "utf8", env: safeEnv() },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`git diff failed: ${stderr || err.message}`));
+          else resolve({ stdout, stderr });
+        },
+      );
+    });
+
+    return { patch: stdout, file: filePath };
+  },
+
+  // ─── Section 3.3 — task.checks ─────────────────────────────────────────────
+
+  async "task.checks"({ taskId }, _ctx) {
+    const tid = String(taskId ?? "").trim();
+    if (!tid) throw new Error("task.checks: taskId is required");
+
+    const task = tasksRepo.get(tid);
+    if (!task) throw new Error(`task.checks: task not found: ${tid}`);
+    if (!task.worktree_path) throw new Error("task.checks: worktree_path not set");
+
+    const worktreePath = task.worktree_path;
+
+    // Run checks asynchronously; return immediately.
+    const runCheck = async (tool: "tsc" | "eslint") => {
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.checks.event",
+        params: { taskId: tid, tool, status: "running", stdout: "", stderr: "", exitCode: null },
+      });
+
+      const [cmd, ...args] = tool === "tsc" ? ["bunx", "tsc", "--noEmit"] : ["bunx", "eslint", "."];
+
+      const proc = cpSpawn(cmd, args, {
+        cwd: worktreePath,
+        env: safeEnv(),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      const collectStream = (stream: NodeJS.ReadableStream | null): Promise<string> =>
+        new Promise((resolve) => {
+          if (!stream) return resolve("");
+          const chunks: Buffer[] = [];
+          stream.on("data", (c: Buffer) => chunks.push(c));
+          stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+          stream.on("error", () => resolve(""));
+        });
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        collectStream(proc.stdout),
+        collectStream(proc.stderr),
+        new Promise<number | null>((resolve) => proc.on("exit", (c) => resolve(c))),
+      ]);
+
+      const status = exitCode === 0 ? "done" : "failed";
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.checks.event",
+        params: { taskId: tid, tool, status, stdout, stderr, exitCode },
+      });
+    };
+
+    // Fire and forget
+    Promise.all([runCheck("tsc"), runCheck("eslint")]).catch((err) => {
+      console.warn("[task.checks] error running checks:", err);
+    });
+
+    return { status: "running" };
+  },
+
+  // ─── Section 3.2 — session.spawnSetup / session.spawnRun ──────────────────
+
+  async "session.spawnSetup"({ workspaceId }, ctx) {
+    const wid = String(workspaceId ?? "").trim();
+    if (!wid) throw new Error("session.spawnSetup: workspaceId is required");
+    const workspaceRoot = workspaceRootFor(wid);
+
+    const id = randomUUID();
+    const ptyId = randomUUID();
+
+    sessionsRepo.create({
+      id,
+      workspaceId: wid,
+      cli: "setup",
+      title: "Setup",
+      mode: "terminal",
+      kind: "setup",
+    });
+
+    const shell = process.env.SHELL ?? "/bin/bash";
+
+    if (!nodePty) throw new Error("session.spawnSetup: node-pty unavailable");
+
+    const ptyProc = nodePty.spawn(shell, ["-il"], {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: workspaceRoot,
+      env: safeEnv({ TERM: "xterm-256color" }),
+    });
+
+    const session: PtySession = {
+      id: ptyId,
+      cmd: shell,
+      cwd: workspaceRoot,
+      alive: true,
+      pty: ptyProc,
+    };
+    ctx.ptySessions.set(ptyId, session);
+
+    ptyProc.onData((data) => {
+      ctx.ws.send(
+        JSON.stringify({ jsonrpc: "2.0", method: "pty.data", params: { id: ptyId, data } }),
+      );
+    });
+    ptyProc.onExit(({ exitCode, signal }) => {
+      if (!session.alive) return;
+      session.alive = false;
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "pty.exit",
+          params: { id: ptyId, code: exitCode, signal: signal ?? null },
+        }),
+      );
+      ctx.ptySessions.delete(ptyId);
+    });
+
+    return { id, ptyId };
+  },
+
+  async "session.spawnRun"({ workspaceId, script }, ctx) {
+    const wid = String(workspaceId ?? "").trim();
+    if (!wid) throw new Error("session.spawnRun: workspaceId is required");
+    const workspaceRoot = workspaceRootFor(wid);
+
+    const id = randomUUID();
+    const ptyId = randomUUID();
+
+    sessionsRepo.create({
+      id,
+      workspaceId: wid,
+      cli: "run",
+      title: script ? `bun run ${script}` : "Interactive",
+      mode: "terminal",
+      kind: "run",
+    });
+
+    const shell = process.env.SHELL ?? "/bin/bash";
+
+    if (!nodePty) throw new Error("session.spawnRun: node-pty unavailable");
+
+    const spawnCmd = script ? "bun" : shell;
+    const spawnArgs = script ? ["run", String(script)] : ["-il"];
+    assertSpawnAllowed(spawnCmd, PTY_ALLOWLIST, "pty");
+
+    const ptyProc = nodePty.spawn(spawnCmd, spawnArgs, {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: workspaceRoot,
+      env: safeEnv({ TERM: "xterm-256color" }),
+    });
+
+    const session: PtySession = {
+      id: ptyId,
+      cmd: spawnCmd,
+      cwd: workspaceRoot,
+      alive: true,
+      pty: ptyProc,
+    };
+    ctx.ptySessions.set(ptyId, session);
+
+    ptyProc.onData((data) => {
+      ctx.ws.send(
+        JSON.stringify({ jsonrpc: "2.0", method: "pty.data", params: { id: ptyId, data } }),
+      );
+    });
+    ptyProc.onExit(({ exitCode, signal }) => {
+      if (!session.alive) return;
+      session.alive = false;
+      ctx.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "pty.exit",
+          params: { id: ptyId, code: exitCode, signal: signal ?? null },
+        }),
+      );
+      ctx.ptySessions.delete(ptyId);
+    });
+
+    return { id, ptyId };
   },
 
   async "task.sessionList"({ taskId }, _ctx) {
@@ -1210,7 +1850,7 @@ const methods: Record<string, Handler> = {
     return { taskId: tid, sessionId, role: "peer" };
   },
 
-  async "task.continue"({ taskId, prompt, model, effort }, ctx) {
+  async "task.continue"({ taskId, prompt, model, effort, attachments }, ctx) {
     const tid = String(taskId ?? "").trim();
     const p = String(prompt ?? "").trim();
     const m = model !== undefined && model !== null ? String(model).trim() || undefined : undefined;
@@ -1224,30 +1864,81 @@ const methods: Record<string, Handler> = {
     if (!task) throw new Error(`task.continue: task not found: ${tid}`);
     if (!ALLOWED_CHAT_FLAGS[task.cli])
       throw new Error(`task.continue: unsupported cli "${task.cli}"`);
-    if (task.status === "running" || task.status === "queued" || task.status === "awaiting") {
-      throw new Error("task.continue: current turn is still running");
-    }
-    if (!task.worktree_path) {
-      throw new Error("task.continue: task worktree is not ready yet");
-    }
     if (!task.session_id) {
       throw new Error("task.continue: task has no persisted session");
     }
-    if (ctx.runningTasks.size >= 3) {
-      throw new Error("task.continue: concurrency limit reached");
+    const createdAttachments = await materializeTaskAttachments(root, tid, attachments);
+    const promptAttachments =
+      createdAttachments.length > 0
+        ? createdAttachments
+        : latestTaskAttachmentBatch(await readTaskAttachments(root, tid));
+    const userEvent = {
+      type: "user_message",
+      text: p,
+      attachments: await attachmentsForUserEvent(createdAttachments),
+    };
+    taskLogsRepo.append(tid, "info", "stdout", userEvent);
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.event",
+      params: { taskId: tid, event: userEvent },
+    });
+
+    const shouldQueue =
+      globalRunningTaskIds.has(tid) || globalRunningTaskIds.size >= MAX_CONCURRENT_TASKS;
+    const shouldQueueByWorktree = !task.worktree_path || task.status === "queued";
+    if (shouldQueue || shouldQueueByWorktree) {
+      setQueuedContinuation(tid, {
+        prompt: p,
+        model: m,
+        effort: eff,
+        attachments: promptAttachments,
+      });
+      enqueuePendingTask(tid, true);
+      tasksRepo.update(tid, {
+        status: "queued",
+        model: m,
+        effort: eff,
+        started_at: null,
+        ended_at: null,
+        exit_code: null,
+        error_message: null,
+      });
+      console.info(
+        `[task.continue] queued id=${tid} (running=${globalRunningTaskIds.has(tid)}, queuedByWorktree=${shouldQueueByWorktree})`,
+      );
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.queued",
+        params: {
+          taskId: tid,
+          reason: shouldQueue
+            ? `concurrency limit (${MAX_CONCURRENT_TASKS} running)`
+            : "worktree not ready",
+        },
+      });
+      return { status: "queued" };
     }
 
+    const runtimeAttachments = await stageTaskAttachmentsForWorktree(
+      task.worktree_path,
+      tid,
+      promptAttachments,
+    );
+    const agentPrompt = appendTaskAttachmentsToPrompt(p, runtimeAttachments);
+    clearQueuedContinuation(tid);
+    globalRunningTaskIds.add(tid);
     ctx.runningTasks.add(tid);
     tasksRepo.update(tid, {
       status: "running",
+      model: m,
+      effort: eff,
       started_at: Date.now(),
       ended_at: null,
       exit_code: null,
       error_message: null,
     });
 
-    const userEvent = { type: "user_message", text: p };
-    taskLogsRepo.append(tid, "info", "stdout", userEvent);
     broadcastAuthed({
       jsonrpc: "2.0",
       method: "task.started",
@@ -1258,53 +1949,92 @@ const methods: Record<string, Handler> = {
         branchName: task.branch_name,
       },
     });
-    broadcastAuthed({
-      jsonrpc: "2.0",
-      method: "task.event",
-      params: { taskId: tid, event: userEvent },
-    });
-
     const spawnContinueAsync = async () => {
-      const sessionId = task.session_id;
+      // task.session_id was guard-checked above (throw if null)
+      const sessionId = task.session_id!;
       const cliKind = task.cli;
-      const { execCmd, execArgs, stdinText } = buildTaskCommand(cliKind, p, {
-        model: m ?? task.model,
-        effort: eff ?? task.effort,
-        agentSessionId: task.agent_session_id,
-      });
-      const mergedEnv = taskCommandEnv(cliKind);
+      let latestAgentSessionId = task.agent_session_id;
 
-      console.info(
-        `[task.continue] id=${tid} sessionId=${sessionId} exec="${execCmd} ${execArgs.slice(0, 3).join(" ")}…" cwd=${task.worktree_path}`,
-      );
-      const proc = cpSpawn(execCmd, execArgs, {
-        cwd: task.worktree_path!,
-        env: mergedEnv,
-        stdio: [stdinText === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-      });
-      writeTaskStdin(proc, stdinText);
+      const finishRunningState = () => {
+        taskSessionsRepo.detach(sessionId);
+        ctx.taskSessions.delete(sessionId);
+        ctx.runningTasks.delete(tid);
+        globalRunningTaskIds.delete(tid);
+        drainPendingTasks(ctx);
+      };
 
-      const taskSession: TaskSession = { id: sessionId, taskId: tid, sessionId, proc, alive: true };
-      ctx.taskSessions.set(sessionId, taskSession);
+      const runAttempt = (agentSessionId: string | null | undefined, attempt: number): void => {
+        const resumeSessionId = agentSessionId || null;
+        const { execCmd, execArgs, stdinText } = buildTaskCommand(cliKind, agentPrompt, {
+          model: m ?? task.model,
+          effort: eff ?? task.effort,
+          agentSessionId: resumeSessionId,
+        });
+        const mergedEnv = taskCommandEnv(cliKind);
 
-      let buf = "";
-      proc.stdout?.setEncoding("utf8");
-      proc.stdout?.on("data", (chunk: string) => {
-        buf += chunk;
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) !== -1) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let evt: unknown;
-          try {
-            evt = JSON.parse(line);
-          } catch {
-            evt = { type: "raw", text: line };
+        logger.info("task.continue.spawn", {
+          taskId: tid,
+          sessionId,
+          cli: cliKind,
+          attempt,
+          hasResumeSession: Boolean(resumeSessionId),
+          cwd: task.worktree_path,
+          execCmd,
+          execArgs: summarizeTaskCommandArgs(execArgs),
+        });
+
+        const proc = cpSpawn(execCmd, execArgs, {
+          cwd: task.worktree_path!,
+          env: mergedEnv,
+          stdio: [stdinText === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+        });
+        writeTaskStdin(proc, stdinText);
+
+        const taskSession: TaskSession = {
+          id: sessionId,
+          taskId: tid,
+          sessionId,
+          proc,
+          alive: true,
+        };
+        ctx.taskSessions.set(sessionId, taskSession);
+
+        let buf = "";
+        let stderrText = "";
+        let sawMissingResumeSession = false;
+        let sawResumeImageProcessingError = false;
+        const resumeStrategy = getCliResumeStrategy(cliKind);
+        const bufferPotentialResumeStderr = Boolean(resumeStrategy && resumeSessionId);
+
+        const appendStdoutEvent = (evt: unknown) => {
+          if (
+            cliKind === "claude" &&
+            resumeSessionId &&
+            attempt === 0 &&
+            isClaudeImageProcessingErrorEvent(evt)
+          ) {
+            sawResumeImageProcessingError = true;
+            taskLogsRepo.append(tid, "warn", "diagnostic", {
+              type: "diagnostic",
+              level: "warn",
+              code: "cli_resume_image_processing_retry",
+              message:
+                "Claude resume context contains an image the API cannot process; retrying this turn without resume.",
+              agentSessionId: resumeSessionId,
+            });
+            return;
           }
-          const agentSessionId = extractAgentSessionId(evt);
-          if (agentSessionId && agentSessionId !== task.agent_session_id) {
-            tasksRepo.update(tid, { agent_session_id: agentSessionId });
+          const nextAgentSessionId = extractAgentSessionId(evt);
+          if (nextAgentSessionId && nextAgentSessionId !== latestAgentSessionId) {
+            latestAgentSessionId = nextAgentSessionId;
+            tasksRepo.update(tid, { agent_session_id: nextAgentSessionId });
+            logger.debug("task.continue.agent_session_updated", {
+              taskId: tid,
+              sessionId,
+              cli: cliKind,
+              attempt,
+              agentSessionId: nextAgentSessionId,
+            });
           }
           broadcastAuthed({
             jsonrpc: "2.0",
@@ -1312,217 +2042,24 @@ const methods: Record<string, Handler> = {
             params: { taskId: tid, event: evt },
           });
           taskLogsRepo.append(tid, "info", "stdout", evt);
-        }
-      });
+        };
 
-      proc.stderr?.setEncoding("utf8");
-      proc.stderr?.on("data", (chunk: string) => {
-        broadcastAuthed({
-          jsonrpc: "2.0",
-          method: "task.event",
-          params: { taskId: tid, event: { type: "stderr", text: chunk } },
-        });
-        taskLogsRepo.append(tid, "warn", "stderr", { text: chunk });
-      });
-
-      proc.on("exit", (code, signal) => {
-        if (!taskSession.alive) return;
-        taskSession.alive = false;
-
-        if (buf.trim()) {
+        const flushTrailingStdout = () => {
+          if (!buf.trim()) return;
           try {
-            const evt = JSON.parse(buf.trim());
-            const agentSessionId = extractAgentSessionId(evt);
-            if (agentSessionId && agentSessionId !== task.agent_session_id) {
-              tasksRepo.update(tid, { agent_session_id: agentSessionId });
-            }
-            broadcastAuthed({
-              jsonrpc: "2.0",
-              method: "task.event",
-              params: { taskId: tid, event: evt },
-            });
-            taskLogsRepo.append(tid, "info", "stdout", evt);
+            appendStdoutEvent(JSON.parse(buf.trim()));
           } catch {
-            /* ignore malformed trailing line */
+            logger.debug("task.continue.stdout_trailing_malformed", {
+              taskId: tid,
+              sessionId,
+              cli: cliKind,
+              attempt,
+              text: truncateForLog(buf.trim(), 500),
+            });
           }
           buf = "";
-        }
+        };
 
-        const finalStatus = code === 0 && signal === null ? ("done" as const) : ("failed" as const);
-        console.info(
-          `[task.continue.exit] id=${tid} status=${finalStatus} code=${code} signal=${signal ?? "none"}`,
-        );
-        tasksRepo.update(tid, {
-          status: finalStatus,
-          exit_code: code ?? undefined,
-          ended_at: Date.now(),
-        });
-        broadcastAuthed({
-          jsonrpc: "2.0",
-          method: "task.ended",
-          params: { taskId: tid, status: finalStatus, exitCode: code, errorMessage: signal },
-        });
-
-        taskSessionsRepo.detach(sessionId);
-        ctx.taskSessions.delete(sessionId);
-        ctx.runningTasks.delete(tid);
-        drainPendingTasks(ctx);
-      });
-
-      proc.on("error", (err) => {
-        if (!taskSession.alive) return;
-        taskSession.alive = false;
-        const errorMsg = err.message;
-        console.error(`[task.continue] proc error id=${tid}: ${errorMsg}`);
-        broadcastAuthed({
-          jsonrpc: "2.0",
-          method: "task.event",
-          params: { taskId: tid, event: { type: "error", message: errorMsg } },
-        });
-        taskLogsRepo.append(tid, "error", "spawn", { message: errorMsg });
-        tasksRepo.update(tid, {
-          status: "failed",
-          error_message: errorMsg,
-          ended_at: Date.now(),
-        });
-        broadcastAuthed({
-          jsonrpc: "2.0",
-          method: "task.ended",
-          params: { taskId: tid, status: "failed", exitCode: null, errorMessage: errorMsg },
-        });
-
-        taskSessionsRepo.detach(sessionId);
-        ctx.taskSessions.delete(sessionId);
-        ctx.runningTasks.delete(tid);
-        drainPendingTasks(ctx);
-      });
-    };
-
-    spawnContinueAsync().catch((e) => {
-      const errorMsg = (e as Error).message;
-      console.error(`[task.continue] uncaught FAILED id=${tid}: ${errorMsg}`);
-      taskLogsRepo.append(tid, "error", "spawn", { message: errorMsg });
-      tasksRepo.update(tid, {
-        status: "failed",
-        error_message: errorMsg,
-        ended_at: Date.now(),
-      });
-      broadcastAuthed({
-        jsonrpc: "2.0",
-        method: "task.ended",
-        params: { taskId: tid, status: "failed", exitCode: null, errorMessage: errorMsg },
-      });
-      ctx.runningTasks.delete(tid);
-      drainPendingTasks(ctx);
-    });
-
-    return { status: "running" };
-  },
-
-  async "task.start"({ id }, ctx) {
-    const taskId = String(id ?? "").trim();
-    if (!taskId) throw new Error("task.start: id is required");
-
-    const task = tasksRepo.get(taskId);
-    if (!task) throw new Error(`task.start: task not found: ${taskId}`);
-
-    if (ctx.runningTasks.size >= 3) {
-      ctx.pendingTasks.push(taskId);
-      tasksRepo.update(taskId, { status: "awaiting" });
-      console.info(`[task.start] queued id=${taskId} (concurrency cap reached: 3)`);
-      broadcastAuthed({
-        jsonrpc: "2.0",
-        method: "task.queued",
-        params: { taskId, reason: "concurrency limit (3 running)" },
-      });
-      return { status: "queued" };
-    }
-
-    ctx.runningTasks.add(taskId);
-    tasksRepo.update(taskId, { status: "running", started_at: Date.now() });
-    console.info(`[task.start] running id=${taskId}`);
-
-    broadcastAuthed({
-      jsonrpc: "2.0",
-      method: "task.started",
-      params: { taskId },
-    });
-
-    const spawnTaskAsync = async () => {
-      try {
-        const currentTask = tasksRepo.get(taskId);
-        if (!currentTask) {
-          ctx.runningTasks.delete(taskId);
-          drainPendingTasks(ctx);
-          return;
-        }
-
-        const gitRoot = root;
-        const worktreePath = path.join(root, ".multica", "tasks", taskId);
-        const branchName = `task/${slugify(currentTask.title)}-${taskId.slice(0, 8)}`;
-        const baseRef = currentTask.base_ref || (await getRemoteDefaultBranch(gitRoot));
-
-        console.info(
-          `[task.spawn] id=${taskId} worktree=${worktreePath} branch=${branchName} baseRef=${baseRef}`,
-        );
-        try {
-          await setupTaskWorktree(gitRoot, worktreePath, branchName, baseRef);
-        } catch (e) {
-          const errorMsg = (e as Error).message;
-          console.error(`[task.spawn] worktree setup FAILED id=${taskId}: ${errorMsg}`);
-          tasksRepo.update(taskId, {
-            status: "failed",
-            error_message: errorMsg,
-            ended_at: Date.now(),
-          });
-          broadcastAuthed({
-            jsonrpc: "2.0",
-            method: "task.ended",
-            params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
-          });
-          await autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
-          ctx.runningTasks.delete(taskId);
-          drainPendingTasks(ctx);
-          return;
-        }
-
-        tasksRepo.update(taskId, {
-          worktree_path: worktreePath,
-          branch_name: branchName,
-          base_ref: baseRef,
-        });
-
-        const cliKind = currentTask.cli;
-        const text = currentTask.prompt;
-        const { execCmd, execArgs, stdinText } = buildTaskCommand(cliKind, text, {
-          model: currentTask.model,
-          effort: currentTask.effort,
-          agentSessionId: currentTask.agent_session_id,
-        });
-
-        const mergedEnv = taskCommandEnv(cliKind);
-        // Session already exists from task.create — retrieve it instead of creating
-        const sessionId = currentTask.session_id;
-        if (!sessionId) {
-          throw new Error(
-            `[task.spawn] session_id missing for task ${taskId} — task.create should have created it atomically`,
-          );
-        }
-
-        console.info(
-          `[task.spawn] id=${taskId} sessionId=${sessionId} exec="${execCmd} ${execArgs.slice(0, 3).join(" ")}…" cwd=${worktreePath}`,
-        );
-        const proc = cpSpawn(execCmd, execArgs, {
-          cwd: worktreePath,
-          env: mergedEnv,
-          stdio: [stdinText === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-        });
-        writeTaskStdin(proc, stdinText);
-
-        const taskSession: TaskSession = { id: sessionId, taskId, sessionId, proc, alive: true };
-        ctx.taskSessions.set(sessionId, taskSession);
-
-        let buf = "";
         proc.stdout?.setEncoding("utf8");
         proc.stdout?.on("data", (chunk: string) => {
           buf += chunk;
@@ -1537,9 +2074,390 @@ const methods: Record<string, Handler> = {
             } catch {
               evt = { type: "raw", text: line };
             }
-            const agentSessionId = extractAgentSessionId(evt);
-            if (agentSessionId && agentSessionId !== currentTask.agent_session_id) {
-              tasksRepo.update(taskId, { agent_session_id: agentSessionId });
+            appendStdoutEvent(evt);
+          }
+        });
+
+        const emitStderr = (chunk: string) => {
+          logger.warn("task.continue.stderr", {
+            taskId: tid,
+            sessionId,
+            cli: cliKind,
+            attempt,
+            stderr: truncateForLog(chunk, 1_000),
+          });
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.event",
+            params: { taskId: tid, event: { type: "stderr", text: chunk } },
+          });
+          taskLogsRepo.append(tid, "warn", "stderr", { text: chunk });
+        };
+
+        proc.stderr?.setEncoding("utf8");
+        proc.stderr?.on("data", (chunk: string) => {
+          stderrText += chunk;
+          if (bufferPotentialResumeStderr) {
+            if (isCliMissingResumeSession(cliKind, stderrText)) {
+              sawMissingResumeSession = true;
+              logger.warn("task.continue.resume_missing_stderr", {
+                taskId: tid,
+                sessionId,
+                cli: cliKind,
+                attempt,
+                badAgentSessionId: resumeSessionId,
+                stderr: truncateForLog(stderrText, 500),
+              });
+            } else {
+              logger.debug("task.continue.stderr_buffered", {
+                taskId: tid,
+                sessionId,
+                cli: cliKind,
+                attempt,
+                stderr: truncateForLog(stderrText, 500),
+              });
+            }
+            return;
+          }
+
+          emitStderr(chunk);
+        });
+
+        proc.on("exit", (code, signal) => {
+          if (!taskSession.alive) return;
+          taskSession.alive = false;
+          flushTrailingStdout();
+
+          const finalStatus =
+            code === 0 && signal === null ? ("done" as const) : ("failed" as const);
+
+          const shouldRetryMissingResume = shouldRetryCliWithoutResume({
+            cli: cliKind,
+            resumeSessionId,
+            stderr: stderrText,
+            attempt,
+            failed: finalStatus === "failed" && sawMissingResumeSession,
+          });
+          const shouldRetryImageContext =
+            finalStatus === "failed" &&
+            Boolean(resumeSessionId) &&
+            attempt === 0 &&
+            sawResumeImageProcessingError;
+
+          if (shouldRetryMissingResume || shouldRetryImageContext) {
+            const retryCode = shouldRetryImageContext
+              ? "cli_resume_image_processing_retry"
+              : (resumeStrategy?.diagnosticCode ?? "cli_resume_missing_retry");
+            const retryMessage = shouldRetryImageContext
+              ? "Claude resume context contains an image the API cannot process; retrying this turn without resume."
+              : (resumeStrategy?.diagnosticMessage ??
+                "CLI resume session was stale; retrying this turn without resume.");
+            logger.warn("task.continue.resume_retry", {
+              taskId: tid,
+              sessionId,
+              cli: cliKind,
+              badAgentSessionId: resumeSessionId,
+              exitCode: code,
+              signal,
+              reason: retryCode,
+              stderr: truncateForLog(stderrText, 1_000),
+            });
+            taskLogsRepo.append(tid, "warn", "diagnostic", {
+              type: "diagnostic",
+              level: "warn",
+              code: retryCode,
+              message: retryMessage,
+              agentSessionId: resumeSessionId,
+            });
+            tasksRepo.update(tid, {
+              agent_session_id: null,
+              status: "running",
+              exit_code: null,
+              error_message: null,
+              ended_at: null,
+            });
+            latestAgentSessionId = null;
+            ctx.taskSessions.delete(sessionId);
+            runAttempt(null, attempt + 1);
+            return;
+          }
+
+          if (bufferPotentialResumeStderr && stderrText.trim()) {
+            emitStderr(stderrText);
+          }
+
+          logger.info("task.continue.exit", {
+            taskId: tid,
+            sessionId,
+            cli: cliKind,
+            attempt,
+            status: finalStatus,
+            exitCode: code,
+            signal,
+          });
+          tasksRepo.update(tid, {
+            status: finalStatus,
+            exit_code: code ?? undefined,
+            ended_at: Date.now(),
+          });
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.ended",
+            params: { taskId: tid, status: finalStatus, exitCode: code, errorMessage: signal },
+          });
+
+          finishRunningState();
+        });
+
+        proc.on("error", (err) => {
+          if (!taskSession.alive) return;
+          taskSession.alive = false;
+          const errorMsg = err.message;
+          logger.exception("task.continue.proc_error", err, {
+            taskId: tid,
+            sessionId,
+            cli: cliKind,
+            attempt,
+          });
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.event",
+            params: { taskId: tid, event: { type: "error", message: errorMsg } },
+          });
+          taskLogsRepo.append(tid, "error", "spawn", { message: errorMsg });
+          tasksRepo.update(tid, {
+            status: "failed",
+            error_message: errorMsg,
+            ended_at: Date.now(),
+          });
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.ended",
+            params: { taskId: tid, status: "failed", exitCode: null, errorMessage: errorMsg },
+          });
+
+          finishRunningState();
+        });
+      };
+
+      runAttempt(task.agent_session_id, 0);
+    };
+
+    spawnContinueAsync().catch((e) => {
+      const errorMsg = (e as Error).message;
+      logger.exception("task.continue.uncaught_failed", e, { taskId: tid });
+      taskLogsRepo.append(tid, "error", "spawn", { message: errorMsg });
+      tasksRepo.update(tid, {
+        status: "failed",
+        error_message: errorMsg,
+        ended_at: Date.now(),
+      });
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.ended",
+        params: { taskId: tid, status: "failed", exitCode: null, errorMessage: errorMsg },
+      });
+      ctx.runningTasks.delete(tid);
+      globalRunningTaskIds.delete(tid);
+      drainPendingTasks(ctx);
+    });
+
+    return { status: "running" };
+  },
+
+  async "task.start"({ id }, ctx) {
+    const taskId = String(id ?? "").trim();
+    if (!taskId) throw new Error("task.start: id is required");
+
+    // Global deduplication guard across all connections.
+    if (globalRunningTaskIds.has(taskId)) {
+      removeQueuedTask(taskId);
+      throw new Error(`task.start: task ${taskId} already running`);
+    }
+
+    const task = tasksRepo.get(taskId);
+    if (!task) {
+      throw new Error(`task.start: task not found: ${taskId}`);
+    }
+
+    removeQueuedTask(taskId);
+    if (globalRunningTaskIds.size >= MAX_CONCURRENT_TASKS) {
+      enqueuePendingTask(taskId);
+      tasksRepo.update(taskId, {
+        status: "queued",
+        started_at: null,
+        ended_at: null,
+        exit_code: null,
+        error_message: null,
+      });
+      console.info(
+        `[task.start] queued id=${taskId} (concurrency cap reached: ${MAX_CONCURRENT_TASKS})`,
+      );
+      broadcastAuthed({
+        jsonrpc: "2.0",
+        method: "task.queued",
+        params: { taskId, reason: `concurrency limit (${MAX_CONCURRENT_TASKS} running)` },
+      });
+      return { status: "queued" };
+    }
+
+    globalRunningTaskIds.add(taskId);
+    ctx.runningTasks.add(taskId);
+    tasksRepo.update(taskId, { status: "running", started_at: Date.now() });
+    console.info(`[task.start] running id=${taskId}`);
+
+    broadcastAuthed({
+      jsonrpc: "2.0",
+      method: "task.started",
+      params: { taskId },
+    });
+
+    const spawnTaskAsync = async () => {
+      try {
+        const currentTask = tasksRepo.get(taskId);
+        if (!currentTask) {
+          globalRunningTaskIds.delete(taskId);
+          ctx.runningTasks.delete(taskId);
+          drainPendingTasks(ctx);
+          return;
+        }
+
+        const gitRoot = workspaceRootFor(currentTask.workspace_id);
+        const fallbackBranchName = `task/${slugify(currentTask.title)}-${taskId.slice(0, 8)}`;
+        const worktreePath =
+          currentTask.worktree_path ?? path.join(gitRoot, ".multica", "tasks", taskId);
+        const branchName = currentTask.branch_name ?? fallbackBranchName;
+        const baseRef = currentTask.base_ref || (await getRemoteDefaultBranch(gitRoot));
+
+        console.info(
+          `[task.spawn] id=${taskId} worktree=${worktreePath} branch=${branchName} baseRef=${baseRef}`,
+        );
+        try {
+          let shouldSetupWorktree = false;
+          if (!currentTask.worktree_path || !currentTask.branch_name) {
+            shouldSetupWorktree = true;
+          } else {
+            try {
+              await fs.access(worktreePath);
+            } catch {
+              shouldSetupWorktree = true;
+            }
+          }
+          if (shouldSetupWorktree) {
+            await setupTaskWorktree(gitRoot, worktreePath, branchName, baseRef);
+          }
+        } catch (e) {
+          const errorMsg = (e as Error).message;
+          console.error(`[task.spawn] worktree setup FAILED id=${taskId}: ${errorMsg}`);
+          tasksRepo.update(taskId, {
+            status: "failed",
+            error_message: errorMsg,
+            ended_at: Date.now(),
+          });
+          broadcastAuthed({
+            jsonrpc: "2.0",
+            method: "task.ended",
+            params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
+          });
+          await autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
+          globalRunningTaskIds.delete(taskId);
+          ctx.runningTasks.delete(taskId);
+          drainPendingTasks(ctx);
+          return;
+        }
+
+        tasksRepo.update(taskId, {
+          worktree_path: worktreePath,
+          branch_name: branchName,
+          base_ref: baseRef,
+        });
+
+        const continuation = takeQueuedContinuation(taskId);
+        const cliKind = currentTask.cli;
+        const initialAttachments =
+          continuation === undefined ? await readTaskAttachments(root, taskId) : [];
+        const runtimeAttachments =
+          continuation === undefined
+            ? await stageTaskAttachmentsForWorktree(worktreePath, taskId, initialAttachments)
+            : await stageTaskAttachmentsForWorktree(
+                worktreePath,
+                taskId,
+                continuation.attachments ?? [],
+              );
+        const text =
+          continuation !== undefined
+            ? appendTaskAttachmentsToPrompt(continuation.prompt, runtimeAttachments)
+            : appendTaskAttachmentsToPrompt(currentTask.prompt, runtimeAttachments);
+        // Session already exists from task.create — retrieve it instead of creating
+        const sessionId = currentTask.session_id;
+        if (!sessionId) {
+          throw new Error(
+            `[task.spawn] session_id missing for task ${taskId} — task.create should have created it atomically`,
+          );
+        }
+        let latestAgentSessionId = currentTask.agent_session_id;
+
+        const runTaskAttempt = (
+          agentSessionId: string | null | undefined,
+          attempt: number,
+        ): void => {
+          const resumeSessionId = agentSessionId || null;
+          const { execCmd, execArgs, stdinText } = buildTaskCommand(cliKind, text, {
+            model: continuation?.model ?? currentTask.model,
+            effort: continuation?.effort ?? currentTask.effort,
+            agentSessionId: resumeSessionId,
+          });
+          const mergedEnv = taskCommandEnv(cliKind);
+
+          logger.info("task.spawn.process", {
+            taskId,
+            sessionId,
+            cli: cliKind,
+            attempt,
+            hasResumeSession: Boolean(resumeSessionId),
+            cwd: worktreePath,
+            execCmd,
+            execArgs: summarizeTaskCommandArgs(execArgs),
+          });
+          const proc = cpSpawn(execCmd, execArgs, {
+            cwd: worktreePath,
+            env: mergedEnv,
+            stdio: [stdinText === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+          });
+          writeTaskStdin(proc, stdinText);
+
+          const taskSession: TaskSession = { id: sessionId, taskId, sessionId, proc, alive: true };
+          ctx.taskSessions.set(sessionId, taskSession);
+
+          let buf = "";
+          let stderrText = "";
+          let sawMissingResumeSession = false;
+          let sawResumeImageProcessingError = false;
+          const resumeStrategy = getCliResumeStrategy(cliKind);
+          const bufferPotentialResumeStderr = Boolean(resumeStrategy && resumeSessionId);
+
+          const appendStdoutEvent = (evt: unknown) => {
+            if (
+              cliKind === "claude" &&
+              resumeSessionId &&
+              attempt === 0 &&
+              isClaudeImageProcessingErrorEvent(evt)
+            ) {
+              sawResumeImageProcessingError = true;
+              taskLogsRepo.append(taskId, "warn", "diagnostic", {
+                type: "diagnostic",
+                level: "warn",
+                code: "cli_resume_image_processing_retry",
+                message:
+                  "Claude resume context contains an image the API cannot process; retrying this turn without resume.",
+                agentSessionId: resumeSessionId,
+              });
+              return;
+            }
+            const nextAgentSessionId = extractAgentSessionId(evt);
+            if (nextAgentSessionId && nextAgentSessionId !== latestAgentSessionId) {
+              latestAgentSessionId = nextAgentSessionId;
+              tasksRepo.update(taskId, { agent_session_id: nextAgentSessionId });
             }
             broadcastAuthed({
               jsonrpc: "2.0",
@@ -1547,98 +2465,201 @@ const methods: Record<string, Handler> = {
               params: { taskId, event: evt },
             });
             taskLogsRepo.append(taskId, "info", "stdout", evt);
-          }
-        });
+          };
 
-        proc.stderr?.setEncoding("utf8");
-        proc.stderr?.on("data", (chunk: string) => {
-          broadcastAuthed({
-            jsonrpc: "2.0",
-            method: "task.event",
-            params: { taskId, event: { type: "stderr", text: chunk } },
-          });
-          taskLogsRepo.append(taskId, "warn", "stderr", { text: chunk });
-        });
-
-        proc.on("exit", (code, signal) => {
-          if (!taskSession.alive) return;
-          taskSession.alive = false;
-
-          if (buf.trim()) {
+          const flushTrailingStdout = () => {
+            if (!buf.trim()) return;
             try {
-              const evt = JSON.parse(buf.trim());
-              const agentSessionId = extractAgentSessionId(evt);
-              if (agentSessionId && agentSessionId !== currentTask.agent_session_id) {
-                tasksRepo.update(taskId, { agent_session_id: agentSessionId });
-              }
-              broadcastAuthed({
-                jsonrpc: "2.0",
-                method: "task.event",
-                params: { taskId, event: evt },
-              });
-              taskLogsRepo.append(taskId, "info", "stdout", evt);
+              appendStdoutEvent(JSON.parse(buf.trim()));
             } catch {
-              /* ignore malformed trailing line */
+              logger.debug("task.spawn.stdout_trailing_malformed", {
+                taskId,
+                sessionId,
+                cli: cliKind,
+                attempt,
+                text: truncateForLog(buf.trim(), 500),
+              });
             }
             buf = "";
-          }
+          };
 
-          const finalStatus =
-            code === 0 && signal === null ? ("done" as const) : ("failed" as const);
-          console.info(
-            `[task.exit] id=${taskId} status=${finalStatus} code=${code} signal=${signal ?? "none"}`,
-          );
-          tasksRepo.update(taskId, {
-            status: finalStatus,
-            exit_code: code ?? undefined,
-            ended_at: Date.now(),
+          proc.stdout?.setEncoding("utf8");
+          proc.stdout?.on("data", (chunk: string) => {
+            buf += chunk;
+            let nl: number;
+            while ((nl = buf.indexOf("\n")) !== -1) {
+              const line = buf.slice(0, nl).trim();
+              buf = buf.slice(nl + 1);
+              if (!line) continue;
+              let evt: unknown;
+              try {
+                evt = JSON.parse(line);
+              } catch {
+                evt = { type: "raw", text: line };
+              }
+              appendStdoutEvent(evt);
+            }
           });
 
-          broadcastAuthed({
-            jsonrpc: "2.0",
-            method: "task.ended",
-            params: { taskId, status: finalStatus, exitCode: code, errorMessage: signal },
+          const emitStderr = (chunk: string) => {
+            broadcastAuthed({
+              jsonrpc: "2.0",
+              method: "task.event",
+              params: { taskId, event: { type: "stderr", text: chunk } },
+            });
+            taskLogsRepo.append(taskId, "warn", "stderr", { text: chunk });
+          };
+
+          proc.stderr?.setEncoding("utf8");
+          proc.stderr?.on("data", (chunk: string) => {
+            stderrText += chunk;
+            if (bufferPotentialResumeStderr) {
+              if (isCliMissingResumeSession(cliKind, stderrText)) {
+                sawMissingResumeSession = true;
+                logger.warn("task.spawn.resume_missing_stderr", {
+                  taskId,
+                  sessionId,
+                  cli: cliKind,
+                  attempt,
+                  badAgentSessionId: resumeSessionId,
+                  stderr: truncateForLog(stderrText, 500),
+                });
+              } else {
+                logger.debug("task.spawn.stderr_buffered", {
+                  taskId,
+                  sessionId,
+                  cli: cliKind,
+                  attempt,
+                  stderr: truncateForLog(stderrText, 500),
+                });
+              }
+              return;
+            }
+            emitStderr(chunk);
           });
 
-          if (finalStatus === "failed") {
+          proc.on("exit", (code, signal) => {
+            if (!taskSession.alive) return;
+            taskSession.alive = false;
+            flushTrailingStdout();
+
+            const finalStatus =
+              code === 0 && signal === null ? ("done" as const) : ("failed" as const);
+
+            const shouldRetryMissingResume = shouldRetryCliWithoutResume({
+              cli: cliKind,
+              resumeSessionId,
+              stderr: stderrText,
+              attempt,
+              failed: finalStatus === "failed" && sawMissingResumeSession,
+            });
+            const shouldRetryImageContext =
+              finalStatus === "failed" &&
+              Boolean(resumeSessionId) &&
+              attempt === 0 &&
+              sawResumeImageProcessingError;
+
+            if (shouldRetryMissingResume || shouldRetryImageContext) {
+              const retryCode = shouldRetryImageContext
+                ? "cli_resume_image_processing_retry"
+                : (resumeStrategy?.diagnosticCode ?? "cli_resume_missing_retry");
+              const retryMessage = shouldRetryImageContext
+                ? "Claude resume context contains an image the API cannot process; retrying this turn without resume."
+                : (resumeStrategy?.diagnosticMessage ??
+                  "CLI resume session was stale; retrying this turn without resume.");
+              logger.warn("task.spawn.resume_retry", {
+                taskId,
+                sessionId,
+                cli: cliKind,
+                badAgentSessionId: resumeSessionId,
+                exitCode: code,
+                signal,
+                reason: retryCode,
+                stderr: truncateForLog(stderrText, 1_000),
+              });
+              taskLogsRepo.append(taskId, "warn", "diagnostic", {
+                type: "diagnostic",
+                level: "warn",
+                code: retryCode,
+                message: retryMessage,
+                agentSessionId: resumeSessionId,
+              });
+              tasksRepo.update(taskId, {
+                agent_session_id: null,
+                status: "running",
+                exit_code: null,
+                error_message: null,
+                ended_at: null,
+              });
+              latestAgentSessionId = null;
+              ctx.taskSessions.delete(sessionId);
+              runTaskAttempt(null, attempt + 1);
+              return;
+            }
+
+            if (bufferPotentialResumeStderr && stderrText.trim()) {
+              emitStderr(stderrText);
+            }
+
+            console.info(
+              `[task.exit] id=${taskId} status=${finalStatus} code=${code} signal=${signal ?? "none"}`,
+            );
+            tasksRepo.update(taskId, {
+              status: finalStatus,
+              exit_code: code ?? undefined,
+              ended_at: Date.now(),
+            });
+
+            broadcastAuthed({
+              jsonrpc: "2.0",
+              method: "task.ended",
+              params: { taskId, status: finalStatus, exitCode: code, errorMessage: signal },
+            });
+
+            if (finalStatus === "failed") {
+              void autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
+            }
+
+            ctx.taskSessions.delete(sessionId);
+            globalRunningTaskIds.delete(taskId);
+            ctx.runningTasks.delete(taskId);
+            drainPendingTasks(ctx);
+          });
+
+          proc.on("error", (err) => {
+            if (!taskSession.alive) return;
+            taskSession.alive = false;
+            const errorMsg = err.message;
+            console.error(`[task.spawn] proc error id=${taskId}: ${errorMsg}`);
+            broadcastAuthed({
+              jsonrpc: "2.0",
+              method: "task.event",
+              params: { taskId, event: { type: "error", message: errorMsg } },
+            });
+            taskLogsRepo.append(taskId, "error", "spawn", { message: errorMsg });
+
+            tasksRepo.update(taskId, {
+              status: "failed",
+              error_message: errorMsg,
+              ended_at: Date.now(),
+            });
+
+            broadcastAuthed({
+              jsonrpc: "2.0",
+              method: "task.ended",
+              params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
+            });
+
             void autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
-          }
 
-          ctx.taskSessions.delete(sessionId);
-          ctx.runningTasks.delete(taskId);
-          drainPendingTasks(ctx);
-        });
-
-        proc.on("error", (err) => {
-          if (!taskSession.alive) return;
-          taskSession.alive = false;
-          const errorMsg = err.message;
-          console.error(`[task.spawn] proc error id=${taskId}: ${errorMsg}`);
-          broadcastAuthed({
-            jsonrpc: "2.0",
-            method: "task.event",
-            params: { taskId, event: { type: "error", message: errorMsg } },
+            ctx.taskSessions.delete(sessionId);
+            globalRunningTaskIds.delete(taskId);
+            ctx.runningTasks.delete(taskId);
+            drainPendingTasks(ctx);
           });
-          taskLogsRepo.append(taskId, "error", "spawn", { message: errorMsg });
+        };
 
-          tasksRepo.update(taskId, {
-            status: "failed",
-            error_message: errorMsg,
-            ended_at: Date.now(),
-          });
-
-          broadcastAuthed({
-            jsonrpc: "2.0",
-            method: "task.ended",
-            params: { taskId, status: "failed", exitCode: null, errorMessage: errorMsg },
-          });
-
-          void autoCleanupFailedTask(gitRoot, taskId, worktreePath, branchName);
-
-          ctx.taskSessions.delete(sessionId);
-          ctx.runningTasks.delete(taskId);
-          drainPendingTasks(ctx);
-        });
+        runTaskAttempt(currentTask.agent_session_id, 0);
       } catch (e) {
         const errorMsg = (e as Error).message;
         console.error(`[task.spawn] uncaught FAILED id=${taskId}: ${errorMsg}`);
@@ -1656,6 +2677,7 @@ const methods: Record<string, Handler> = {
         if (t?.worktree_path || t?.branch_name) {
           void autoCleanupFailedTask(root, taskId, t?.worktree_path, t?.branch_name);
         }
+        globalRunningTaskIds.delete(taskId);
         ctx.runningTasks.delete(taskId);
         drainPendingTasks(ctx);
       }
@@ -1675,6 +2697,7 @@ const methods: Record<string, Handler> = {
 
     console.info(`[task.cancel] id=${taskId} prev_status=${task.status}`);
 
+    // Kill the primary session (legacy path).
     if (task.session_id) {
       const session = ctx.taskSessions.get(task.session_id);
       if (session) {
@@ -1688,17 +2711,41 @@ const methods: Record<string, Handler> = {
       }
     }
 
+    // Also kill any additional sessions attached to this task (peer sessions).
+    const attachedSessions = taskSessionsRepo.list(taskId);
+    for (const ts of attachedSessions) {
+      if (ts.session_id === task.session_id) continue; // already handled above
+      const session = ctx.taskSessions.get(ts.session_id);
+      if (session) {
+        try {
+          session.proc.kill("SIGTERM");
+        } catch {
+          /* ignore */
+        }
+        session.alive = false;
+        ctx.taskSessions.delete(ts.session_id);
+        broadcastAuthed({
+          jsonrpc: "2.0",
+          method: "task.ended",
+          params: { taskId, status: "cancelled", exitCode: null },
+        });
+      }
+    }
+
     tasksRepo.update(taskId, {
       status: "cancelled",
       ended_at: Date.now(),
     });
 
+    clearQueuedContinuation(taskId);
+    removeQueuedTask(taskId);
     broadcastAuthed({
       jsonrpc: "2.0",
       method: "task.ended",
       params: { taskId, status: "cancelled", exitCode: null },
     });
 
+    globalRunningTaskIds.delete(taskId);
     ctx.runningTasks.delete(taskId);
     drainPendingTasks(ctx);
 
@@ -1719,6 +2766,8 @@ const methods: Record<string, Handler> = {
     if (task.worktree_path && task.branch_name) {
       await removeTaskWorktree(root, task.worktree_path, task.branch_name);
     }
+    clearQueuedContinuation(taskId);
+    removeQueuedTask(taskId);
 
     // Delete the row too — UX says "Remove worktree" means the task is gone
     // for good. Session cascades via tasks.session_id FK ON DELETE CASCADE,
@@ -1742,11 +2791,7 @@ const methods: Record<string, Handler> = {
     const p = patch as Record<string, unknown>;
     tasksRepo.update(tid, {
       session_id:
-        p.sessionId === null
-          ? null
-          : p.sessionId !== undefined
-            ? String(p.sessionId)
-            : undefined,
+        p.sessionId === null ? null : p.sessionId !== undefined ? String(p.sessionId) : undefined,
     });
     return { ok: true };
   },
@@ -1829,6 +2874,10 @@ const methods: Record<string, Handler> = {
       throw new Error("workspaces.put: workspace payload required");
     const w = workspace as Record<string, unknown>;
     const src = (w.source ?? {}) as Record<string, unknown>;
+    const ownershipRaw =
+      w.rootPathOwnership !== undefined ? String(w.rootPathOwnership) : undefined;
+    const ownership: "user-selected" | "app-created" | undefined =
+      ownershipRaw === "user-selected" || ownershipRaw === "app-created" ? ownershipRaw : undefined;
     const row = workspacesRepo.put({
       id: String(w.id ?? "").trim(),
       orgId: String(w.orgId ?? "").trim(),
@@ -1837,6 +2886,7 @@ const methods: Record<string, Handler> = {
       color: String(w.color ?? "").trim(),
       gitUrl: w.gitUrl !== undefined ? String(w.gitUrl) : undefined,
       rootPath: w.rootPath !== undefined ? String(w.rootPath) : undefined,
+      rootPathOwnership: ownership,
       source: {
         kind: String(src.kind ?? "").trim(),
         url: src.url !== undefined ? String(src.url) : undefined,
@@ -1853,12 +2903,26 @@ const methods: Record<string, Handler> = {
     const wid = String(id ?? "").trim();
     if (!wid) throw new Error("workspaces.delete: id is required");
     const workspace = workspacesRepo.get(wid);
+    let deletedPath: string | null = null;
     if (workspace?.root_path) {
-      const deletePath = resolveWorkspaceDeletePath(workspace.root_path);
-      await fs.rm(deletePath, { recursive: true, force: true });
+      // Only physically delete folders the app created itself (e.g. github clones).
+      // User-selected folders (Choose folder from file system) and legacy NULL rows
+      // are left untouched on disk — losing user data is unacceptable.
+      if (workspace.root_path_ownership === "app-created") {
+        const deletePath = resolveWorkspaceDeletePath(workspace.root_path);
+        await fs.rm(deletePath, { recursive: true, force: true });
+        deletedPath = workspace.root_path;
+        console.info(
+          `[workspaces.delete] removed app-created folder ${workspace.root_path} for workspace ${wid}`,
+        );
+      } else {
+        console.info(
+          `[workspaces.delete] keeping folder ${workspace.root_path} on disk (ownership=${workspace.root_path_ownership ?? "null"}) for workspace ${wid}`,
+        );
+      }
     }
     workspacesRepo.delete(wid);
-    return { ok: true, deletedPath: workspace?.root_path ?? null };
+    return { ok: true, deletedPath };
   },
 
   async "sessions.list"({ workspaceId }) {
@@ -2113,13 +3177,14 @@ const methods: Record<string, Handler> = {
   async "exec.run"({ cmd, args, cwd, env, timeoutMs }, _ctx) {
     if (!cmd) throw new Error("exec.run: cmd is required");
     assertSpawnAllowed(String(cmd), EXEC_ALLOWLIST, "exec");
+    assertExecArgsAllowed(String(cmd), Array.isArray(args) ? (args as string[]) : []);
     let resolvedCwd: string;
     try {
       resolvedCwd = cwd ? safeResolve(String(cwd)) : root;
     } catch {
       resolvedCwd = root;
     }
-    const mergedEnv = safeEnv((env as Record<string, string> | undefined) ?? {});
+    const mergedEnv = safeEnv({ TERM: "xterm-256color", ...sanitizeClientEnv(env) });
     const proc = cpSpawn(String(cmd), Array.isArray(args) ? (args as string[]) : [], {
       cwd: resolvedCwd,
       env: mergedEnv,
@@ -2471,7 +3536,6 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
     gitCloneSessions: new Map<string, GitCloneSession>(),
     taskSessions: new Map<string, TaskSession>(),
     runningTasks: new Set<string>(),
-    pendingTasks: [],
     ws: { send: (d: string) => ws.send(d) },
   };
   contexts.set(ws, ctx);
@@ -2530,6 +3594,17 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
   });
 
   ws.on("close", () => {
+    const closedCtx: Ctx = {
+      authed: ctx.authed,
+      watchers: new Map(),
+      ptySessions: new Map(),
+      chatSessions: new Map(),
+      gitCloneSessions: new Map(),
+      taskSessions: new Map(),
+      runningTasks: new Set(),
+      ws: ctx.ws,
+    };
+
     for (const w of ctx.watchers.values()) w.close();
     ctx.watchers.clear();
     for (const session of ctx.ptySessions.values()) {
@@ -2562,8 +3637,23 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
       } catch {
         /* ignore */
       }
+      try {
+        tasksRepo.update(session.taskId, { status: "cancelled", ended_at: Date.now() });
+        clearQueuedContinuation(session.taskId);
+        removeQueuedTask(session.taskId);
+        if (globalRunningTaskIds.has(session.taskId)) {
+          closedCtx.runningTasks.add(session.taskId);
+        }
+        globalRunningTaskIds.delete(session.taskId);
+        ctx.runningTasks.delete(session.taskId);
+      } catch (e) {
+        console.error("[ws.close] failed to cancel task:", e);
+      }
     }
     ctx.taskSessions.clear();
+    if (closedCtx.runningTasks.size > 0) {
+      drainPendingTasks(closedCtx);
+    }
     if (ctx.authTimeout) clearTimeout(ctx.authTimeout);
   });
 });

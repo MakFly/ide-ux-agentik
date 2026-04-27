@@ -1,39 +1,48 @@
 "use client";
 
 /**
- * PlanToggle — composer action that enables Plan Mode for Codex.
+ * PlanToggle — composer action that enables Plan Mode for the active CLI.
  *
- * When active, codex-adapter.ts prepends PLAN_MODE_SYSTEM_PREFIX to the prompt
- * so Codex emits structured `plan_update` events before acting.
+ * When active, the task adapter prepends PLAN_MODE_SYSTEM_PREFIX to the prompt
+ * so the active CLI emits a plan before acting.
  *
  * Persisted per-CLI in localStorage["plan-mode-by-cli"].
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ListTodo } from "lucide-react";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { TerminalKind } from "@/store/ide";
-
-const STORAGE_KEY = "plan-mode-by-cli";
+import { PLAN_MODE_STORAGE_KEY, setPlanModeForCli } from "@/lib/chat/plan-mode";
 
 function readStore(): Record<string, boolean> {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}");
+    return JSON.parse(localStorage.getItem(PLAN_MODE_STORAGE_KEY) ?? "{}");
   } catch {
     return {};
   }
 }
 
-export function usePlanMode(cli: TerminalKind): [boolean, (v: boolean) => void] {
+function usePlanMode(cli: TerminalKind): [boolean, (v: boolean) => void] {
   const [enabled, setEnabledState] = useState<boolean>(() => {
     return readStore()[cli] ?? false;
   });
 
+  useEffect(() => {
+    const sync = () => setEnabledState(readStore()[cli] ?? false);
+    sync();
+    window.addEventListener("storage", sync);
+    window.addEventListener("plan-mode-change", sync);
+    return () => {
+      window.removeEventListener("storage", sync);
+      window.removeEventListener("plan-mode-change", sync);
+    };
+  }, [cli]);
+
   function setValue(v: boolean) {
-    const next = { ...readStore(), [cli]: v };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    setPlanModeForCli(cli, v);
     setEnabledState(v);
   }
 
@@ -60,7 +69,7 @@ export function PlanToggle({ cli }: { cli: TerminalKind }) {
         </Toggle>
       </TooltipTrigger>
       <TooltipContent side="top">
-        {enabled ? "Plan Mode on — Codex will outline steps first" : "Enable Plan Mode"}
+        {enabled ? "Plan Mode on — the agent will outline steps first" : "Enable Plan Mode"}
       </TooltipContent>
     </Tooltip>
   );

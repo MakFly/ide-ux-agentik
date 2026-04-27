@@ -23,6 +23,42 @@ import type {
   UserMessageItem,
 } from "./conversation-types";
 
+function titleCase(value: string): string {
+  return value
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function inferSubagentDisplayName(prompt: string | undefined): string | undefined {
+  if (!prompt) return undefined;
+  const compact = prompt.replace(/\s+/g, " ").trim();
+  const directMatch =
+    compact.match(
+      /sous-agent\s+([a-z0-9][a-z0-9 _-]{0,40}?)(?:[.:,]|\s+(?:qui|charg[eé]|for|to)\b|$)/i,
+    ) ??
+    compact.match(/sub-agent\s+([a-z0-9][a-z0-9 _-]{0,40}?)(?:[.:,]|\s+(?:who|for|to)\b|$)/i) ??
+    compact.match(/you are the\s+([a-z0-9][a-z0-9 _-]{0,40}?)\s+sub-agent\b/i);
+  if (!directMatch?.[1]) return undefined;
+  return titleCase(directMatch[1]);
+}
+
+function buildCollabOutput(itemData: Record<string, unknown>): string | undefined {
+  const agentsStates = itemData.agents_states;
+  if (!agentsStates || typeof agentsStates !== "object") return undefined;
+  const entries = Object.entries(agentsStates as Record<string, Record<string, unknown>>);
+  if (entries.length === 0) return undefined;
+  return entries
+    .map(([threadId, state]) => {
+      const status = typeof state?.status === "string" ? state.status : "unknown";
+      const message =
+        typeof state?.message === "string" && state.message.trim() ? state.message : "";
+      return `${threadId}: ${status}${message ? ` — ${message}` : ""}`;
+    })
+    .join("\n");
+}
+
 export function reduceCodexEvents(
   events: TaskLogEntry[],
   initialPrompt: string,
@@ -50,7 +86,7 @@ export function reduceCodexEvents(
         currentReasoningItemId = null;
         break;
 
-      case "turn.started":
+      case "turn.started": {
         // Push new turn, reset current reasoning
         const turnId = `t${entry.ts}`;
         state.turns.push({
@@ -62,6 +98,7 @@ export function reduceCodexEvents(
         currentTurnId = turnId;
         currentReasoningItemId = null;
         break;
+      }
 
       case "item.started": {
         const itemData = data.item as Record<string, unknown> | undefined;
@@ -97,6 +134,27 @@ export function reduceCodexEvents(
             command,
             status: "running",
             output: "",
+            exitCode: null,
+            startedAt: entry.ts,
+            completedAt: null,
+          };
+          state.itemsById[itemId] = toolItem;
+          currentTurn.itemIds.push(itemId);
+          state.itemOrder.push(itemId);
+        } else if (itemType === "collab_tool_call") {
+          const toolName =
+            typeof itemData.tool === "string" && itemData.tool.trim() ? itemData.tool : itemType;
+          const prompt = itemData.prompt as string | undefined;
+          const toolItem: ToolCallItem = {
+            kind: "tool_call",
+            itemId,
+            toolName,
+            displayName: inferSubagentDisplayName(prompt),
+            input: {
+              prompt,
+              receiverThreadIds: itemData.receiver_thread_ids,
+            },
+            status: "running",
             exitCode: null,
             startedAt: entry.ts,
             completedAt: null,
@@ -244,6 +302,55 @@ export function reduceCodexEvents(
               ts: entry.ts,
             };
             state.itemsById[itemId] = textItem;
+            const currentTurn = state.turns.find((t) => t.turnId === currentTurnId);
+            if (currentTurn && !currentTurn.itemIds.includes(itemId)) {
+              currentTurn.itemIds.push(itemId);
+              state.itemOrder.push(itemId);
+            }
+          }
+        } else if (itemType === "collab_tool_call") {
+          const prompt = itemData.prompt as string | undefined;
+          const output = buildCollabOutput(itemData);
+          const statusValue = itemData.status as string | undefined;
+          const resolvedStatus =
+            statusValue === "failed"
+              ? "failed"
+              : statusValue === "in_progress"
+                ? "running"
+                : "completed";
+          if (existingItem && existingItem.kind === "tool_call") {
+            existingItem.toolName =
+              typeof itemData.tool === "string" && itemData.tool.trim()
+                ? itemData.tool
+                : existingItem.toolName;
+            existingItem.displayName = inferSubagentDisplayName(prompt) ?? existingItem.displayName;
+            existingItem.input = {
+              prompt,
+              receiverThreadIds: itemData.receiver_thread_ids,
+            };
+            existingItem.output = output ?? existingItem.output;
+            existingItem.status = resolvedStatus;
+            existingItem.completedAt = resolvedStatus === "running" ? null : entry.ts;
+          } else if (currentTurnId) {
+            const toolItem: ToolCallItem = {
+              kind: "tool_call",
+              itemId,
+              toolName:
+                typeof itemData.tool === "string" && itemData.tool.trim()
+                  ? itemData.tool
+                  : itemType,
+              displayName: inferSubagentDisplayName(prompt),
+              input: {
+                prompt,
+                receiverThreadIds: itemData.receiver_thread_ids,
+              },
+              output,
+              exitCode: null,
+              status: resolvedStatus,
+              startedAt: entry.ts,
+              completedAt: resolvedStatus === "running" ? null : entry.ts,
+            };
+            state.itemsById[itemId] = toolItem;
             const currentTurn = state.turns.find((t) => t.turnId === currentTurnId);
             if (currentTurn && !currentTurn.itemIds.includes(itemId)) {
               currentTurn.itemIds.push(itemId);

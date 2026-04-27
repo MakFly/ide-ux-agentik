@@ -20,6 +20,18 @@ export type ContextOverride = "200k" | "1m" | undefined;
 
 const KB = 1_000;
 
+function stripClaudeModelSuffix(model: string | undefined): string | undefined {
+  return model?.replace(/\[.*\]$/, "");
+}
+
+function hasClaudeOneMSuffix(model: string | undefined): boolean {
+  return /\[1m\]$/i.test(model ?? "");
+}
+
+function hasNativeOneMClaudeContext(model: string | undefined): boolean {
+  return stripClaudeModelSuffix(model) === "claude-opus-4-7";
+}
+
 /** Default context window (tokens) per (cli, model). Keys are lower-cased. */
 const DEFAULTS: Record<string, number> = {
   // Claude
@@ -49,13 +61,16 @@ export function getContextWindow(
   model: string | undefined,
   override?: ContextOverride,
 ): number {
+  const normalizedModel = cli === "claude" ? stripClaudeModelSuffix(model) : model;
   // Explicit override only applies when meaningful for the CLI (Claude).
   if (cli === "claude") {
-    if (override === "1m") return 1_000 * KB;
+    if (hasNativeOneMClaudeContext(normalizedModel)) return 1_000 * KB;
     if (override === "200k") return 200 * KB;
+    // Auto prefers the largest supported context window for the selected model.
+    if (override === "1m" || supportsOneM(cli, normalizedModel)) return 1_000 * KB;
   }
-  if (model) {
-    const key = `${cli}:${model}`.toLowerCase();
+  if (normalizedModel) {
+    const key = `${cli}:${normalizedModel}`.toLowerCase();
     if (DEFAULTS[key]) return DEFAULTS[key];
   }
   return CLI_FALLBACK[cli] ?? 200 * KB;
@@ -68,9 +83,74 @@ export function getContextWindow(
  * Haiku 4.5 has no 1M tier.
  */
 export function supportsOneM(cli: TerminalKind, model: string | undefined): boolean {
+  const normalizedModel = stripClaudeModelSuffix(model);
   if (cli !== "claude") return false;
-  if (!model) return false;
-  if (/^claude-opus-4-\d+$/.test(model)) return true;
-  if (model === "claude-sonnet-4-6") return true;
+  if (!normalizedModel) return false;
+  if (/^claude-opus-4-\d+$/.test(normalizedModel)) return true;
+  if (normalizedModel === "claude-sonnet-4-6") return true;
   return false;
+}
+
+/** True when Claude exposes an actual 200K/1M choice instead of native 1M. */
+export function supportsContextOverride(cli: TerminalKind, model: string | undefined): boolean {
+  const normalizedModel = stripClaudeModelSuffix(model);
+  if (cli !== "claude") return false;
+  if (!normalizedModel) return false;
+  return normalizedModel === "claude-opus-4-6" || normalizedModel === "claude-sonnet-4-6";
+}
+
+/**
+ * Resolve the actual model id to pass to the Claude CLI.
+ *
+ * `Auto` now prefers the largest context tier supported by the selected model:
+ *   - Opus 4.7 stays native 1M (no suffix)
+ *   - Opus 4.6 / Sonnet 4.6 append `[1m]`
+ *   - `200k` strips any long-context suffix
+ */
+export function resolveLaunchModel(
+  cli: TerminalKind,
+  model: string | undefined,
+  override?: ContextOverride,
+): string | undefined {
+  if (cli !== "claude" || !model) return model;
+  const normalizedModel = stripClaudeModelSuffix(model);
+  if (!normalizedModel) return model;
+  if (override === "200k") return normalizedModel;
+  if (!supportsOneM(cli, normalizedModel)) return normalizedModel;
+  if (normalizedModel === "claude-opus-4-7") return normalizedModel;
+  return `${normalizedModel}[1m]`;
+}
+
+/**
+ * Runtime logs can lag behind the current Claude picker state.
+ *
+ * Example: an older Sonnet 4.6 task recorded `200000`, but the agent picker
+ * is now on Auto/1M for the same base model. In that case the agent-level
+ * status should reflect the active launch config, not the stale task snapshot.
+ */
+export function getDisplayContextWindow(params: {
+  cli: TerminalKind;
+  configuredModel: string | undefined;
+  runtimeModel?: string;
+  runtimeContextWindow?: number;
+  override?: ContextOverride;
+}): number {
+  const configuredMax = getContextWindow(params.cli, params.configuredModel, params.override);
+  if (params.runtimeContextWindow === undefined) return configuredMax;
+  if (params.cli !== "claude") return params.runtimeContextWindow;
+  if (!params.configuredModel) return params.runtimeContextWindow;
+
+  const configuredLaunchModel = resolveLaunchModel(
+    params.cli,
+    params.configuredModel,
+    params.override,
+  );
+  const configuredBase = stripClaudeModelSuffix(configuredLaunchModel);
+  const runtimeBase = stripClaudeModelSuffix(params.runtimeModel);
+  if (!configuredBase) return params.runtimeContextWindow;
+  if (runtimeBase && runtimeBase !== configuredBase) return configuredMax;
+  if (!hasClaudeOneMSuffix(configuredLaunchModel)) return params.runtimeContextWindow;
+  if (params.runtimeContextWindow >= 1_000 * KB) return params.runtimeContextWindow;
+  if (!runtimeBase || runtimeBase === configuredBase) return configuredMax;
+  return params.runtimeContextWindow;
 }

@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -16,7 +16,6 @@ import {
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { z } from "zod";
 
 import { useIDE, type Theme, type Workspace } from "@/store/ide";
 import { Button } from "@/components/ui/button";
@@ -37,6 +36,7 @@ import { Card, Row, SectionHeader } from "@/components/settings/primitives";
 import { ProviderCard } from "@/components/settings/providers/provider-card";
 import { SettingsSidebar, type SectionId } from "@/components/settings/settings-sidebar";
 import { CommandPalette } from "@/components/settings/command-palette";
+import { OrganizationSection } from "@/components/settings/organization-section";
 import {
   Table,
   TableBody,
@@ -74,6 +74,7 @@ import { mcpClient } from "@/lib/mcp/client";
 import type { McpEntry, McpServer } from "@/lib/mcp/types";
 import { providerFor } from "@/lib/fs";
 import { RemoteAgentProvider } from "@/lib/fs/remote-agent";
+import { settingsSearchSchema, type SettingsSearch } from "@/lib/settings/search";
 import {
   getEndpoint,
   getEndpointSource,
@@ -83,22 +84,7 @@ import {
   type AgentEndpoint,
 } from "@/lib/storage";
 
-const SECTION_IDS = [
-  "agent",
-  "workspace",
-  "appearance",
-  "layout",
-  "ai",
-  "providers",
-  "mcp",
-] as const;
 const PROVIDER_IDS = ["codex", "claude", "opencode", "gemini"] as const;
-
-const settingsSearchSchema = z.object({
-  login: z.enum(["codex"]).optional(),
-  section: z.enum(SECTION_IDS).optional(),
-  provider: z.enum(PROVIDER_IDS).optional(),
-});
 
 export const Route = createFileRoute("/settings")({
   component: SettingsPage,
@@ -112,10 +98,51 @@ export const Route = createFileRoute("/settings")({
 });
 
 function SettingsPage() {
-  const { login, section: urlSection, provider: urlProvider } = Route.useSearch();
+  const search = Route.useSearch();
   const navigate = useNavigate({ from: "/settings" });
 
-  const section: SectionId = urlSection ?? "agent";
+  return (
+    <SettingsPageContent
+      search={search}
+      defaultSection="agent"
+      showOrganization
+      backLabel="Back"
+      onBack={() => void navigate({ to: "/" })}
+      onNavigateSearch={(next, nextProvider) =>
+        void navigate({
+          search: (prev) => ({
+            ...prev,
+            section: next,
+            provider: next === "providers" ? nextProvider : undefined,
+          }),
+        })
+      }
+    />
+  );
+}
+
+export function SettingsPageContent({
+  search,
+  defaultSection,
+  showOrganization,
+  organizationId,
+  organizationName,
+  backLabel,
+  onBack,
+  onNavigateSearch,
+}: {
+  search: SettingsSearch;
+  defaultSection: SectionId;
+  showOrganization: boolean;
+  organizationId?: string;
+  organizationName?: string;
+  backLabel: string;
+  onBack: () => void;
+  onNavigateSearch: (section: SectionId, provider?: ProviderId) => void;
+}) {
+  const { login, section: urlSection, provider: urlProvider } = search;
+
+  const section: SectionId = urlSection ?? defaultSection;
   const provider = urlProvider;
 
   const [loginOpen, setLoginOpen] = useState(false);
@@ -150,15 +177,9 @@ function SettingsPage() {
 
   const navigateTo = useCallback(
     (next: SectionId, nextProvider?: ProviderId) => {
-      void navigate({
-        search: (prev) => ({
-          ...prev,
-          section: next,
-          provider: next === "providers" ? nextProvider : undefined,
-        }),
-      });
+      onNavigateSearch(next, nextProvider);
     },
-    [navigate],
+    [onNavigateSearch],
   );
 
   const breadcrumb = useMemo(() => {
@@ -176,10 +197,10 @@ function SettingsPage() {
       <header className="sticky top-0 z-20 h-12 border-b border-border/80 bg-background/80 backdrop-blur">
         <div className="flex h-full items-center gap-3 px-4">
           <Button asChild variant="ghost" size="sm" className="h-8 gap-2 px-2">
-            <Link to="/" viewTransition>
+            <button type="button" onClick={onBack}>
               <ArrowLeft className="h-4 w-4" />
-              Back
-            </Link>
+              {backLabel}
+            </button>
           </Button>
           <div className="flex items-center gap-2">
             <SettingsIcon className="h-4 w-4 text-muted-foreground" />
@@ -223,11 +244,15 @@ function SettingsPage() {
           collapsed={collapsed}
           onToggleCollapsed={toggleCollapsed}
           onNavigate={navigateTo}
+          showOrganization={showOrganization}
         />
 
         <main className="min-w-0 flex-1">
           <div className="mx-auto w-full max-w-3xl px-8 py-10">
             {section === "agent" && <AgentSection />}
+            {section === "organization" && (
+              <OrganizationSection expectedOrgId={organizationId} orgName={organizationName} />
+            )}
             {section === "workspace" && <WorkspaceSection />}
             {section === "appearance" && <AppearanceSection />}
             {section === "layout" && <LayoutSection />}
@@ -245,7 +270,12 @@ function SettingsPage() {
       </div>
 
       <CodexLoginDialog open={loginOpen} onOpenChange={setLoginOpen} />
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} onNavigate={navigateTo} />
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        onNavigate={navigateTo}
+        showOrganization={showOrganization}
+      />
     </div>
   );
 }
@@ -256,6 +286,8 @@ function sectionLabel(id: SectionId): string {
       return "Appearance";
     case "agent":
       return "Agent";
+    case "organization":
+      return "Organization";
     case "workspace":
       return "Workspace";
     case "layout":

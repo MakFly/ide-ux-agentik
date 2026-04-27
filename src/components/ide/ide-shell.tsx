@@ -10,7 +10,12 @@ import { FilesPanel } from "@/components/ide/FilesPanel";
 import { StatusBar } from "@/components/ide/StatusBar";
 import { TerminalPanel } from "@/components/ide/terminal-panel";
 import { EditorPanel } from "@/components/ide/editor-panel";
-import { useIDE, useCurrentActiveTab, useCurrentOpenFiles } from "@/store/ide";
+import {
+  useIDE,
+  useCurrentActiveTab,
+  useCurrentOpenFiles,
+  useActiveAgentThread,
+} from "@/store/ide";
 import { MOCK_ENABLED } from "@/lib/env";
 import { TaskDetailDialog } from "@/components/ide/task-detail-dialog";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
@@ -118,15 +123,16 @@ const searchSchema = z.object({
   workspace: z.string().optional(),
   branch: z.string().optional(),
   tab: tabSchema.optional(),
-  // Wave 2: task-centric URL — mirrors store.activeTaskId.
+  // Back-compat: ?task= is still accepted, but store -> URL writes ?thread=.
   task: z.string().optional(),
+  thread: z.string().optional(),
 });
 
 export type IdeShellSearch = z.infer<typeof searchSchema>;
 
 interface IdeShellProps {
   search?: IdeShellSearch;
-  onNavigate?: (search: Record<string, any>) => void;
+  onNavigate?: (search: Record<string, unknown>) => void;
 }
 
 export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
@@ -134,48 +140,106 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
 
   const activeWorkspaceId = useIDE((s) => s.activeWorkspaceId);
   const activeBranchId = useIDE((s) => s.activeBranchId);
-  const activeTaskId = useIDE((s) => s.activeTaskId);
+  const activeThread = useActiveAgentThread();
+  const applyingFromUrl = useIDE((s) => s.applyingFromUrl);
   const activeTab = useCurrentActiveTab();
   const setActiveBranch = useIDE((s) => s.setActiveBranch);
   const setActiveWorkspace = useIDE((s) => s.setActiveWorkspace);
   const setActiveTab = useIDE((s) => s.setActiveTab);
   const setActiveTask = useIDE((s) => s.setActiveTask);
+  const setActiveThread = useIDE((s) => s.setActiveThread);
   const setApplyingFromUrl = useIDE((s) => s.setApplyingFromUrl);
+  const hydrateTasks = useIDE((s) => s.hydrateTasks);
+  const branchesByWorkspaceId = useIDE((s) => s.branchesByWorkspaceId);
   const workspaces = useIDE((s) => s.workspaces);
   const showTerminal = useIDE((s) => s.showTerminal);
 
-  const { workspace, branch, tab, task } = search;
+  const { workspace, branch, tab, task, thread } = search;
+  const requestedThreadId = thread ?? task;
+  const requestedWorkspaceMissing = Boolean(
+    workspace && workspaces.length > 0 && !workspaces.some((w) => w.id === workspace),
+  );
+  const hydratingThreadFromUrl = Boolean(
+    requestedThreadId &&
+    !requestedWorkspaceMissing &&
+    (!hydratedFromUrlRef.current || applyingFromUrl),
+  );
 
   // URL → store, once on mount.
   useEffect(() => {
     if (hydratedFromUrlRef.current) return;
-    hydratedFromUrlRef.current = true;
-    setApplyingFromUrl(true);
-    if (workspace && workspace !== activeWorkspaceId) {
-      if (workspaces.some((w) => w.id === workspace)) setActiveWorkspace(workspace);
-    }
-    if (branch && branch !== activeBranchId) {
-      const { branchesByWorkspaceId: branchMap } = useIDE.getState();
-      const exists = Object.values(branchMap).some((branches) =>
-        branches.some((b) => b.id === branch),
-      );
-      if (exists) setActiveBranch(branch);
-    }
-    if (tab) setActiveTab(tab as TabId);
-    if (task) setActiveTask(task);
-    queueMicrotask(() => setApplyingFromUrl(false));
+
+    const applyFromUrl = async () => {
+      const workspaceReady = !workspace || workspaces.some((w) => w.id === workspace);
+
+      if (!workspaceReady) {
+        return;
+      }
+
+      hydratedFromUrlRef.current = true;
+      setApplyingFromUrl(true);
+      if (workspace && workspace !== activeWorkspaceId) {
+        setActiveWorkspace(workspace);
+      }
+
+      const resolvedWorkspaceId = workspace ?? activeWorkspaceId;
+      if (branch && branch !== activeBranchId) {
+        const branches = resolvedWorkspaceId ? branchesByWorkspaceId[resolvedWorkspaceId] : [];
+        const existsInWorkspace = branches?.some((b) => b.id === branch) ?? false;
+        const existsAnywhere = !resolvedWorkspaceId
+          ? Object.values(branchesByWorkspaceId).some((wsBranches) =>
+              wsBranches.some((b) => b.id === branch),
+            )
+          : false;
+        if (existsInWorkspace || existsAnywhere) {
+          setActiveBranch(branch);
+        }
+      }
+
+      if (tab) setActiveTab(tab as TabId);
+
+      if (thread) {
+        if (resolvedWorkspaceId) {
+          await hydrateTasks(resolvedWorkspaceId).catch(() => {});
+        }
+        setActiveThread(thread);
+      } else if (task) {
+        if (resolvedWorkspaceId) {
+          await hydrateTasks(resolvedWorkspaceId).catch(() => {});
+          const exists = (useIDE.getState().tasksByWorkspaceId[resolvedWorkspaceId] ?? []).some(
+            (entry) => entry.id === task,
+          );
+          if (!exists) {
+            console.warn(
+              `[ide-shell] task ${task} not in workspace ${resolvedWorkspaceId} after hydrate`,
+            );
+          }
+          setActiveTask(task);
+        } else {
+          setActiveTask(task);
+        }
+      }
+
+      queueMicrotask(() => setApplyingFromUrl(false));
+    };
+
+    void applyFromUrl();
   }, [
     workspace,
     branch,
     tab,
     task,
+    thread,
     activeWorkspaceId,
     activeBranchId,
+    hydrateTasks,
+    branchesByWorkspaceId,
     workspaces,
+    setActiveTask,
+    setActiveThread,
     setActiveBranch,
     setActiveWorkspace,
     setActiveTab,
-    setActiveTask,
     setApplyingFromUrl,
   ]);
 
@@ -192,10 +256,10 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
             : activeWorkspaceId || undefined,
         branch: MOCK_ENABLED && activeBranchId === "b1" ? undefined : activeBranchId || undefined,
         tab: activeTab === "overview" ? undefined : activeTab,
-        task: activeTaskId ?? undefined,
+        thread: activeThread?.id ?? undefined,
       });
     }
-  }, [activeWorkspaceId, activeBranchId, activeTab, activeTaskId, onNavigate]);
+  }, [activeWorkspaceId, activeBranchId, activeTab, activeThread?.id, onNavigate]);
 
   const taskDetailDialogTaskId = useIDE((s) => s.taskDetailDialogTaskId);
   const setTaskDetailDialogOpen = useIDE((s) => s.setTaskDetailDialogOpen);
@@ -217,7 +281,7 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
       <div className="flex h-svh w-screen flex-col overflow-hidden bg-background text-foreground">
         <TopBar />
         <div className="flex min-h-0 flex-1 overflow-hidden bg-sidebar p-2">
-          <ResizableLayout />
+          <ResizableLayout hydratingThreadFromUrl={hydratingThreadFromUrl} />
         </div>
         {showTerminal && <TerminalPanel />}
         <StatusBar />
@@ -234,7 +298,7 @@ export function IdeShell({ search = {}, onNavigate }: IdeShellProps) {
   );
 }
 
-function ResizableLayout() {
+function ResizableLayout({ hydratingThreadFromUrl }: { hydratingThreadFromUrl: boolean }) {
   const isMobile = useIsMobile();
   const openFiles = useCurrentOpenFiles();
   const hasOpenFile = openFiles.length > 0;
@@ -244,7 +308,7 @@ function ResizableLayout() {
   if (isMobile) {
     return (
       <div className="flex min-h-0 flex-1 gap-2 overflow-hidden">
-        <Workspace />
+        <Workspace hydratingThreadFromUrl={hydratingThreadFromUrl} />
       </div>
     );
   }
@@ -273,7 +337,7 @@ function ResizableLayout() {
         </>
       )}
       <Panel defaultSize={workspaceDefault} minSize="320px" className="flex min-w-0">
-        <Workspace />
+        <Workspace hydratingThreadFromUrl={hydratingThreadFromUrl} />
       </Panel>
       {hasOpenFile && (
         <>

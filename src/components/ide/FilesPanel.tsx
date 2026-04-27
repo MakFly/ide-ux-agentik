@@ -14,6 +14,7 @@ import {
   useCurrentBranches,
   useCurrentExpandedFolders,
   useCurrentGitStatus,
+  useActiveAgentThread,
   type ScopeKey,
   scopeKey,
 } from "@/store/ide";
@@ -28,6 +29,12 @@ import {
   ChecksSkeleton,
 } from "@/components/ide/skeletons/files-panel-skeletons";
 import type { GitFileStatus } from "@/lib/git/status";
+import { gitClient, type GitFileEntry } from "@/lib/git/client";
+
+function gitKindToStatus(kind: string): GitFileStatus {
+  if (kind === "added" || kind === "deleted" || kind === "untracked") return kind;
+  return "modified";
+}
 
 export function FilesPanel() {
   const toggleFolder = useIDE((s) => s.toggleFolder);
@@ -52,16 +59,28 @@ export function FilesPanel() {
   const loadRoot = useIDE((s) => s.loadRoot);
   const refreshGitStatus = useIDE((s) => s.refreshGitStatus);
   const gitStatus = useCurrentGitStatus();
+  const activeThread = useActiveAgentThread();
   const currentBranches = useCurrentBranches();
 
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [fileDialogFor, setFileDialogFor] = useState<string | null | false>(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [threadGitFiles, setThreadGitFiles] = useState<GitFileEntry[] | null>(null);
+  const [threadGitLoading, setThreadGitLoading] = useState(false);
 
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
   const branch = currentBranches.find((b) => b.id === activeBranchId);
+  const threadGitEntries = threadGitFiles?.map(
+    (file) => [file.path, gitKindToStatus(file.kind)] as const,
+  );
   const changesCount =
-    gitStatus.size > 0 ? gitStatus.size : (branch?.added ?? 0) + (branch?.removed ?? 0) > 0 ? 1 : 0;
+    threadGitFiles !== null
+      ? threadGitFiles.length
+      : gitStatus.size > 0
+        ? gitStatus.size
+        : (branch?.added ?? 0) + (branch?.removed ?? 0) > 0
+          ? 1
+          : 0;
 
   const activeScopeKey: ScopeKey = scopeKey(activeWorkspaceId, activeBranchId);
 
@@ -77,6 +96,30 @@ export function FilesPanel() {
     void refreshGitStatus(activeScopeKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWorkspaceId, activeBranchId]);
+
+  useEffect(() => {
+    if (activeWorkspace?.source.kind !== "remote-agent" || !activeThread?.worktreePath) {
+      setThreadGitFiles(null);
+      setThreadGitLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setThreadGitLoading(true);
+    void gitClient
+      .status()
+      .then((status) => {
+        if (!cancelled) setThreadGitFiles(status.files);
+      })
+      .catch(() => {
+        if (!cancelled) setThreadGitFiles(null);
+      })
+      .finally(() => {
+        if (!cancelled) setThreadGitLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspace?.source.kind, activeThread?.id, activeThread?.worktreePath]);
 
   function getFolderStatus(folderName: string): GitFileStatus | null {
     const priority: GitFileStatus[] = ["modified", "added", "deleted", "untracked"];
@@ -108,6 +151,14 @@ export function FilesPanel() {
         {letter}
       </span>
     );
+  }
+
+  function threadFilePath(path: string): string {
+    const marker = "/.multica/";
+    const worktreePath = activeThread?.worktreePath;
+    const idx = worktreePath?.indexOf(marker) ?? -1;
+    if (!worktreePath || idx === -1) return path;
+    return `${worktreePath.slice(idx + 1)}/${path}`;
   }
 
   return (
@@ -154,8 +205,18 @@ export function FilesPanel() {
                 try {
                   await loadRoot(activeScopeKey);
                   await refreshGitStatus(activeScopeKey);
+                  if (
+                    activeWorkspace?.source.kind === "remote-agent" &&
+                    activeThread?.worktreePath
+                  ) {
+                    setThreadGitLoading(true);
+                    const status = await gitClient.status();
+                    setThreadGitFiles(status.files);
+                    setThreadGitLoading(false);
+                  }
                   toast.success("Refreshed");
                 } finally {
+                  setThreadGitLoading(false);
                   setRefreshing(false);
                 }
               }}
@@ -221,35 +282,54 @@ export function FilesPanel() {
             </>
           )}
 
-        {filesTab === "changes" && fileTreeLoading && gitStatus.size === 0 && <ChangesSkeleton />}
-        {filesTab === "changes" && (!fileTreeLoading || gitStatus.size > 0) && (
-          <div className="px-4 py-3 text-[12.5px] text-muted-foreground">
-            {gitStatus.size > 0 ? (
-              <div className="space-y-1">
-                {Array.from(gitStatus.entries()).map(([path, st]) => (
-                  <div
-                    key={path}
-                    className="flex items-center gap-2 rounded border border-border bg-code-bg px-2 py-1 font-mono text-[11.5px] cursor-pointer hover:bg-accent/40"
-                    onClick={() => openFile(path)}
-                  >
-                    {statusBadge(st)}
-                    <span className="text-foreground truncate">{path}</span>
-                  </div>
-                ))}
-              </div>
-            ) : branch && (branch.added || branch.removed) ? (
-              <div className="space-y-2">
-                <div className="font-mono text-foreground">{branch.name}</div>
-                <div className="font-mono">
-                  <span className="text-status-add">+{branch.added ?? 0}</span>{" "}
-                  <span className="text-status-del">-{branch.removed ?? 0}</span>
-                </div>
-              </div>
-            ) : (
-              <div>No changes on this branch.</div>
-            )}
-          </div>
+        {filesTab === "changes" && (fileTreeLoading || threadGitLoading) && changesCount === 0 && (
+          <ChangesSkeleton />
         )}
+        {filesTab === "changes" &&
+          (!fileTreeLoading || gitStatus.size > 0 || threadGitFiles !== null) && (
+            <div className="px-4 py-3 text-[12.5px] text-muted-foreground">
+              {threadGitEntries && threadGitEntries.length > 0 ? (
+                <div className="space-y-1">
+                  {threadGitEntries.map(([path, st]) => (
+                    <div
+                      key={path}
+                      className="flex items-center gap-2 rounded border border-border bg-code-bg px-2 py-1 font-mono text-[11.5px] cursor-pointer hover:bg-accent/40"
+                      onClick={() => openFile(threadFilePath(path))}
+                    >
+                      {statusBadge(st)}
+                      <span className="text-foreground truncate">{path}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : gitStatus.size > 0 ? (
+                <div className="space-y-1">
+                  {Array.from(gitStatus.entries()).map(([path, st]) => (
+                    <div
+                      key={path}
+                      className="flex items-center gap-2 rounded border border-border bg-code-bg px-2 py-1 font-mono text-[11.5px] cursor-pointer hover:bg-accent/40"
+                      onClick={() => openFile(path)}
+                    >
+                      {statusBadge(st)}
+                      <span className="text-foreground truncate">{path}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : branch && (branch.added || branch.removed) ? (
+                <div className="space-y-2">
+                  <div className="font-mono text-foreground">{branch.name}</div>
+                  <div className="font-mono">
+                    <span className="text-status-add">+{branch.added ?? 0}</span>{" "}
+                    <span className="text-status-del">-{branch.removed ?? 0}</span>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  No changes on{" "}
+                  {activeThread?.branchName ? "this thread worktree." : "this branch."}
+                </div>
+              )}
+            </div>
+          )}
 
         {filesTab === "checks" && fileTreeLoading && <ChecksSkeleton />}
         {filesTab === "checks" && !fileTreeLoading && (

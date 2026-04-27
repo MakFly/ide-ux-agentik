@@ -1,4 +1,4 @@
-# Logs
+# ── Logs ──────────────────────────────────────────────────────────
 logs
 *.log
 npm-debug.log*
@@ -7,23 +7,24 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# ── Build / runtime artefacts ────────────────────────────────────
 node_modules
 dist
 dist-ssr
 .output
 .vinxi
-.tanstack/**
+.tanstack/
 .nitro
 *.local
 
-# Wrangler / Cloudflare
+# ── Wrangler / Cloudflare ────────────────────────────────────────
 .wrangler/
 .dev.vars
 
-# Editor directories and files
+# ── Editor / OS ──────────────────────────────────────────────────
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
 *.suo
 *.ntvs*
@@ -31,20 +32,38 @@ dist-ssr
 *.sln
 *.sw?
 
-# instant-grep index
+# ── Local tooling ────────────────────────────────────────────────
+# instant-grep (ig) index + per-project ignore file
 .ig/
+.ignore
 
-# Playwright
+# Claude Code project-local skills (machine-specific, not part of the repo)
+.agents/
+
+# ── Playwright ───────────────────────────────────────────────────
 test-results/
 playwright-report/
 playwright/.cache/
+# MCP browser session debris (snapshots, console dumps, screenshots)
+.playwright-mcp/
 
-# Codex runtime (contains auth.json — never commit)
+# ── Images / screenshots ─────────────────────────────────────────
+# Never commit ad-hoc captures (Playwright, perf dumps, debugging shots).
+# Whitelist explicit assets via `git add -f` if a real image must be tracked.
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+
+# ── Codex runtime ────────────────────────────────────────────────
+# Contains auth.json — never commit
 .codex-home/
 
-# Task worktrees (created by task.start). Vite watches the project root and
-# would full-reload the page on every dispatch if these aren't ignored.
+# ── Task worktrees (created by task.start) ───────────────────────
+# Vite watches the project root and would full-reload the page on every
+# dispatch if these aren't ignored.
 .multica/
 
-# Local scratch
+# ── Local scratch ────────────────────────────────────────────────
 hello.py

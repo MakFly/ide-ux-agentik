@@ -2,8 +2,13 @@ import { Activity } from "lucide-react";
 import type { FC } from "react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL } from "@/lib/chat/models";
 import { cn } from "@/lib/utils";
-import { getContextWindow, supportsOneM } from "@/lib/chat/context-windows";
+import {
+  getDisplayContextWindow,
+  supportsContextOverride,
+  supportsOneM,
+} from "@/lib/chat/context-windows";
 import { useIDE, type TerminalKind } from "@/store/ide";
 import { ContextRing } from "@/components/assistant-ui/context-ring";
 
@@ -25,17 +30,43 @@ function formatCompact(n: number): string {
 export const StatusButton: FC<{
   cli: TerminalKind;
   estimatedUsed: number;
-}> = ({ cli, estimatedUsed }) => {
-  const model = useIDE((s) => s.selectedModelByCli[cli]);
+  draftTokens?: number;
+  runtimeModel?: string;
+  runtimeUsage?: { inputTokens: number; outputTokens: number };
+  runtimeContextWindow?: number;
+}> = ({
+  cli,
+  estimatedUsed,
+  draftTokens = 0,
+  runtimeModel,
+  runtimeUsage,
+  runtimeContextWindow,
+}) => {
+  const selectedModelRaw = useIDE((s) => s.selectedModelByCli[cli]);
+  const codexModel = useIDE((s) => s.codexModel);
   const claudeOverride = useIDE((s) => s.claudeContextOverride);
   const setClaudeOverride = useIDE((s) => s.setClaudeContextOverride);
-  const lastUsage = useIDE((s) => s.lastUsageByCli[cli]);
   const codexAuth = useIDE((s) => s.codexAuth);
   const claudeApiKey = useIDE((s) => s.claudeApiKey);
+  const selectedModel =
+    cli === "claude"
+      ? (selectedModelRaw ?? DEFAULT_CLAUDE_MODEL)
+      : cli === "codex"
+        ? (codexModel ?? DEFAULT_CODEX_MODEL)
+        : selectedModelRaw;
 
-  const max = getContextWindow(cli, model, claudeOverride);
-  const realUsed = lastUsage ? lastUsage.inputTokens + lastUsage.outputTokens : undefined;
-  const displayUsed = realUsed ?? estimatedUsed;
+  const model = selectedModel ?? runtimeModel;
+  const displayMax = getDisplayContextWindow({
+    cli,
+    configuredModel: selectedModel,
+    runtimeModel,
+    runtimeContextWindow,
+    override: claudeOverride,
+  });
+  const realUsed = runtimeUsage ? runtimeUsage.inputTokens + runtimeUsage.outputTokens : undefined;
+  const displayUsed =
+    realUsed !== undefined ? Math.max(realUsed + draftTokens, estimatedUsed) : estimatedUsed;
+  const canOverrideContext = supportsContextOverride(cli, model);
 
   const authSource =
     cli === "codex"
@@ -66,7 +97,7 @@ export const StatusButton: FC<{
             <span className="text-[10.5px] uppercase tracking-[0.12em] text-muted-foreground">
               {cli}
             </span>
-            <ContextRing used={displayUsed} max={max} />
+            <ContextRing used={displayUsed} max={displayMax} />
           </div>
           <div className="mt-1 font-mono text-[12px] text-foreground">
             {model ?? "(default model)"}
@@ -79,14 +110,16 @@ export const StatusButton: FC<{
               {formatCompact(displayUsed)}
               <span className="text-muted-foreground">
                 {" / "}
-                {formatCompact(max)}
+                {formatCompact(displayMax)}
               </span>
             </span>
           </Row>
           <Row label={realUsed !== undefined ? "Last turn" : "Estimate"}>
             <span className="tabular-nums text-muted-foreground">
               {realUsed !== undefined
-                ? `↑${formatCompact(lastUsage!.inputTokens)} ↓${formatCompact(lastUsage!.outputTokens)}`
+                ? draftTokens > 0
+                  ? `↑${formatCompact(runtimeUsage!.inputTokens)} ↓${formatCompact(runtimeUsage!.outputTokens)} +${draftTokens}`
+                  : `↑${formatCompact(runtimeUsage!.inputTokens)} ↓${formatCompact(runtimeUsage!.outputTokens)}`
                 : "~4 chars/token"}
             </span>
           </Row>
@@ -102,31 +135,43 @@ export const StatusButton: FC<{
             <div className="mb-1.5 text-[10.5px] uppercase tracking-wider text-muted-foreground">
               Context window
             </div>
-            <div className="flex items-center gap-1">
-              <OverrideChip
-                active={claudeOverride === undefined}
-                onClick={() => setClaudeOverride(undefined)}
-              >
-                Auto
-              </OverrideChip>
-              <OverrideChip
-                active={claudeOverride === "200k"}
-                onClick={() => setClaudeOverride("200k")}
-              >
-                200K
-              </OverrideChip>
-              <OverrideChip
-                active={claudeOverride === "1m"}
-                onClick={() => setClaudeOverride("1m")}
-              >
-                1M
-              </OverrideChip>
-            </div>
+            {canOverrideContext ? (
+              <div className="flex items-center gap-1">
+                <OverrideChip
+                  active={claudeOverride === undefined}
+                  onClick={() => setClaudeOverride(undefined)}
+                >
+                  Auto
+                </OverrideChip>
+                <OverrideChip
+                  active={claudeOverride === "200k"}
+                  onClick={() => setClaudeOverride("200k")}
+                >
+                  200K
+                </OverrideChip>
+                <OverrideChip
+                  active={claudeOverride === "1m"}
+                  onClick={() => setClaudeOverride("1m")}
+                >
+                  1M
+                </OverrideChip>
+              </div>
+            ) : (
+              <div className="font-mono text-[11px] text-foreground">1M native</div>
+            )}
             <div className="mt-1.5 text-[10.5px] text-muted-foreground">
-              Native 1M on Opus 4.7. Opus 4.6 / Sonnet 4.6 unlock 1M via the
-              <code className="mx-1 font-mono">[1m]</code>
-              suffix Claude Code appends to the model id — long-context pricing applies above 200K
-              on API & pay-as-you-go plans.
+              {canOverrideContext ? (
+                <>
+                  {
+                    "Auto now prefers the largest window available. Opus 4.6 / Sonnet 4.6 unlock 1M via the "
+                  }
+                  <code className="mx-1 font-mono">[1m]</code>
+                  suffix Claude Code appends to the model id — long-context pricing applies above
+                  200K on API & pay-as-you-go plans.
+                </>
+              ) : (
+                <>This model runs with a native 1M context window.</>
+              )}
             </div>
           </div>
         )}

@@ -1,5 +1,7 @@
 # ide-ux-agentik
 
+> **Version** : `v0.1.0-alpha.1` — voir [`CHANGELOG.md`](./CHANGELOG.md) pour les notes de release.
+
 GPU-accelerated IDE for AI coding agents — manage git worktrees and run Codex / Claude Code / OpenCode / Gemini in per-workspace chat or terminal sessions.
 
 > **Architecture in one line** : un agent Node tourne localement, le front Vite/React le pilote en WebSocket. L'agent **spawn les binaires CLI** (`codex`, `claude`, …) et streame leurs events JSON dans l'UI. **Pas d'appel API direct** vers Anthropic/OpenAI — toute l'intelligence vient du CLI installé localement.
