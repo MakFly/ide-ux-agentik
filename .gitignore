@@ -67,3 +67,4 @@ playwright/.cache/
 
 # ── Local scratch ────────────────────────────────────────────────
 hello.py
+config.bat
