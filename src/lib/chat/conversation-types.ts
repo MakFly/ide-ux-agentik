@@ -26,6 +26,7 @@ export type ToolCallItem = {
   kind: "tool_call";
   itemId: string;
   toolName: string; // "exec" / "read" / etc — according to item type
+  displayName?: string; // user-facing label such as "Frontend" for subagents
   command?: string; // command_execution
   input?: unknown; // for generic tool_use
   output?: string; // aggregated_output / stdout

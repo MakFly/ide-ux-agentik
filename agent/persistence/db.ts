@@ -305,7 +305,9 @@ function migrateIfNeeded(db: Database.Database): void {
   // Section 3.2 — sessions.kind
   if (!sessionCols.includes("kind")) {
     db.exec(`ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'terminal'`);
-    db.exec(`UPDATE sessions SET kind = CASE WHEN mode = 'chat' THEN 'chat' ELSE 'terminal' END WHERE kind = 'terminal' AND mode IS NOT NULL`);
+    db.exec(
+      `UPDATE sessions SET kind = CASE WHEN mode = 'chat' THEN 'chat' ELSE 'terminal' END WHERE kind = 'terminal' AND mode IS NOT NULL`,
+    );
     console.log(`[persistence] migration: added sessions.kind (backfilled from mode)`);
   }
 
@@ -328,9 +330,25 @@ function migrateIfNeeded(db: Database.Database): void {
 
   // Section 3.4 — tasks.parent_task_id
   if (!taskColsPost.includes("parent_task_id")) {
-    db.exec(`ALTER TABLE tasks ADD COLUMN parent_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL`);
+    db.exec(
+      `ALTER TABLE tasks ADD COLUMN parent_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL`,
+    );
+    db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id) WHERE parent_task_id IS NOT NULL`,
+    );
     console.log(`[persistence] migration: added tasks.parent_task_id`);
+  }
+
+  // v0.1.0-alpha.1 — workspaces.root_path_ownership
+  // Tracks whether the rootPath was selected by the user (do NOT delete on remove)
+  // or created by the app (e.g. github clone — safe to delete).
+  // Existing rows stay NULL; the server treats NULL as "user-selected" (safe default).
+  const wsCols = (db.prepare(`PRAGMA table_info(workspaces)`).all() as { name: string }[]).map(
+    (r) => r.name,
+  );
+  if (!wsCols.includes("root_path_ownership")) {
+    db.exec(`ALTER TABLE workspaces ADD COLUMN root_path_ownership TEXT`);
+    console.log(`[persistence] migration: added workspaces.root_path_ownership`);
   }
 }
 
@@ -397,6 +415,7 @@ export type DbWorkspaceRow = {
   source_label: string | null;
   source_handle_id: string | null;
   source_name: string | null;
+  root_path_ownership: "user-selected" | "app-created" | null;
   created_at: number;
 };
 
@@ -447,6 +466,7 @@ type WorkspaceUpsertParams = {
   color: string;
   gitUrl?: string;
   rootPath?: string;
+  rootPathOwnership?: "user-selected" | "app-created";
   source: {
     kind: string;
     url?: string;
@@ -478,9 +498,9 @@ export const workspacesRepo = {
         `INSERT INTO workspaces (
             id, org_id, name, letter, color, git_url, root_path,
             source_kind, source_url, source_token, source_label,
-            source_handle_id, source_name, created_at
+            source_handle_id, source_name, root_path_ownership, created_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             org_id = excluded.org_id,
             name = excluded.name,
@@ -493,7 +513,8 @@ export const workspacesRepo = {
             source_token = excluded.source_token,
             source_label = excluded.source_label,
             source_handle_id = excluded.source_handle_id,
-            source_name = excluded.source_name`,
+            source_name = excluded.source_name,
+            root_path_ownership = excluded.root_path_ownership`,
       )
       .run(
         ws.id,
@@ -509,6 +530,7 @@ export const workspacesRepo = {
         ws.source.label ?? null,
         ws.source.handleId ?? null,
         ws.source.name ?? null,
+        ws.rootPathOwnership ?? null,
         createdAt,
       );
     return openDb().prepare(`SELECT * FROM workspaces WHERE id = ?`).get(ws.id) as DbWorkspaceRow;
@@ -603,7 +625,18 @@ export const sessionsRepo = {
     const now = Date.now();
     const id = params.id ?? randomUUID();
     db.prepare<
-      [string, string, string, string | null, string | null, string | null, string, string, number, number]
+      [
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        string | null,
+        string,
+        string,
+        number,
+        number,
+      ]
     >(
       `INSERT OR IGNORE INTO sessions (id, workspace_id, cli, title, model, approval_mode, mode, kind, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1094,9 +1127,10 @@ export const tasksRepo = {
   listChildren(parentId: string): DbTask[] {
     const db = openDb();
     return db
-      .prepare<[string], DbTask>(
-        `SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC`,
-      )
+      .prepare<
+        [string],
+        DbTask
+      >(`SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC`)
       .all(parentId);
   },
 

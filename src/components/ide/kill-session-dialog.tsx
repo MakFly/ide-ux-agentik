@@ -33,13 +33,13 @@ export function KillSessionDialog({
   trigger: ReactNode;
 }) {
   const closeAgentSession = useIDE((s) => s.closeAgentSession);
-  const closeSessionTab = useIDE((s) => s.closeSessionTab);
+  const setActiveThread = useIDE((s) => s.setActiveThread);
   const label = CLI_LABELS[session.kind];
   const isTaskSession = !!(session.taskRootId || session.taskId);
 
   async function kill() {
     if (isTaskSession) {
-      closeSessionTab(session.id);
+      setActiveThread(null);
       return;
     }
 
@@ -65,12 +65,12 @@ export function KillSessionDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            {isTaskSession ? "Close task tab?" : `Kill ${label} session?`}
+            {isTaskSession ? "Close task view?" : `Kill ${label} session?`}
           </AlertDialogTitle>
           {isTaskSession ? (
             <AlertDialogDescription>
-              Closes this tab only. The task stays in the sidebar and can be reopened from the task
-              list.
+              Leaves the task selected view and returns to the empty composer. The task stays in the
+              sidebar and can be reopened from the thread list.
               <br />
               <span className="mt-2 block font-mono text-[11.5px] text-muted-foreground">
                 {session.title || label} · {session.id}
@@ -94,7 +94,7 @@ export function KillSessionDialog({
             className={cn(buttonVariants({ variant: "destructive" }))}
             onClick={() => void kill()}
           >
-            {isTaskSession ? "Close tab" : "Kill session"}
+            {isTaskSession ? "Close view" : "Kill session"}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

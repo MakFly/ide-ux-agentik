@@ -73,8 +73,11 @@ export function PtyTerminal({
   const termRef = useRef<XtermLike | null>(null);
   const [ready, setReady] = useState(false);
 
-  const source = workspaces.find((w) => w.id === activeWorkspaceId)?.source;
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
+  const source = activeWorkspace?.source;
   const isRemote = source?.kind === "remote-agent";
+  const argsKey = JSON.stringify(args);
+  const extraEnvKey = JSON.stringify(extraEnv ?? {});
 
   useEffect(() => {
     // Skip xterm mount when there's no agent — the NoAgentBanner takes over.
@@ -179,16 +182,19 @@ export function PtyTerminal({
         const fresh = useIDE.getState().codexAuth ?? codexAuth;
         try {
           const { buildAuthDotJson } = await import("@/lib/codex-auth");
-          await provider.mkdir(".codex-home").catch(() => {});
+          const codexHomePath = activeWorkspace?.rootPath
+            ? `${activeWorkspace.rootPath.replace(/\/+$/, "")}/.codex-home`
+            : ".codex-home";
+          await provider.mkdir(codexHomePath).catch(() => {});
           await provider.writeFile(
-            ".codex-home/auth.json",
+            `${codexHomePath}/auth.json`,
             buildAuthDotJson({
               idToken: fresh.idToken,
               accessToken: fresh.accessToken,
               refreshToken: fresh.refreshToken,
             }),
           );
-          env.CODEX_HOME = ".codex-home";
+          env.CODEX_HOME = codexHomePath;
         } catch (err) {
           instance.writeln(
             `\x1b[33m[codex auth.json write failed: ${err instanceof Error ? err.message : String(err)}]\x1b[0m`,
@@ -197,12 +203,10 @@ export function PtyTerminal({
       }
 
       try {
-        // cwd omitted on purpose: agent defaults to its --root (= the project
-        // folder). Our in-store worktree.path is mock-seeded and would be
-        // clamped anyway.
         ptyHandle = await provider.ptySpawn({
           cmd,
           args,
+          cwd: activeWorkspace?.rootPath,
           cols: instance.cols,
           rows: instance.rows,
           env,
@@ -251,12 +255,13 @@ export function PtyTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeWorkspaceId,
+    activeWorkspace?.rootPath,
     cmd,
-    JSON.stringify(args),
+    argsKey,
     resetKey,
     codexAuth,
     codexApiKey,
-    JSON.stringify(extraEnv ?? {}),
+    extraEnvKey,
     injectCodexAuth,
     injectCodexApiKey,
     // `banner` is intentionally NOT a dep: it's written once at boot and a

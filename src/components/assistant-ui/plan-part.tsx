@@ -59,7 +59,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { parsePlanMarkdown } from "@/lib/chat/plan-mode";
+import { parsePlanMarkdown, setPlanModeForCli } from "@/lib/chat/plan-mode";
+import { useIDE, type TerminalKind } from "@/store/ide";
 
 export type PlanStep = {
   step: string;
@@ -90,6 +91,7 @@ function StepIcon({ status }: { status: PlanStep["status"] }) {
 // discard state across both.
 
 const DISCARD_LS_KEY = "ide-ux-agentik:plan-discards";
+const APPROVED_LS_KEY = "ide-ux-agentik:plan-approvals";
 
 function planContentHash(args: PlanArgs): string {
   const canonical = JSON.stringify({
@@ -130,6 +132,30 @@ function persistDiscard(hash: string, on: boolean) {
   }
 }
 
+function readApprovedSet(): Set<string> {
+  try {
+    const raw = localStorage.getItem(APPROVED_LS_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw) as unknown;
+    return Array.isArray(arr)
+      ? new Set(arr.filter((x): x is string => typeof x === "string"))
+      : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function persistApproved(hash: string, on: boolean) {
+  const set = readApprovedSet();
+  if (on) set.add(hash);
+  else set.delete(hash);
+  try {
+    localStorage.setItem(APPROVED_LS_KEY, JSON.stringify([...set]));
+  } catch {
+    /* quota or disabled — silently degrade to in-session-only */
+  }
+}
+
 /** Reverse of parsePlanMarkdown: serialize a structured plan back to the
  *  hardened markdown format so it round-trips through the editor. */
 function planToMarkdown(args: PlanArgs): string {
@@ -152,17 +178,45 @@ function planToMarkdown(args: PlanArgs): string {
   return lines.join("\n");
 }
 
+function approvalPrompt(args: PlanArgs): string {
+  return [
+    "Approve the plan above and execute the approved plan to completion.",
+    "",
+    "## Exited Plan Mode",
+    "",
+    "You have exited plan mode. You can now make edits, run tools, and take actions.",
+    "",
+    "Execution instructions:",
+    "- Exit plan mode now. Do not produce another plan unless execution is blocked.",
+    "- Execute every pending step in the approved plan, not only step 1.",
+    "- Use the approved plan below as the source of truth and report what was completed.",
+    "",
+    "Approved plan:",
+    planToMarkdown(args),
+  ].join("\n");
+}
+
 // Window during which Discard can be undone via the inline placeholder. After
 // this elapses, the placeholder fades and the plan is gone for the session.
 const UNDO_WINDOW_MS = 6000;
 
 export const PlanStepList: ToolCallMessagePartComponent = ({ args }) => {
   const runtime = useAssistantRuntime();
+  const activeCli = useIDE((s) => {
+    const activeThread = s.selectActiveAgentThread(s.activeWorkspaceId);
+    if (activeThread?.cli) return activeThread.cli;
+    const composerAgent = s.composerAgentByWorkspaceId[s.activeWorkspaceId];
+    if (composerAgent) return composerAgent;
+    const sessions = s.sessionsByWorkspaceId[s.activeWorkspaceId] ?? [];
+    const activeId = s.activeSessionIdByWorkspaceId[s.activeWorkspaceId];
+    return sessions.find((t) => t.id === activeId)?.kind ?? s.activeAgent;
+  }) as TerminalKind;
   const original = (args ?? {}) as PlanArgs;
 
   const [override, setOverride] = useState<PlanArgs | null>(null);
   const [refineOpen, setRefineOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [approving, setApproving] = useState(false);
 
   const current: PlanArgs = override ?? original;
   const { title, explanation, steps = [], followUps = [] } = current;
@@ -171,15 +225,20 @@ export const PlanStepList: ToolCallMessagePartComponent = ({ args }) => {
   // Discard state: "active" (visible), "undoable" (placeholder, can undo),
   // "gone" (collapsed to null). On mount, hydrate from localStorage so a
   // previously-discarded plan stays discarded across refreshes.
-  const [phase, setPhase] = useState<"active" | "undoable" | "gone">(() =>
-    typeof window !== "undefined" && readDiscardSet().has(hash) ? "gone" : "active",
-  );
+  const [phase, setPhase] = useState<"active" | "approved" | "undoable" | "gone">(() => {
+    if (typeof window === "undefined") return "active";
+    if (readDiscardSet().has(hash)) return "gone";
+    if (readApprovedSet().has(hash)) return "approved";
+    return "active";
+  });
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // If hash changes (Refine produced new content), reset to active.
   useEffect(() => {
     if (typeof window === "undefined") return;
-    setPhase(readDiscardSet().has(hash) ? "gone" : "active");
+    if (readDiscardSet().has(hash)) setPhase("gone");
+    else if (readApprovedSet().has(hash)) setPhase("approved");
+    else setPhase("active");
   }, [hash]);
 
   // Cleanup timer on unmount.
@@ -200,6 +259,23 @@ export const PlanStepList: ToolCallMessagePartComponent = ({ args }) => {
       runtime.thread.composer.setText(text);
     } catch (e) {
       console.warn("[plan] composer.setText failed:", e);
+    }
+  }
+
+  async function approveAndExecute() {
+    const text = approvalPrompt(current);
+    setApproving(true);
+    try {
+      setPlanModeForCli(activeCli, false);
+      runtime.thread.composer.setText(text);
+      await runtime.thread.composer.send();
+      persistApproved(hash, true);
+      setPhase("approved");
+    } catch (e) {
+      console.warn("[plan] composer.send failed:", e);
+      setComposer(text);
+    } finally {
+      setApproving(false);
     }
   }
 
@@ -279,37 +355,48 @@ export const PlanStepList: ToolCallMessagePartComponent = ({ args }) => {
         </ul>
 
         {/* Action bar */}
-        <div className="flex items-center gap-2 border-t bg-muted/30 px-4 py-2">
-          <Button
-            size="sm"
-            className="h-8 gap-1.5"
-            onClick={() => setComposer("Approve the plan above and start executing step 1.")}
-          >
-            <Play className="size-3.5" />
-            Approve &amp; execute
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-8 gap-1.5"
-            onClick={() => setRefineOpen(true)}
-          >
-            <Pencil className="size-3.5" />
-            Refine
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-8 gap-1.5 text-muted-foreground hover:text-destructive"
-            onClick={() => setConfirmOpen(true)}
-          >
-            <Trash2 className="size-3.5" />
-            Discard
-          </Button>
-        </div>
+        {phase === "approved" ? (
+          <div className="flex items-center gap-2 border-t bg-green-500/10 px-4 py-2 text-sm text-green-700 dark:text-green-400">
+            <CheckCircle2 className="size-4 shrink-0" />
+            <span className="font-medium">Plan approved</span>
+            <span className="text-muted-foreground">Execution started; plan mode is off.</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 border-t bg-muted/30 px-4 py-2">
+            <Button
+              size="sm"
+              className="h-8 gap-1.5"
+              disabled={approving}
+              onClick={() => void approveAndExecute()}
+            >
+              <Play className="size-3.5" />
+              {approving ? "Approving..." : "Approve & execute"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 gap-1.5"
+              disabled={approving}
+              onClick={() => setRefineOpen(true)}
+            >
+              <Pencil className="size-3.5" />
+              Refine
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-8 gap-1.5 text-muted-foreground hover:text-destructive"
+              disabled={approving}
+              onClick={() => setConfirmOpen(true)}
+            >
+              <Trash2 className="size-3.5" />
+              Discard
+            </Button>
+          </div>
+        )}
 
         {/* Follow-up suggestions */}
-        {followUps.length > 0 && (
+        {phase !== "approved" && followUps.length > 0 && (
           <div className="border-t px-4 py-2.5">
             <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
               Follow-up suggestions

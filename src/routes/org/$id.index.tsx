@@ -38,8 +38,9 @@ const searchSchema = z.object({
   workspace: z.string().optional(),
   branch: z.string().optional(),
   tab: tabSchema.optional(),
-  // Wave 2: task-centric URL — `?task=<id>` mirrors store.activeTaskId.
+  // Back-compat: `?task=<id>` opens the owning thread; store writes `?thread=<id>`.
   task: z.string().optional(),
+  thread: z.string().optional(),
 });
 
 export const Route = createFileRoute("/org/$id/")({
@@ -58,7 +59,7 @@ function OrgPage() {
     navigate({
       search: (prev) => {
         const next = { ...(prev as Record<string, unknown>), ...nextSearch };
-        for (const key of ["workspace", "branch", "tab", "task"] as const) {
+        for (const key of ["workspace", "branch", "tab", "task", "thread"] as const) {
           if (next[key] === undefined) {
             delete next[key];
           }
@@ -137,7 +138,7 @@ function OrgWorkspaceHub({ invalidWorkspaceId }: { invalidWorkspaceId?: string }
               </Link>
             </Button>
             <Button asChild variant="outline" size="sm" className="gap-2">
-              <Link to="/org/$id/settings" params={{ id: org.id }}>
+              <Link to="/settings" search={{ section: "organization" }}>
                 <Settings className="h-3.5 w-3.5" />
                 Org settings
               </Link>
@@ -178,7 +179,7 @@ function OrgWorkspaceHub({ invalidWorkspaceId }: { invalidWorkspaceId?: string }
             <div>
               <div className="text-[15px] font-semibold">Add a workspace</div>
               <p className="mt-2 text-[13px] leading-5 text-muted-foreground">
-                Connect a remote agent, pick a local folder, or clone a repository.
+                Create a workspace on an existing agent or clone a repository on an agent.
               </p>
             </div>
           </button>
@@ -199,7 +200,7 @@ function OrgWorkspaceHub({ invalidWorkspaceId }: { invalidWorkspaceId?: string }
           <DialogHeader>
             <DialogTitle>Add workspace</DialogTitle>
             <DialogDescription>
-              Open a local folder, connect a remote agent, or clone a GitHub repo.
+              Create a workspace on an existing agent or clone a repository on an agent.
             </DialogDescription>
           </DialogHeader>
           <AddWorkspaceForm

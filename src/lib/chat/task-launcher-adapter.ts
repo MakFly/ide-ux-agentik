@@ -1,5 +1,7 @@
 import type { ChatModelAdapter, ChatModelRunResult } from "@assistant-ui/react";
 import { useIDE } from "@/store/ide";
+import { applyPlanModePrompt, isPlanModeOn } from "@/lib/chat/plan-mode";
+import { DEFAULT_CLAUDE_MODEL } from "@/lib/chat/models";
 
 /**
  * Legacy adapter kept for any route that still mounts a local assistant-ui runtime.
@@ -21,26 +23,36 @@ export const taskLauncherAdapter: ChatModelAdapter = {
 
     try {
       const store = useIDE.getState();
-      const activeTask = store.activeTaskId
-        ? ((store.tasksByWorkspaceId[store.activeWorkspaceId] ?? []).find(
-            (t) => t.id === store.activeTaskId,
-          ) ?? null)
-        : null;
+      const activeThread = store.selectActiveAgentThread(store.activeWorkspaceId);
+      const activeTask =
+        activeThread?.rootTaskId || activeThread?.latestTaskId
+          ? ((store.tasksByWorkspaceId[store.activeWorkspaceId] ?? []).find(
+              (t) => t.id === (activeThread.rootTaskId ?? activeThread.latestTaskId),
+            ) ?? null)
+          : null;
       const activeAgent =
         (activeTask?.cli as typeof store.activeAgent | undefined) ??
         store.composerAgentByWorkspaceId[store.activeWorkspaceId] ??
+        activeThread?.cli ??
         store.activeAgent;
-      const selectedModel = store.selectedModelByCli[activeAgent];
+      const selectedModel =
+        activeAgent === "codex"
+          ? (store.codexModel ?? undefined)
+          : activeAgent === "claude"
+            ? (store.selectedModelByCli[activeAgent] ?? DEFAULT_CLAUDE_MODEL)
+            : store.selectedModelByCli[activeAgent];
+      const agentPrompt = isPlanModeOn(activeAgent) ? applyPlanModePrompt(prompt) : prompt;
       if (activeTask) {
-        await store.continueTaskFromPrompt(activeTask.id, prompt, {
+        await store.continueTaskFromPrompt(activeTask.id, agentPrompt, {
           model: selectedModel,
           effort: activeTask.effort ?? undefined,
         });
       } else {
         console.info(`[taskLauncherAdapter] creating task for prompt: ${prompt.slice(0, 60)}…`);
-        await store.createTaskFromPrompt(prompt, {
+        await store.createTaskFromPrompt(agentPrompt, {
           cli: activeAgent,
           model: selectedModel,
+          displayPrompt: prompt,
         });
       }
     } catch (err) {

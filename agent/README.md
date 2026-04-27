@@ -61,6 +61,27 @@ SSH connection from inside the app.
 | `--host`    | `AGENT_HOST`     | `0.0.0.0` | Bind address (use `127.0.0.1` + tunnel) |
 | `--token`   | `AGENT_TOKEN`    | —         | Shared secret (required)                |
 
+## Observability
+
+Agent logs are structured JSON lines on stdout/stderr with an ISO `ts`, a `level`,
+an `event`, and contextual fields such as `taskId`, `sessionId`, `cli`, `attempt`,
+`exitCode`, and `signal`.
+
+```bash
+AGENT_LOG_LEVEL=debug bun run agent/server.ts --root "$PWD" --port 7421 --token "$TOKEN"
+```
+
+Supported levels are `debug`, `info`, `warn`, and `error`; default is `info`.
+Sensitive fields whose key looks like a token, password, secret, cookie, or API key
+are redacted before logging.
+
+Recoverable CLI resume failures are handled explicitly for every CLI adapter
+that supports resuming (`codex resume`, `claude --resume`, `gemini -r`,
+`opencode --session`). If a CLI reports a stale conversation/session/thread, the
+agent clears the stale `agent_session_id`, logs `task.*.resume_retry`, stores a
+task diagnostic with code `cli_resume_missing_retry`, and retries that turn once
+without the resume flag.
+
 ## Codex login (device-code flow)
 
 To authenticate Codex from the webapp, use **`codex login --device-auth`** exclusively.

@@ -18,17 +18,18 @@ versionner ici sous `docs/research/workflow-<app>-<date>.md`.
 ## Quand l'utiliser
 
 À chaque fois qu'on veut :
+
 - Comparer notre arborescence de workflow à un concurrent visible
 - Documenter "ce qu'on n'a pas encore" avant un refactor (cf. commit 3)
 - Garder une trace versionnée des conventions UX adoptées par d'autres
 
 ## Cibles immédiates (à générer manuellement)
 
-| Cible | Status | Rapport attendu |
-|---|---|---|
-| Cursor agent window | TODO | `docs/research/workflow-cursor-agent-2026-04-26.md` |
-| Superconductor (vue tâches) | TODO | `docs/research/workflow-superconductor-2026-04-26.md` |
-| Synthèse comparative | TODO | `docs/research/workflow-synthese-2026-04-26.md` |
+| Cible                       | Status | Rapport attendu                                       |
+| --------------------------- | ------ | ----------------------------------------------------- |
+| Cursor agent window         | DONE   | `docs/research/workflow-cursor-agent-2026-04-26.md`   |
+| Superconductor (vue tâches) | DONE   | `docs/research/workflow-superconductor-2026-04-26.md` |
+| Synthèse comparative        | DONE   | `docs/research/workflow-synthese-2026-04-26.md`       |
 
 > Les captures requièrent l'accès **Enregistrement d'écran** macOS pour le
 > terminal qui lance `workflow-rev` (Réglages → Confidentialité → Enregistrement d'écran).
@@ -51,6 +52,7 @@ cp ./reports/cursor-*.md \
 ## Sécurité — rappel
 
 L'outil envoie des **screenshots** à un LLM hébergé. Avant chaque capture :
+
 1. Cadrer la fenêtre cible (pas tout l'écran)
 2. Vider toute zone contenant tokens, mots de passe, code privé sensible
 3. Fermer les notifications systèmes (Slack, mail) qui pourraient apparaître

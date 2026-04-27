@@ -58,6 +58,13 @@ export type Task = {
   parentTaskId: string | null;
 };
 
+export type AgentTaskAttachment = {
+  name: string;
+  contentType: string;
+  kind: "image" | "document" | "file" | string;
+  data: string;
+};
+
 /**
  * Remote-agent provider.
  *
@@ -78,6 +85,7 @@ export type Task = {
  *
  * Notifications (server → client):
  *   - { method: "watch", params: { subId, event } }
+ *   - { method: "task.queued", params: { taskId: string, reason?: string } }
  */
 
 type JsonRpcId = string | number;
@@ -150,6 +158,7 @@ export class RemoteAgentProvider implements FsProvider {
   >();
   private cloneEndListeners = new Map<string, Set<(r: { code: number; dest: string }) => void>>();
   private taskCreatedListeners = new Set<(t: Task) => void>();
+  private taskQueuedListeners = new Set<(e: { taskId: string; reason?: string }) => void>();
   private taskStartedListeners = new Set<
     (e: { taskId: string; sessionId: string; worktreePath: string; branchName: string }) => void
   >();
@@ -203,6 +212,7 @@ export class RemoteAgentProvider implements FsProvider {
           this.cloneProgressListeners.clear();
           this.cloneEndListeners.clear();
           this.taskCreatedListeners.clear();
+          this.taskQueuedListeners.clear();
           this.taskStartedListeners.clear();
           this.taskEventListeners.clear();
           this.taskEndedListeners.clear();
@@ -293,6 +303,7 @@ export class RemoteAgentProvider implements FsProvider {
       this.cloneProgressListeners.clear();
       this.cloneEndListeners.clear();
       this.taskCreatedListeners.clear();
+      this.taskQueuedListeners.clear();
       this.taskStartedListeners.clear();
       this.taskEventListeners.clear();
       this.taskEndedListeners.clear();
@@ -391,6 +402,20 @@ export class RemoteAgentProvider implements FsProvider {
       }
       return;
     }
+    if ("method" in msg && msg.method === "task.queued") {
+      const { taskId, reason } = msg.params as {
+        taskId: string;
+        reason?: string;
+      };
+      for (const cb of this.taskQueuedListeners) {
+        try {
+          cb({ taskId, reason });
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
     if ("method" in msg && msg.method === "task.started") {
       const { taskId, sessionId, worktreePath, branchName } = msg.params as {
         taskId: string;
@@ -481,6 +506,12 @@ export class RemoteAgentProvider implements FsProvider {
 
   async list(path: string): Promise<FsEntry[]> {
     return this.call<FsEntry[]>("ls", { path });
+  }
+  async hostHome(): Promise<{ path: string }> {
+    return this.call<{ path: string }>("host.home", {});
+  }
+  async hostPickDirectory(): Promise<{ path: string; name: string } | null> {
+    return this.call<{ path: string; name: string } | null>("host.pickDirectory", {});
   }
   async stat(path: string): Promise<FsEntry> {
     return this.call<FsEntry>("stat", { path });
@@ -623,6 +654,7 @@ export class RemoteAgentProvider implements FsProvider {
     baseRef?: string;
     parentSessionId?: string;
     parentTaskId?: string;
+    attachments?: AgentTaskAttachment[];
   }): Promise<{ id: string; sessionId: string }> {
     return this.call("task.create", params);
   }
@@ -659,8 +691,8 @@ export class RemoteAgentProvider implements FsProvider {
     });
   }
 
-  async taskStart(id: string): Promise<void> {
-    await this.call<void>("task.start", { id });
+  async taskStart(id: string): Promise<{ status?: Task["status"] } | null> {
+    return this.call<{ status?: Task["status"] } | null>("task.start", { id });
   }
 
   async taskContinue(params: {
@@ -668,8 +700,9 @@ export class RemoteAgentProvider implements FsProvider {
     prompt: string;
     model?: string;
     effort?: string;
-  }): Promise<void> {
-    await this.call<void>("task.continue", params);
+    attachments?: AgentTaskAttachment[];
+  }): Promise<{ status?: Task["status"] } | null> {
+    return this.call<{ status?: Task["status"] } | null>("task.continue", params);
   }
 
   async taskCancel(id: string): Promise<void> {
@@ -717,6 +750,11 @@ export class RemoteAgentProvider implements FsProvider {
   onTaskCreated(cb: (task: Task) => void): () => void {
     this.taskCreatedListeners.add(cb);
     return () => this.taskCreatedListeners.delete(cb);
+  }
+
+  onTaskQueued(cb: (e: { taskId: string; reason?: string }) => void): () => void {
+    this.taskQueuedListeners.add(cb);
+    return () => this.taskQueuedListeners.delete(cb);
   }
 
   onTaskStarted(

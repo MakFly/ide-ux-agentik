@@ -40,6 +40,42 @@ Required output — use EXACTLY this structure, nothing before, nothing after, n
 
 Do NOT add a "Critical Files", "Analysis", "Context" or any other extra section. Do NOT prefix steps with numbers — the "- [ ]" prefix is mandatory.`;
 
+const PLAN_MODE_SEPARATOR = "\n\n--- USER REQUEST ---\n";
+export const PLAN_MODE_STORAGE_KEY = "plan-mode-by-cli";
+
+function readPlanModeStore(): Record<string, boolean> {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    return JSON.parse(localStorage.getItem(PLAN_MODE_STORAGE_KEY) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+export function isPlanApprovalPrompt(prompt: string): boolean {
+  const normalized = prompt.trim().toLowerCase();
+  return (
+    /^approve\b/.test(normalized) ||
+    /^execute\b/.test(normalized) ||
+    normalized.includes("approve the plan") ||
+    normalized.includes("start executing")
+  );
+}
+
+export function applyPlanModePrompt(prompt: string): string {
+  const trimmed = prompt.trim();
+  if (!trimmed || trimmed.startsWith(PLAN_MODE_SYSTEM_PREFIX) || isPlanApprovalPrompt(trimmed)) {
+    return prompt;
+  }
+  return `${PLAN_MODE_SYSTEM_PREFIX}${PLAN_MODE_SEPARATOR}${trimmed}`;
+}
+
+export function stripPlanModePrompt(prompt: string): string {
+  if (!prompt.startsWith(PLAN_MODE_SYSTEM_PREFIX)) return prompt;
+  const [, userRequest] = prompt.split(PLAN_MODE_SEPARATOR);
+  return userRequest?.trim() || prompt;
+}
+
 export type ParsedPlan = {
   title?: string;
   explanation?: string;
@@ -95,13 +131,17 @@ export function parsePlanMarkdown(text: string): ParsedPlan | null {
 }
 
 export function isPlanModeOn(cli: "codex" | "claude" | "opencode" | "gemini"): boolean {
-  try {
-    const m = JSON.parse(localStorage.getItem("plan-mode-by-cli") ?? "{}") as Record<
-      string,
-      boolean
-    >;
-    return m[cli] === true;
-  } catch {
-    return false;
+  return readPlanModeStore()[cli] === true;
+}
+
+export function setPlanModeForCli(
+  cli: "codex" | "claude" | "opencode" | "gemini",
+  enabled: boolean,
+): void {
+  if (typeof localStorage === "undefined") return;
+  const next = { ...readPlanModeStore(), [cli]: enabled };
+  localStorage.setItem(PLAN_MODE_STORAGE_KEY, JSON.stringify(next));
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("plan-mode-change", { detail: { cli, enabled } }));
   }
 }

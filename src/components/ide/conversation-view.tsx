@@ -134,11 +134,22 @@ function DotDotDot() {
  * and collapsible output pane.
  */
 function ToolCallCard({ item }: { item: ToolCallItem }) {
+  const isSubagent = item.toolName === "spawn_agent";
+  const headerLabel = isSubagent ? "Sub-agent" : item.toolName;
+  const subLabel = item.displayName ?? null;
+  const inputPreview =
+    !item.command && item.input != null ? JSON.stringify(item.input).slice(0, 80) : null;
+
   return (
     <div className="mx-4 my-2 rounded-md border border-border bg-card overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/40 text-[11.5px] flex-wrap">
         <StatusIcon status={item.status} />
-        <span className="font-mono font-medium text-foreground">{item.toolName}</span>
+        <span className="font-mono font-medium text-foreground">{headerLabel}</span>
+        {subLabel && (
+          <span className="rounded-md border border-border/60 bg-muted/45 px-1.5 py-0.5 text-[10px] font-medium text-foreground">
+            {subLabel}
+          </span>
+        )}
         {item.command && (
           <span
             className="font-mono text-muted-foreground truncate flex-1 min-w-0"
@@ -147,12 +158,12 @@ function ToolCallCard({ item }: { item: ToolCallItem }) {
             $ {item.command}
           </span>
         )}
-        {!item.command && item.input != null && (
+        {!item.command && inputPreview && (
           <span
             className="text-muted-foreground truncate flex-1 min-w-0"
             title={JSON.stringify(item.input)}
           >
-            {JSON.stringify(item.input).slice(0, 80)}
+            {inputPreview}
           </span>
         )}
         {item.exitCode !== null && item.exitCode !== undefined && (

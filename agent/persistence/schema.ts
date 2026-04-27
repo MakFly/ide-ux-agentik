@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   source_label  TEXT,
   source_handle_id TEXT,
   source_name   TEXT,
+  root_path_ownership TEXT,
   created_at    INTEGER NOT NULL
 );
 

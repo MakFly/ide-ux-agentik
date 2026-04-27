@@ -1,6 +1,6 @@
-import { execSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
@@ -12,6 +12,43 @@ type JsonRpcMessage = {
   result?: unknown;
   error?: { message?: string };
   params?: unknown;
+};
+
+type TestTask = {
+  id: string;
+  status: string;
+  cli?: "codex" | "claude";
+};
+
+type StoreSession = {
+  id: string;
+  kind: string;
+  taskRootId?: string;
+  taskId?: string;
+};
+
+type BrowserTestStore = {
+  activeWorkspaceId?: string | null;
+  activeTaskId?: string | null;
+  workspaces?: Array<{ id: string; source?: unknown }>;
+  tasksByWorkspaceId?: Record<string, TestTask[]>;
+  taskEventsByTaskId?: Record<string, Array<{ data: unknown }>>;
+  sessionsByWorkspaceId?: Record<string, StoreSession[]>;
+  composerAgentByWorkspaceId?: Record<string, "codex" | "claude">;
+  createTaskFromPrompt?: (
+    prompt: string,
+    options: { cli: "codex" | "claude" },
+  ) => Promise<Partial<TestTask>>;
+  setActiveWorkspace?: (id: string) => void;
+  setComposerAgent?: (id: string, cli: "codex" | "claude") => void;
+  setActiveTask?: (id: string) => void;
+  setActiveSession?: (id: string) => void;
+  closeSessionTab?: (id: string) => void;
+};
+
+type BrowserTestWindow = Window & {
+  __test?: { getStore?: () => BrowserTestStore };
+  __AGENT__?: { url: string; token: string; label?: string };
 };
 
 const AGENT_PORT = 7605;
@@ -133,7 +170,7 @@ class AgentRpcClient {
     ws.send(payload);
 
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve: (value) => resolve(value as T), reject });
     });
   }
 
@@ -147,27 +184,65 @@ class AgentRpcClient {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function buildFakeCliScript(runtimeMarker: string, emitWarning: boolean): string {
+function buildFakeCliScript(
+  runtimeMarker: string,
+  emitWarning: boolean,
+  options: { failResumeForPrompt?: string; staleResumeMessage?: string } = {},
+): string {
+  const failResumeForPrompt = options.failResumeForPrompt ?? null;
+  const staleResumeMessage =
+    options.staleResumeMessage ?? "No conversation found with session ID: {sessionId}";
   return `#!/usr/bin/env node
 const fs = require("node:fs");
 const rustLog = process.env.RUST_LOG || "";
+const doneDelayMs = Number(process.env.TASK_RUN_MS || 0);
+const args = process.argv.slice(2);
+const marker = "${runtimeMarker}";
+const promptArgIndex = args.indexOf("-p");
+const promptArg = promptArgIndex >= 0 ? String(args[promptArgIndex + 1] || "") : "";
+function readResumeSessionId() {
+  const namedFlags = ["--resume", "-r", "--session"];
+  for (const flag of namedFlags) {
+    const index = args.indexOf(flag);
+    if (index >= 0) return String(args[index + 1] || "");
+  }
+  const resumeCommandIndex = args.indexOf("resume");
+  if (resumeCommandIndex >= 0) {
+    const stdinDashIndex = args.lastIndexOf("-");
+    if (stdinDashIndex > resumeCommandIndex) return String(args[stdinDashIndex - 1] || "");
+  }
+  return "";
+}
+const resumeSessionId = readResumeSessionId();
+let stdinPrompt = "";
+try {
+  stdinPrompt = String(fs.readFileSync(0, "utf8"));
+} catch {}
+const prompt = String(promptArg || stdinPrompt).trim();
+if (${JSON.stringify(failResumeForPrompt)} && resumeSessionId && prompt.includes(${JSON.stringify(failResumeForPrompt)})) {
+  console.error(${JSON.stringify(staleResumeMessage)}.replace("{sessionId}", resumeSessionId));
+  process.exit(1);
+}
 if (${emitWarning ? "true" : "false"}) {
   if (${runtimeMarker ? `"${runtimeMarker}"` : '""'} && !String(rustLog).includes("codex_core::session=off")) {
   console.error("${WARNING_MARKER}: " + String(${runtimeMarker || "000"}));
   }
 }
-const prompt = String(fs.readFileSync(0, "utf8")).trim();
 const emit = (obj) => {
   process.stdout.write(String(JSON.stringify(obj)) + "\\n");
 };
-emit({ type: "thread.started" });
+emit({ type: "thread.started", session_id: marker });
 emit({ type: "turn.started" });
 emit({ type: "assistant_message", text: "Mock response for " + (prompt || "task") });
-emit({ type: "turn.completed" });
+if (Number.isFinite(doneDelayMs) && doneDelayMs > 0) {
+  setTimeout(() => emit({ type: "turn.completed" }), doneDelayMs);
+} else {
+  emit({ type: "turn.completed" });
+}
 `;
 }
 
-let agentProcess: ChildProcessWithoutNullStreams | null = null;
+let agentProcess: ChildProcess | null = null;
 let tmpRoot: string | null = null;
 let fakeBinDir: string | null = null;
 let client: AgentRpcClient | null = null;
@@ -199,9 +274,7 @@ async function readTaskFromStore(
   taskId: string,
 ): Promise<{ id: string; status: string } | null> {
   return page.evaluate((id) => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
     if (!store) return null;
     for (const tasks of Object.values(store.tasksByWorkspaceId || {})) {
       const match = (tasks ?? []).find((task: { id: string; status: string }) => task.id === id);
@@ -215,9 +288,7 @@ async function readTaskFromStore(
 
 async function readTurnCompletedFromStore(page: import("@playwright/test").Page, taskId: string) {
   return page.evaluate((tid) => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
     if (!store) return false;
     const events = (store.taskEventsByTaskId?.[tid] ?? []) as unknown[];
     return events.some((evt: unknown) => {
@@ -235,9 +306,7 @@ async function readTaskLogsFromStore(
   taskId: string,
 ): Promise<Array<{ data: unknown }>> {
   return page.evaluate((tid) => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
     const entries = (store?.taskEventsByTaskId?.[tid] ?? []) as Array<{ data: unknown }>;
     return entries;
   }, taskId);
@@ -272,15 +341,66 @@ async function waitForTaskStatus(
     .toBe(status);
 }
 
+function parseTaskLogData(row: { data?: unknown; data_json?: unknown }): unknown {
+  if (row.data !== undefined) return row.data;
+  if (typeof row.data_json !== "string") return row.data_json;
+  try {
+    return JSON.parse(row.data_json);
+  } catch {
+    return { type: "raw", text: row.data_json };
+  }
+}
+
 async function readTaskLogs(taskId: string) {
   if (!client) throw new Error("rpc client is not initialized");
-  return client.call<Array<{ data: unknown }>>("task.logs.list", { taskId });
+  const rows = await client.call<Array<{ data?: unknown; data_json?: unknown; source?: string }>>(
+    "task.logs.list",
+    { taskId },
+  );
+  return rows.map((row) => ({ ...row, data: parseTaskLogData(row) }));
 }
 
 async function readTaskLogsSafe(page: import("@playwright/test").Page, taskId: string) {
   const rpcLogs = await readTaskLogs(taskId).catch(() => []);
   const storeLogs = await readTaskLogsFromStore(page, taskId).catch(() => []);
   return [...rpcLogs, ...storeLogs];
+}
+
+async function createTasksViaStore(
+  page: import("@playwright/test").Page,
+  workspaceId: string,
+  requests: Array<{ cli: "codex" | "claude"; prompt: string }>,
+): Promise<Array<{ id: string; cli: "codex" | "claude"; status: string }>> {
+  return page.evaluate(
+    (input) => {
+      const { activeWorkspaceId, items } = input;
+      const store = (window as BrowserTestWindow).__test?.getStore?.();
+      if (!store) throw new Error("store unavailable");
+      if (!store.createTaskFromPrompt) throw new Error("createTaskFromPrompt is unavailable");
+      if (String(store.activeWorkspaceId ?? "") !== String(activeWorkspaceId)) {
+        throw new Error(
+          `active workspace mismatch: expected ${activeWorkspaceId}, got ${store.activeWorkspaceId}`,
+        );
+      }
+
+      return Promise.all(
+        (items as Array<{ cli: "codex" | "claude"; prompt: string }>).map(async (entry) => {
+          const task = await store.createTaskFromPrompt!(entry.prompt, {
+            cli: entry.cli,
+          });
+          if (!task?.id) {
+            throw new Error("createTaskFromPrompt did not return task id");
+          }
+          return {
+            id: task.id as string,
+            cli: entry.cli,
+            status: (task.status ?? "queued") as string,
+          };
+        }),
+      );
+    },
+    { activeWorkspaceId: workspaceId, items: requests },
+  );
 }
 
 function dataToText(data: unknown): string {
@@ -335,7 +455,7 @@ async function setTestEndpointInBrowser(page: import("@playwright/test").Page) {
         "agentik.global-agent.endpoint.v1",
         JSON.stringify({ url, token, label: "e2e-local-agent" }),
       );
-      (window as unknown as { __AGENT__?: { url: string; token: string } }).__AGENT__ = {
+      (window as BrowserTestWindow).__AGENT__ = {
         url,
         token,
         label: "e2e-local-agent",
@@ -354,9 +474,7 @@ async function waitForActiveWorkspaceInStore(
     .poll(
       async () => {
         return page.evaluate((id) => {
-          const store = (
-            window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-          ).__test?.getStore?.();
+          const store = (window as BrowserTestWindow).__test?.getStore?.();
           return (
             store?.workspaces?.some((workspace: { id: string }) => workspace.id === id) ?? false
           );
@@ -373,12 +491,10 @@ async function setActiveWorkspaceInStore(
 ) {
   await waitForActiveWorkspaceInStore(page, workspaceId);
   await page.evaluate((id) => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
     if (!store) return;
     if (store.activeWorkspaceId !== id) {
-      store.setActiveWorkspace(id);
+      store.setActiveWorkspace?.(id);
     }
   }, workspaceId);
 
@@ -386,9 +502,7 @@ async function setActiveWorkspaceInStore(
     .poll(
       async () =>
         page.evaluate((id) => {
-          const store = (
-            window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-          ).__test?.getStore?.();
+          const store = (window as BrowserTestWindow).__test?.getStore?.();
           return store?.activeWorkspaceId === id;
         }, workspaceId),
       { timeout: 10_000 },
@@ -410,9 +524,7 @@ async function ensureComposerAgent(
 
   const selected = await page.evaluate(
     ({ id, cliId }) => {
-      const store = (
-        window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-      ).__test?.getStore?.();
+      const store = (window as BrowserTestWindow).__test?.getStore?.();
       return store?.composerAgentByWorkspaceId?.[id] === cliId;
     },
     { id: workspaceId, cliId: cli },
@@ -420,11 +532,9 @@ async function ensureComposerAgent(
   if (!selected) {
     await page.evaluate(
       ({ id, cliId }) => {
-        const store = (
-          window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-        ).__test?.getStore?.();
+        const store = (window as BrowserTestWindow).__test?.getStore?.();
         if (!store) return;
-        store.setComposerAgent(id, cliId);
+        store.setComposerAgent?.(id, cliId);
       },
       { id: workspaceId, cliId: cli },
     );
@@ -436,13 +546,11 @@ async function ensureActiveTaskInStore(page: import("@playwright/test").Page, ta
     .poll(
       async () =>
         page.evaluate((id) => {
-          const store = (
-            window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-          ).__test?.getStore?.();
+          const store = (window as BrowserTestWindow).__test?.getStore?.();
           return (
             !!store?.tasksByWorkspaceId &&
-            Object.values(store.tasksByWorkspaceId).some((tasks: unknown[]) =>
-              (tasks ?? []).some((task: { id: string }) => task.id === id),
+            Object.values(store.tasksByWorkspaceId).some((tasks) =>
+              tasks.some((task) => task.id === id),
             )
           );
         }, taskId),
@@ -451,19 +559,15 @@ async function ensureActiveTaskInStore(page: import("@playwright/test").Page, ta
     .toBeTruthy();
 
   await page.evaluate((id) => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
-    store?.setActiveTask(id);
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
+    store?.setActiveTask?.(id);
   }, taskId);
 
   await expect
     .poll(
       async () =>
         page.evaluate((id) => {
-          const store = (
-            window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-          ).__test?.getStore?.();
+          const store = (window as BrowserTestWindow).__test?.getStore?.();
           return store?.activeTaskId === id;
         }, taskId),
       { timeout: 10_000 },
@@ -473,47 +577,30 @@ async function ensureActiveTaskInStore(page: import("@playwright/test").Page, ta
 
 async function getActiveTaskId(page: import("@playwright/test").Page): Promise<string | null> {
   return page.evaluate(() => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore();
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
     return store?.activeTaskId ?? null;
   });
 }
-
-type StoreSession = {
-  id: string;
-  kind: string;
-  taskRootId?: string;
-  taskId?: string;
-};
 
 async function listWorkspaceSessions(
   page: import("@playwright/test").Page,
   workspaceId: string,
 ): Promise<StoreSession[]> {
   return page.evaluate((id) => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
-    const sessions = (store?.sessionsByWorkspaceId?.[id] ?? []) as StoreSession[] | undefined;
-    return sessions ?? [];
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
+    return store?.sessionsByWorkspaceId?.[id] ?? [];
   }, workspaceId);
 }
 
 async function closeSessionTabInPage(page: import("@playwright/test").Page, sessionId: string) {
   await page.evaluate((sid) => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
     if (!store) return;
-    store.closeSessionTab(sid);
+    store.closeSessionTab?.(sid);
   }, sessionId);
 }
 
-async function openNewCliFromHeader(
-  page: import("@playwright/test").Page,
-  cliName: string,
-) {
+async function openNewCliFromHeader(page: import("@playwright/test").Page, cliName: string) {
   const addButton = page.getByRole("button", { name: "Add CLI" });
   if (await addButton.isVisible().catch(() => false)) {
     await addButton.click();
@@ -557,9 +644,7 @@ async function createAndFinishFirstPrompt(
 ) {
   await page.goto(`/org/${orgId}?workspace=${workspaceId}`);
   const debugState = await page.evaluate(() => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
     const endpoint = window.localStorage.getItem("agentik.global-agent.endpoint.v1");
     return {
       location: location.pathname + location.search,
@@ -570,10 +655,7 @@ async function createAndFinishFirstPrompt(
       workspaceIds: store?.workspaces?.map((workspace: { id: string }) => workspace.id) ?? [],
       activeTaskId: store?.activeTaskId ?? null,
       workspaceTasks: Object.fromEntries(
-        Object.entries(store?.tasksByWorkspaceId ?? {}).map(([id, tasks]: [string, unknown[]]) => [
-          id,
-          (tasks ?? []).length,
-        ]),
+        Object.entries(store?.tasksByWorkspaceId ?? {}).map(([id, tasks]) => [id, tasks.length]),
       ),
       endpoint,
     };
@@ -589,9 +671,7 @@ async function createAndFinishFirstPrompt(
   await page.getByTestId("chat-composer-input").fill(`seed prompt for ${scenario.cli} flow`);
   await page.getByRole("button", { name: "Send message" }).click();
   const debugWorkspaceSource = await page.evaluate(() => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
     const activeWorkspace = store?.workspaces?.find(
       (w: { id: string }) => w.id === store.activeWorkspaceId,
     );
@@ -602,16 +682,15 @@ async function createAndFinishFirstPrompt(
   });
   console.log("[task-continue source]", debugWorkspaceSource);
   const postSendState = await page.evaluate((id) => {
-    const store = (
-      window as unknown as { __test?: { getStore?: () => Record<string, unknown> } }
-    ).__test?.getStore?.();
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
     return {
       activeWorkspaceId: store?.activeWorkspaceId,
       activeTaskId: store?.activeTaskId,
       taskCountByWorkspace: Object.fromEntries(
-        Object.entries(store?.tasksByWorkspaceId ?? {}).map(
-          ([workspaceId, tasks]: [string, unknown[]]) => [workspaceId, tasks?.length ?? 0],
-        ),
+        Object.entries(store?.tasksByWorkspaceId ?? {}).map(([workspaceId, tasks]) => [
+          workspaceId,
+          tasks.length,
+        ]),
       ),
     };
   }, workspaceId);
@@ -632,7 +711,57 @@ async function sendFollowUpAndAwaitDone(
   await page.getByTestId("chat-composer-input").fill(prompt);
   await page.getByRole("button", { name: "Send message" }).click();
   await waitForTaskStatus(page, workspaceId, taskId, "done");
-  await expect(page.getByTestId("chat-composer-stop")).not.toBeVisible({ timeout: 2_000 });
+  await expect(page.getByTestId("chat-composer-stop")).not.toBeVisible({ timeout: 10_000 });
+}
+
+async function sendFollowUpFromComposer(page: import("@playwright/test").Page, prompt: string) {
+  await page.getByTestId("chat-composer-input").fill(prompt);
+  const sendButton = page.getByRole("button", { name: "Send message" });
+  await expect(sendButton).toBeEnabled({ timeout: 5_000 });
+  await sendButton.click();
+}
+
+async function waitForUserMessageInTaskLogs(
+  page: import("@playwright/test").Page,
+  taskId: string,
+  expectedText: string,
+  timeoutMs = 12_000,
+) {
+  await expect
+    .poll(
+      async () => {
+        const logs = await readTaskLogsSafe(page, taskId);
+        return logs.some((entry) => {
+          const data = entry.data as { type?: string; text?: string };
+          return data?.type === "user_message" && data?.text === expectedText;
+        });
+      },
+      { timeout: timeoutMs },
+    )
+    .toBe(true);
+}
+
+async function setActiveSessionInStoreById(
+  page: import("@playwright/test").Page,
+  sessionId: string,
+) {
+  await page.evaluate((id) => {
+    const store = (window as BrowserTestWindow).__test?.getStore?.();
+    const activeWorkspaceId = store?.activeWorkspaceId;
+    if (!activeWorkspaceId) return;
+    const sessions = store?.sessionsByWorkspaceId?.[activeWorkspaceId] ?? [];
+    if (!sessions.some((session) => session.id === id)) {
+      throw new Error(`session ${id} not found in active workspace`);
+    }
+    store?.setActiveSession?.(id);
+  }, sessionId);
+}
+
+async function createTaskViaComposer(page: import("@playwright/test").Page, prompt: string) {
+  await page.getByTestId("chat-composer-input").fill(prompt);
+  const sendButton = page.getByRole("button", { name: "Send message" });
+  await expect(sendButton).toBeEnabled({ timeout: 5_000 });
+  await sendButton.click();
 }
 
 test.beforeAll(async () => {
@@ -646,11 +775,16 @@ test.beforeAll(async () => {
   // and emit the rollout warning on stderr when `RUST_LOG` was not normalized.
   writeFileSync(
     join(fakeBinDir, "codex"),
-    buildFakeCliScript("11111111-1111-1111-1111-111111111111", true),
+    buildFakeCliScript("11111111-1111-1111-1111-111111111111", true, {
+      failResumeForPrompt: "queued codex stale resume follow-up",
+      staleResumeMessage: "thread {sessionId} not found",
+    }),
   );
   writeFileSync(
     join(fakeBinDir, "claude"),
-    buildFakeCliScript("22222222-2222-2222-2222-222222222222", false),
+    buildFakeCliScript("22222222-2222-2222-2222-222222222222", false, {
+      failResumeForPrompt: "stale resume follow-up",
+    }),
   );
   chmodSync(join(fakeBinDir, "codex"), 0o755);
   chmodSync(join(fakeBinDir, "claude"), 0o755);
@@ -676,11 +810,15 @@ test.beforeAll(async () => {
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH}` },
+      env: {
+        ...process.env,
+        TASK_RUN_MS: "5000",
+        PATH: `${fakeBinDir}:${process.env.PATH}`,
+      },
     },
   );
-  agentProcess.stderr.on("data", () => {});
-  agentProcess.stdout.on("data", () => {});
+  agentProcess.stderr?.on("data", () => {});
+  agentProcess.stdout?.on("data", () => {});
   await waitForAgent();
 
   client = new AgentRpcClient(AGENT_BASE_URL, AGENT_TOKEN);
@@ -768,10 +906,9 @@ test.describe("Task continuation — codex + claude regression", () => {
       const { taskId } = await createAndFinishFirstPrompt(page, scenario, orgId, workspaceId);
       await page.goto(`/org/${orgId}?workspace=${workspaceId}&task=${taskId}`);
       await setActiveWorkspaceInStore(page, workspaceId);
-      await ensureActiveTaskInStore(page, taskId);
+      await expect.poll(() => getActiveTaskId(page), { timeout: 20_000 }).toBe(taskId);
       await ensureComposerAgent(page, workspaceId, scenario.cli, scenario.welcomeButtonName);
-
-      await expect.poll(async () => getActiveTaskId(page)).toBe(taskId, { timeout: 10_000 });
+      await expect(page.getByRole("button", { name: "Toggle Plan Mode" })).toBeVisible();
       await page.getByRole("button", { name: "Toggle Plan Mode" }).click();
       await expect(
         page.evaluate((cli) => {
@@ -795,7 +932,45 @@ test.describe("Task continuation — codex + claude regression", () => {
     });
   }
 
-  test("closing cli sessions deletes them from persistence and keeps task logs on reopen", async ({ page }) => {
+  test("claude continuation retries once when the stored resume session is stale", async ({
+    page,
+  }) => {
+    const scenario = CLI_OPTIONS.find((entry) => entry.cli === "claude")!;
+    const { orgId, workspaceId } = await createTestOrgAndWorkspace();
+    const { taskId } = await createAndFinishFirstPrompt(page, scenario, orgId, workspaceId);
+
+    await sendFollowUpAndAwaitDone(page, workspaceId, taskId, "stale resume follow-up");
+
+    const logs = await readTaskLogsSafe(page, taskId);
+    const hasRetryDiagnostic = logs.some((entry) => {
+      const data = entry.data as { code?: string };
+      return data?.code === "cli_resume_missing_retry";
+    });
+    const leakedRecoverableStderr = logs.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return (
+        data?.type === "stderr" &&
+        typeof data.text === "string" &&
+        data.text.includes("No conversation found with session ID")
+      );
+    });
+    const hasRetriedAssistantReply = logs.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return (
+        data?.type === "assistant_message" &&
+        typeof data.text === "string" &&
+        data.text.includes("stale resume follow-up")
+      );
+    });
+
+    expect(hasRetryDiagnostic).toBe(true);
+    expect(leakedRecoverableStderr).toBe(false);
+    expect(hasRetriedAssistantReply).toBe(true);
+  });
+
+  test("closing cli sessions deletes them from persistence and keeps task logs on reopen", async ({
+    page,
+  }) => {
     const scenario = CLI_OPTIONS[0];
     const { orgId, workspaceId } = await createTestOrgAndWorkspace();
     const { taskId } = await createAndFinishFirstPrompt(page, scenario, orgId, workspaceId);
@@ -855,5 +1030,395 @@ test.describe("Task continuation — codex + claude regression", () => {
     await expect
       .poll(async () => readTurnCompletedFromStore(page, taskId), { timeout: 10_000 })
       .toBe(true);
+  });
+
+  test("multiple tasks queue and drain when max in-flight is reached", async ({ page }) => {
+    const { orgId, workspaceId } = await createTestOrgAndWorkspace();
+    await page.goto(`/org/${orgId}?workspace=${workspaceId}`);
+    await setActiveWorkspaceInStore(page, workspaceId);
+    await ensureComposerAgent(page, workspaceId, "codex", "Codex");
+
+    const created = await createTasksViaStore(page, workspaceId, [
+      { cli: "codex", prompt: "queue task A" },
+      { cli: "claude", prompt: "queue task B" },
+      { cli: "codex", prompt: "queue task C" },
+      { cli: "claude", prompt: "queue task D" },
+    ]);
+    expect(created).toHaveLength(4);
+
+    expect(created.some((task) => task.status === "queued")).toBe(true);
+
+    await expect
+      .poll(
+        async () => {
+          const rows = await client!.call<Array<{ id: string; status: string }>>("task.list", {
+            workspaceId,
+          });
+          const statuses = rows
+            .filter((row) => created.some((item) => item.id === row.id))
+            .map((row) => row.status);
+          if (statuses.length !== created.length) return false;
+          return statuses.every((status) => status === "done");
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+  });
+
+  test("continuation while running is queued then replayed", async ({ page }) => {
+    const { orgId, workspaceId } = await createTestOrgAndWorkspace();
+    await page.goto(`/org/${orgId}?workspace=${workspaceId}`);
+    await setActiveWorkspaceInStore(page, workspaceId);
+    await ensureComposerAgent(page, workspaceId, "codex", "Codex");
+
+    const created = await createTasksViaStore(page, workspaceId, [
+      {
+        cli: "codex",
+        prompt: "seed follow-up test",
+      },
+    ]);
+    const taskId = created[0]?.id;
+    expect(taskId).toBeDefined();
+
+    await waitForTaskStatus(page, workspaceId, taskId, "running");
+    const continueResult = await client!.call<{ status?: string }>("task.continue", {
+      taskId,
+      prompt: "queued follow-up",
+    });
+    expect(continueResult?.status).toBe("queued");
+
+    await waitForTaskStatus(page, workspaceId, taskId, "done", 30_000);
+    const logs = await readTaskLogsSafe(page, taskId);
+    const hasQueuedUserMessage = logs.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return data?.type === "user_message" && data?.text === "queued follow-up";
+    });
+    const hasQueuedAssistantReply = logs.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return data?.type === "assistant_message" && String(data?.text).includes("queued follow-up");
+    });
+    expect(hasQueuedUserMessage).toBe(true);
+    expect(hasQueuedAssistantReply).toBe(true);
+  });
+
+  test("claude -p receives image attachments as local files", async () => {
+    const { workspaceId } = await createTestOrgAndWorkspace();
+    const attachmentBytes = "fake image bytes for claude";
+    const created = await client!.call<{ id: string; sessionId: string }>("task.create", {
+      workspaceId,
+      title: "describe attached image",
+      prompt: "Describe the attached image",
+      cli: "claude",
+      attachments: [
+        {
+          name: "kevin-lk.png",
+          contentType: "image/png",
+          kind: "image",
+          data: Buffer.from(attachmentBytes).toString("base64"),
+        },
+      ],
+    });
+
+    await client!.call("task.start", { id: created.id });
+    await expect
+      .poll(
+        async () => {
+          const rows = await client!.call<Array<{ id: string; status: string }>>("task.list", {
+            workspaceId,
+          });
+          return rows.find((row) => row.id === created.id)?.status;
+        },
+        { timeout: 30_000 },
+      )
+      .toBe("done");
+
+    const logs = await readTaskLogs(created.id);
+    const transcript = logs.map((entry) => dataToText(entry.data)).join("\n");
+    const attachmentPath = transcript.match(/\/[^\s"]+\.multica\/attachments\/[^\s"]+/)?.[0];
+    expect(attachmentPath).toContain(join(".multica", "attachments", created.id));
+    expect(readFileSync(attachmentPath!, "utf8")).toBe(attachmentBytes);
+
+    expect(transcript).toContain("## Attachments");
+    expect(transcript).toContain(attachmentPath);
+  });
+
+  test("composer image attachment is forwarded into an existing claude thread", async ({
+    page,
+  }) => {
+    const { orgId, workspaceId } = await createTestOrgAndWorkspace();
+    await page.goto(`/org/${orgId}?workspace=${workspaceId}`);
+    await setActiveWorkspaceInStore(page, workspaceId);
+    await ensureComposerAgent(page, workspaceId, "claude", "Claude");
+
+    const created = await createTasksViaStore(page, workspaceId, [
+      {
+        cli: "claude",
+        prompt: "seed image follow-up thread",
+      },
+    ]);
+    const taskId = created[0]?.id;
+    expect(taskId).toBeDefined();
+    await waitForTaskStatus(page, workspaceId, taskId, "done", 30_000);
+    await ensureActiveTaskInStore(page, taskId);
+
+    const chooserPromise = page.waitForEvent("filechooser");
+    await page.getByLabel("Attach file or image").click();
+    const chooser = await chooserPromise;
+    const imageBytes = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+      "base64",
+    );
+    await chooser.setFiles([
+      {
+        name: "kevin-lk.png",
+        mimeType: "image/png",
+        buffer: imageBytes,
+      },
+    ]);
+
+    await expect(page.getByLabel("Image attachment")).toBeVisible();
+    await page.getByTestId("chat-composer-input").fill("homme ou femme sur la photo ?");
+    await page.getByRole("button", { name: "Send message" }).click();
+
+    await expect
+      .poll(
+        async () => {
+          const logs = await readTaskLogs(taskId);
+          const transcript = logs.map((entry) => dataToText(entry.data)).join("\n");
+          return transcript.includes(".multica/attachments") && transcript.includes("kevin-lk.png");
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+
+    const logs = await readTaskLogs(taskId);
+    const transcript = logs.map((entry) => dataToText(entry.data)).join("\n");
+    const attachmentPath = transcript.match(
+      /\/[^\s"]+\.multica\/attachments\/[^\s"]+kevin-lk\.png/,
+    )?.[0];
+
+    expect(attachmentPath).toContain(join(".multica", "attachments", taskId));
+    expect(readFileSync(attachmentPath!)).toEqual(imageBytes);
+
+    expect(transcript).toContain("## Attachments");
+    expect(transcript).toContain(attachmentPath);
+  });
+
+  test("queued claude -p continuation retries stale resume without leaking stderr", async ({
+    page,
+  }) => {
+    const { orgId, workspaceId } = await createTestOrgAndWorkspace();
+    await page.goto(`/org/${orgId}?workspace=${workspaceId}`);
+    await setActiveWorkspaceInStore(page, workspaceId);
+    await ensureComposerAgent(page, workspaceId, "claude", "Claude");
+
+    const created = await createTasksViaStore(page, workspaceId, [
+      {
+        cli: "claude",
+        prompt: "seed queued stale resume test",
+      },
+    ]);
+    const taskId = created[0]?.id;
+    expect(taskId).toBeDefined();
+
+    await waitForTaskStatus(page, workspaceId, taskId, "running");
+    const continueResult = await client!.call<{ status?: string }>("task.continue", {
+      taskId,
+      prompt: "queued stale resume follow-up",
+    });
+    expect(continueResult?.status).toBe("queued");
+
+    await waitForTaskStatus(page, workspaceId, taskId, "done", 30_000);
+    const logs = await readTaskLogsSafe(page, taskId);
+    const hasRetryDiagnostic = logs.some((entry) => {
+      const data = entry.data as { code?: string };
+      return data?.code === "cli_resume_missing_retry";
+    });
+    const leakedRecoverableStderr = logs.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return (
+        data?.type === "stderr" &&
+        typeof data.text === "string" &&
+        data.text.includes("No conversation found with session ID")
+      );
+    });
+    const hasQueuedAssistantReply = logs.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return (
+        data?.type === "assistant_message" &&
+        String(data?.text).includes("queued stale resume follow-up")
+      );
+    });
+
+    expect(hasRetryDiagnostic).toBe(true);
+    expect(leakedRecoverableStderr).toBe(false);
+    expect(hasQueuedAssistantReply).toBe(true);
+  });
+
+  test("queued codex continuation uses the generic stale resume retry strategy", async ({
+    page,
+  }) => {
+    const { orgId, workspaceId } = await createTestOrgAndWorkspace();
+    await page.goto(`/org/${orgId}?workspace=${workspaceId}`);
+    await setActiveWorkspaceInStore(page, workspaceId);
+    await ensureComposerAgent(page, workspaceId, "codex", "Codex");
+
+    const created = await createTasksViaStore(page, workspaceId, [
+      {
+        cli: "codex",
+        prompt: "seed queued codex stale resume test",
+      },
+    ]);
+    const taskId = created[0]?.id;
+    expect(taskId).toBeDefined();
+
+    await waitForTaskStatus(page, workspaceId, taskId, "running");
+    const continueResult = await client!.call<{ status?: string }>("task.continue", {
+      taskId,
+      prompt: "queued codex stale resume follow-up",
+    });
+    expect(continueResult?.status).toBe("queued");
+
+    await waitForTaskStatus(page, workspaceId, taskId, "done", 30_000);
+    const logs = await readTaskLogsSafe(page, taskId);
+    const hasRetryDiagnostic = logs.some((entry) => {
+      const data = entry.data as { code?: string };
+      return data?.code === "cli_resume_missing_retry";
+    });
+    const leakedRecoverableStderr = logs.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return (
+        data?.type === "stderr" &&
+        typeof data.text === "string" &&
+        data.text.includes("thread") &&
+        data.text.includes("not found")
+      );
+    });
+    const hasQueuedAssistantReply = logs.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return (
+        data?.type === "assistant_message" &&
+        String(data?.text).includes("queued codex stale resume follow-up")
+      );
+    });
+
+    expect(hasRetryDiagnostic).toBe(true);
+    expect(leakedRecoverableStderr).toBe(false);
+    expect(hasQueuedAssistantReply).toBe(true);
+  });
+
+  test("UI can queue follow-up on running task with mixed CLIs", async ({ page }) => {
+    const { orgId, workspaceId } = await createTestOrgAndWorkspace();
+    await page.goto(`/org/${orgId}?workspace=${workspaceId}`);
+    await setActiveWorkspaceInStore(page, workspaceId);
+
+    const created = await createTasksViaStore(page, workspaceId, [
+      { cli: "codex", prompt: "ui mixed cli task A" },
+      { cli: "claude", prompt: "ui mixed cli task B" },
+    ]);
+    expect(created).toHaveLength(2);
+
+    const taskA = created[0];
+    const taskB = created[1];
+    expect(taskA?.id).toBeTruthy();
+    expect(taskB?.id).toBeTruthy();
+
+    await waitForTaskStatus(page, workspaceId, taskA.id, "running");
+    await waitForTaskStatus(page, workspaceId, taskB.id, "running");
+
+    await ensureActiveTaskInStore(page, taskA.id);
+    await page.getByRole("button", { name: "Send message" }).waitFor({ timeout: 10_000 });
+    await sendFollowUpFromComposer(page, "queued follow-up on task A");
+    await waitForTaskStatus(page, workspaceId, taskA.id, "queued");
+
+    await ensureActiveTaskInStore(page, taskB.id);
+    await sendFollowUpFromComposer(page, "queued follow-up on task B");
+    await waitForTaskStatus(page, workspaceId, taskB.id, "queued");
+
+    await waitForTaskStatus(page, workspaceId, taskA.id, "done", 30_000);
+    await waitForTaskStatus(page, workspaceId, taskB.id, "done", 30_000);
+
+    const logsA = await readTaskLogsSafe(page, taskA.id);
+    const logsB = await readTaskLogsSafe(page, taskB.id);
+    const followA = logsA.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return data?.type === "user_message" && data?.text === "queued follow-up on task A";
+    });
+    const followB = logsB.some((entry) => {
+      const data = entry.data as { type?: string; text?: string };
+      return data?.type === "user_message" && data?.text === "queued follow-up on task B";
+    });
+    expect(followA).toBe(true);
+    expect(followB).toBe(true);
+  });
+
+  test("UI composer can run mixed CLIs in parallel and queue follow-ups after tab switch", async ({
+    page,
+  }) => {
+    const { orgId, workspaceId } = await createTestOrgAndWorkspace();
+    await page.goto(`/org/${orgId}?workspace=${workspaceId}`);
+    await setActiveWorkspaceInStore(page, workspaceId);
+
+    await ensureComposerAgent(page, workspaceId, "codex", "Codex");
+    await createTaskViaComposer(page, "parallel codex first task");
+    const codexTask = await waitForActiveTask(page);
+    await waitForTaskStatus(page, workspaceId, codexTask, "running");
+
+    await openNewCliFromHeader(page, "Claude");
+    const sessions = await listWorkspaceSessions(page, workspaceId);
+    const claudeSessionId = sessions.find((session) => session.id.includes("claude"))?.id;
+    if (!claudeSessionId) {
+      throw new Error("Claude session tab was not created");
+    }
+    await setActiveSessionInStoreById(page, claudeSessionId);
+    await page.waitForTimeout(200);
+    await createTaskViaComposer(page, "parallel claude second task");
+    const claudeTask = await waitForActiveTask(page);
+    await waitForTaskStatus(page, workspaceId, claudeTask, "running");
+
+    const sessionsAfterCreate = await listWorkspaceSessions(page, workspaceId);
+    const codexSessionId = sessionsAfterCreate.find(
+      (session) => session.id !== claudeSessionId && session.taskRootId === codexTask,
+    )?.id;
+    if (!codexSessionId) {
+      throw new Error("Codex task session not found");
+    }
+
+    const claudeTaskSessionId = sessionsAfterCreate.find(
+      (session) => session.taskRootId === claudeTask || session.taskId === claudeTask,
+    )?.id;
+    if (!claudeTaskSessionId) {
+      throw new Error("Claude task session not found");
+    }
+
+    await setActiveSessionInStoreById(page, codexSessionId);
+    await sendFollowUpFromComposer(page, "first queue point on codex");
+    await waitForUserMessageInTaskLogs(page, codexTask, "first queue point on codex");
+
+    await setActiveSessionInStoreById(page, claudeTaskSessionId);
+    await sendFollowUpFromComposer(page, "first queue point on claude");
+    await waitForUserMessageInTaskLogs(page, claudeTask, "first queue point on claude");
+
+    await waitForTaskStatus(page, workspaceId, codexTask, "done", 30_000);
+    await waitForTaskStatus(page, workspaceId, claudeTask, "done", 30_000);
+
+    const codexLogs = await readTaskLogsSafe(page, codexTask);
+    const claudeLogs = await readTaskLogsSafe(page, claudeTask);
+    expect(
+      codexLogs.some(
+        (entry) =>
+          entry.data &&
+          "type" in (entry.data as Record<string, unknown>) &&
+          (entry.data as Record<string, unknown>).type === "user_message",
+      ),
+    ).toBe(true);
+    expect(
+      claudeLogs.some(
+        (entry) =>
+          entry.data &&
+          "type" in (entry.data as Record<string, unknown>) &&
+          (entry.data as Record<string, unknown>).type === "user_message",
+      ),
+    ).toBe(true);
   });
 });

@@ -26,8 +26,8 @@ function OrgSettingsLink() {
   if (!org) return null;
   return (
     <Link
-      to="/org/$id/settings"
-      params={{ id: org.id }}
+      to="/settings"
+      search={{ section: "organization" }}
       className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
       title={`${org.name} settings`}
     >
@@ -119,12 +119,13 @@ export function Sidebar() {
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
   const activeBranch = currentBranches.find((b) => b.id === activeBranchId);
   const defaultOpen = ["sessions", "branches", "worktrees", "workspace-tasks"];
+  const isRemoteAgent = activeWorkspace?.source.kind === "remote-agent";
 
   return (
     <aside className="flex h-full w-full min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-sidebar shadow-sm">
       <div className="flex items-center justify-between px-3 pt-3 pb-2">
         <span className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
-          GIT STATE
+          {isRemoteAgent ? "AGENT STATE" : "GIT STATE"}
         </span>
         <span className="truncate rounded bg-accent/50 px-1.5 py-0.5 font-mono text-[10px] text-foreground">
           {activeWorkspace?.name ?? "—"} project
@@ -133,7 +134,7 @@ export function Sidebar() {
 
       <div className="flex-1 overflow-y-auto">
         <Accordion type="multiple" defaultValue={defaultOpen} className="flex flex-col gap-0">
-          {activeWorkspace?.source.kind === "remote-agent" ? (
+          {isRemoteAgent ? (
             <WorkspaceTasksSection />
           ) : (
             <>

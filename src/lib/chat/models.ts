@@ -72,7 +72,7 @@ export const CLAUDE_MODELS: readonly ClaudeModel[] = [
   { id: "claude-haiku-4-5", label: "Haiku 4.5", description: "Fast & cheap · 200K · no effort" },
 ] as const;
 
-export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6";
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-7";
 
 export function claudeExtraArgs(model: string | undefined): string[] | undefined {
   return model ? ["--model", model] : undefined;
